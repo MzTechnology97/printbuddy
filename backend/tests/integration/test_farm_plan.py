@@ -33,8 +33,19 @@ async def farm(async_client, db_session, monkeypatch):
     """Shape 'Sopra' in black, plates on A1 (15 pcs), P1S (20 pcs) and K1 (10 pcs); Seller Hub answering."""
     shape = (await async_client.post(f"{API}/shapes", json={"name": "Sopra"})).json()
     black = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Nero"})).json()
+    white = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Bianco"})).json()
     r = await async_client.post(
         f"{API}/products", json={"name": "Tappo – Nero", "parts": [{"component_code": black["code"], "quantity": 2}]}
+    )
+    assert r.status_code == 200, r.text
+    # Another product sold in white too: a colour variant of its black part.
+    r = await async_client.post(
+        f"{API}/products",
+        json={
+            "name": "Kit tappi",
+            "parts": [{"component_code": black["code"], "quantity": 4}],
+            "variants": [{"skus": ["KIT-W"], "color": "Bianco"}],
+        },
     )
     assert r.status_code == 200, r.text
     for index, (model, pieces) in enumerate([("A1", 15), ("P1S", 20), ("K1", 10)], start=1):
@@ -48,6 +59,7 @@ async def farm(async_client, db_session, monkeypatch):
     plan = {
         "components": [
             component(black["code"], "Sopra – Nero", "urgente", 30, 2.0),
+            component(white["code"], "Sopra – Bianco", "da_stampare", 4, 9.0),
             component("C-0900", "Sconosciuto", "esaurito", 2, 0.0),
             component("C-0901", "Basta", "ok", 0, None),
         ]
@@ -61,19 +73,20 @@ async def farm(async_client, db_session, monkeypatch):
     monkeypatch.setattr(service, "printer_snapshot", lambda printers: PRINTERS)
     r = await async_client.put(f"{API}/plan/settings", json={"url": "http://hub.test:8000/"})
     assert r.status_code == 200, r.text
-    return {"black": black["code"]}
+    return {"black": black["code"], "white": white["code"]}
 
 
 @pytest.mark.asyncio
 async def test_most_urgent_first_and_best_plate_first(async_client, farm):
     body = (await async_client.get(f"{API}/plan")).json()
     assert body["error"] is None
-    assert [c["code"] for c in body["components"]] == ["C-0900", farm["black"]]  # to_print 0 left out
+    assert [c["code"] for c in body["components"]] == ["C-0900", farm["black"], farm["white"]]  # to_print 0 left out
 
-    unknown, black = body["components"]
+    unknown, black, white = body["components"]
     assert (unknown["known"], unknown["plates"]) == (False, [])
     assert (black["color"], black["color_hex"], black["shape"], black["missing"]) == ("Nero", "111111", "Sopra", 30)
-    assert [(p["name"], p["has_cover"]) for p in black["products"]] == [("Tappo – Nero", False)]
+    assert [(p["name"], p["has_cover"]) for p in black["products"]] == [("Kit tappi", False), ("Tappo – Nero", False)]
+    assert [p["name"] for p in white["products"]] == ["Kit tappi"]  # through the white variant
     assert unknown["products"] == []
     # A1 has a free printer with black PLA; P1S is free but white; K1 can't tell what it has loaded.
     assert [(o["printer_model"], o["score"], o["yield"]) for o in black["plates"]] == [

@@ -23,7 +23,7 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.products.models import FarmComponent, FarmProductPart, FarmShape
+from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.printer import Printer
 from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
@@ -227,15 +227,22 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
         ).all()
     )
     shape_names = dict((await db.execute(select(FarmShape.id, FarmShape.name))).all())
-    # The products (variants) using each component: their cover shows the piece in its colour.
+    # The products using each component, colour variants included (a variant takes the component of each
+    # shaped part in its colour): their names and covers help tell the piece apart from its title.
+    by_shape = {(c.shape_id, (c.color or "").lower()): c.id for c in ours.values() if c.shape_id}
     used_in: dict[int, list[dict]] = {}
-    for component_id, project_id, name, cover in await db.execute(
-        select(FarmProductPart.component_id, Project.id, Project.name, Project.cover_image_filename)
-        .join(Project, Project.id == FarmProductPart.project_id)
-        .where(FarmProductPart.component_id.in_([c.id for c in ours.values()]))
+    for product, name, cover, component_id, shape_id in await db.execute(
+        select(FarmProduct, Project.name, Project.cover_image_filename, FarmComponent.id, FarmComponent.shape_id)
+        .join(FarmProductPart, FarmProductPart.project_id == FarmProduct.project_id)
+        .join(FarmComponent, FarmComponent.id == FarmProductPart.component_id)
+        .join(Project, Project.id == FarmProduct.project_id)
         .order_by(Project.cover_image_filename.is_(None), Project.name)
     ):
-        used_in.setdefault(component_id, []).append({"project_id": project_id, "name": name, "has_cover": bool(cover)})
+        entry = {"project_id": product.project_id, "name": name, "has_cover": bool(cover)}
+        variants = {by_shape.get((shape_id, (v.get("color") or "").lower())) for v in product.variants or []}
+        for target in ({component_id} | (variants if shape_id else set())) - {None}:
+            if entry not in used_in.setdefault(target, []):
+                used_in[target].append(entry)
     resolver = await PrinterModelResolver.load(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
     printers = await with_spools_set_by_hand(db, printer_snapshot(active))
