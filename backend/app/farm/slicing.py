@@ -21,6 +21,7 @@ from backend.app.api.routes.settings import get_setting
 from backend.app.core.config import settings as app_settings
 from backend.app.farm.detect import SLICEABLE, SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.nas import library as nas_library
 from backend.app.farm.nas.cache import ensure_local
 from backend.app.models.library import LibraryFile
 from backend.app.schemas.slicer import SliceResponse
@@ -96,8 +97,16 @@ async def slice_embedded(
         await service.close()
 
     base_name = lib_file.filename.removesuffix(".3mf")
-    out_path = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
-    out_path.write_bytes(result.content)
+    # NAS project: the output goes on the NAS next to it, the local file is only its cache copy.
+    try:
+        saved = await nas_library.save_sliced(db, lib_file, f"{base_name}.gcode.3mf", result.content)
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot save the sliced file on the NAS: {exc}"[:500]) from exc
+    if saved is not None:
+        out_path = saved.path
+    else:
+        out_path = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
+        out_path.write_bytes(result.content)
 
     thumbnail = None
     parsed: dict = {}
@@ -128,9 +137,10 @@ async def slice_embedded(
         }
     )
     new_file = LibraryFile(
-        folder_id=lib_file.folder_id,
-        filename=f"{base_name}.gcode.3mf",
-        file_path=lib.to_relative_path(out_path),
+        folder_id=saved.folder_id if saved else lib_file.folder_id,
+        is_external=saved is not None,
+        filename=saved.filename if saved else f"{base_name}.gcode.3mf",
+        file_path=str(out_path) if saved else lib.to_relative_path(out_path),
         file_type="gcode",
         file_size=len(result.content),
         file_hash=hashlib.sha256(result.content).hexdigest(),
@@ -139,6 +149,9 @@ async def slice_embedded(
         source_type="sliced",
     )
     db.add(new_file)
+    if saved is not None:
+        await db.flush()
+        await nas_library.track_sliced(db, new_file, saved, result.content)
     await db.commit()
     return SliceResponse(
         library_file_id=new_file.id,

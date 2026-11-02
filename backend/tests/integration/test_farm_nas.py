@@ -58,6 +58,18 @@ class FakeRemote:
     def copy_to(self, parts, dest):
         self.read(parts, lambda src: shutil.copyfileobj(src, dest))
 
+    def makedirs(self, parts):
+        self._path("mkdir", parts).mkdir(parents=True, exist_ok=True)
+
+    def write(self, parts, data):
+        self._path("write", parts).write_bytes(data)
+
+    def rename(self, src, dst):
+        target = self._path("rename", dst)
+        if target.exists():
+            raise FileExistsError(target.name)  # like SMB: never replaces
+        self._path("rename", src).rename(target)
+
     def close(self):
         pass
 
@@ -282,6 +294,50 @@ class TestNasCache:
         assert (
             await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.watch_folder_id == 999_999)) is None
         )
+
+
+@pytest.mark.integration
+class TestNasSlicing:
+    async def test_output_is_written_next_to_the_project_without_replacing(
+        self, async_client, db_session, share, tmp_path, monkeypatch
+    ):
+        from backend.app.farm.slicing import slice_embedded
+        from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+        output = make_3mf(tmp_path / "out.gcode.3mf", BAMBU, body="<!-- sliced -->").read_bytes()
+
+        async def fake_slice(self, **kwargs):
+            return SliceResult(content=output, print_time_seconds=60, filament_used_g=1.0, filament_used_mm=10.0)
+
+        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+        await configure(async_client)
+        await sync(async_client)
+        box_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
+        # A file with the same name is already there: it must be kept as it is.
+        out_dir = share / SUB / "Box" / "Printbuddy"
+        theirs = make_3mf(out_dir / "box.gcode.3mf", BAMBU, body="<!-- user copy -->").read_bytes()
+
+        lib_file = await db_session.get(LibraryFile, box_id)
+        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == box_id))
+        response = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1)
+
+        assert (out_dir / "box (2).gcode.3mf").read_bytes() == output
+        assert (out_dir / "box.gcode.3mf").read_bytes() == theirs
+        assert sorted(p.name for p in out_dir.iterdir()) == ["box (2).gcode.3mf", "box.gcode.3mf"]  # no temp left
+        assert not any(op == "write" and parts[-1] == "box.gcode.3mf" for op, parts in FakeRemote.calls)
+        out = await db_session.get(LibraryFile, response.library_file_id)
+        assert (out.filename, out.is_external) == ("box (2).gcode.3mf", True)
+        assert out.file_metadata["sliced_from_library_file_id"] == box_id
+        assert Path(out.file_path).read_bytes() == output  # the local file is the cache copy
+
+        # The next scan sees the output as already known (only the user's file is new).
+        result = await sync(async_client)
+        assert (result["added"], result["updated"], result["relinked"]) == (1, 0, 0)
+
+        # Evicted from the cache: fetched back from the NAS, never sliced again.
+        os.remove(out.file_path)
+        assert await cache.ensure_local(db_session, out)
+        assert Path(out.file_path).read_bytes() == output
 
 
 def test_lru_eviction_keeps_recent_files(tmp_path):

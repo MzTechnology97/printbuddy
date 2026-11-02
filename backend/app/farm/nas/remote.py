@@ -1,7 +1,8 @@
 """Read-only access to the NAS share: path rules and the SMB implementation.
 
 Security rules, enforced here and nowhere else:
-- nothing on the NAS is ever deleted;
+- nothing on the NAS is ever deleted or replaced: the only writes are new files
+  (slicing outputs), written under a temporary dot name and renamed without overwrite;
 - paths are lists of plain names: no separators, no ``.``/``..``, so nothing can
   climb out of the folder a caller is scoped to;
 - the share root may hold credential files: callers list its *directories* only
@@ -62,6 +63,9 @@ class Remote(Protocol):
     def scandir(self, parts: tuple[str, ...]) -> list[RemoteEntry]: ...
     def read(self, parts: tuple[str, ...], fn: Callable[[BinaryIO], T]) -> T: ...
     def copy_to(self, parts: tuple[str, ...], dest: BinaryIO) -> None: ...
+    def makedirs(self, parts: tuple[str, ...]) -> None: ...
+    def write(self, parts: tuple[str, ...], data: bytes) -> None: ...
+    def rename(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None: ...
     def close(self) -> None: ...
 
 
@@ -148,6 +152,30 @@ class SmbRemote:
 
     def copy_to(self, parts: tuple[str, ...], dest: BinaryIO) -> None:
         self.read(parts, lambda src: shutil.copyfileobj(src, dest, 1024 * 1024))
+
+    def makedirs(self, parts: tuple[str, ...]) -> None:
+        import smbclient
+
+        with self._lock, self._connection_errors():
+            smbclient.makedirs(self._unc(parts), exist_ok=True, **self._kwargs)
+
+    def write(self, parts: tuple[str, ...], data: bytes) -> None:
+        """Create or overwrite ``parts``: callers only ever write their own temporary (dot) file."""
+        import smbclient
+
+        with (
+            self._lock,
+            self._connection_errors(),
+            smbclient.open_file(self._unc(parts), mode="wb", **self._kwargs) as dst,
+        ):
+            dst.write(data)
+
+    def rename(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None:
+        """Fails if ``dst`` exists: nothing on the NAS is ever replaced."""
+        import smbclient
+
+        with self._lock, self._connection_errors():
+            smbclient.rename(self._unc(src), self._unc(dst), **self._kwargs)
 
     def close(self) -> None:
         import smbclient
