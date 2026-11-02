@@ -73,6 +73,45 @@ export interface FarmLibraryFileState {
   printer_model: string | null;
 }
 
+export interface FarmPlanPlate {
+  plate_id: number;
+  library_file_id: number;
+  file: string;
+  plate: number;
+  printer_model: string;
+  material: string;
+  yield: number;
+  print_time_seconds: number | null;
+  filament_grams: number | null;
+  sliced: boolean;
+  score: number;
+  printers: { id: number; name: string; idle: boolean; material_ok: boolean | null; color_ok: boolean | null }[];
+}
+
+export interface FarmPlanComponent {
+  code: string;
+  name: string;
+  status: string;
+  to_print: number | null;
+  stock: number | null;
+  need: number | null;
+  days_left: number | null;
+  color: string | null;
+  color_hex: string | null;
+  shape: string | null;
+  shape_id: number | null;
+  known: boolean;
+  in_queue: number;
+  missing: number;
+  plates: FarmPlanPlate[];
+}
+
+export interface FarmPlanSettings {
+  url: string;
+  tolerance: number;
+  colors: Record<string, string>;
+}
+
 export interface FarmShape {
   id: number;
   name: string;
@@ -123,6 +162,13 @@ export const farmApi = {
   updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
     farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  getPlan: () =>
+    farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
+      '/plan',
+    ),
+  getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
+  savePlanSettings: (data: FarmPlanSettings) =>
+    farmRequest<FarmPlanSettings>('/plan/settings', { method: 'PUT', body: JSON.stringify(data) }),
   getProjectNames: () => farmRequest<{ id: number; name: string }[]>('/projects'),
   renameShape: (id: number, name: string) =>
     farmRequest<FarmShape>(`/shapes/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
