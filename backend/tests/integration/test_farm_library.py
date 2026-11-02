@@ -225,6 +225,14 @@ class TestWatchedFolderSync:
         assert (await scan(async_client, watched))["added"] == 1
         assert (await files_by_name(async_client))["broken.3mf"]["status"] == "ok"
 
+    async def test_symlink_escaping_the_share_is_ignored(self, async_client, watched, nas, tmp_path):
+        outside = make_3mf(tmp_path / "outside" / "secret.3mf", BAMBU)
+        (nas / "link.3mf").symlink_to(outside)
+        (nas / "inside.3mf").symlink_to(nas / "Box" / "box.3mf")
+        await scan(async_client, watched)
+        names = await files_by_name(async_client)
+        assert "inside.3mf" in names and "link.3mf" not in names
+
     async def test_read_error_skips_file_without_aborting(self, async_client, watched, monkeypatch):
         real_analyze = library_sync._analyze
 

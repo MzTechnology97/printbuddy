@@ -24,6 +24,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISLNK
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,8 +93,11 @@ def _walk(root: Path, show_hidden: bool) -> tuple[list[_DiskEntry], set[str]]:
             if file_type is None:
                 continue
             try:
-                filepath.resolve().relative_to(real_root)  # symlink must stay inside the share
-                stat = filepath.stat()
+                # One lstat per file: resolve() costs a round trip per path segment on SMB.
+                stat = filepath.lstat()
+                if S_ISLNK(stat.st_mode):
+                    filepath.resolve().relative_to(real_root)  # symlink must stay inside the share
+                    stat = filepath.stat()
             except (ValueError, OSError):
                 continue
             entries.append(_DiskEntry(str(filepath), rel_dir, filename, file_type, stat.st_mtime, stat.st_size))
