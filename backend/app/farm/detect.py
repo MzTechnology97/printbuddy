@@ -61,6 +61,18 @@ def _read_header_metadata(zf: zipfile.ZipFile) -> dict[str, str]:
     }
 
 
+def read_project_settings(fh) -> dict:
+    """``Metadata/project_settings.config`` as a dict ({} when the 3MF has none, e.g. CAD exports)."""
+    with zipfile.ZipFile(fh) as zf:
+        if PROJECT_SETTINGS_ENTRY not in zf.namelist():
+            return {}
+        try:
+            cfg = json.loads(zf.read(PROJECT_SETTINGS_ENTRY).decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def detect_slicer(metadata: dict[str, str]) -> str:
     """Which slicer saved the project. Rule verified on the farm's NAS files.
 
