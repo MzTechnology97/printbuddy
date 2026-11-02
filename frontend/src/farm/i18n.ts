@@ -4,6 +4,22 @@ import i18n from '../i18n';
 
 const en = {
   nav: { products: 'Products' },
+  components: {
+    search: 'Search shape, colour, code or product…',
+    filter: 'Filter',
+    all: 'All',
+    noPlate: 'Without a plate',
+    unused: 'Not used in any product',
+    showRetired: 'Show retired ({{count}})',
+    summary: '{{shapes}} shapes · {{components}} active components',
+    noShape: 'Without a shape',
+    noPlateYet: 'no confirmed plate',
+    notUsed: 'not used in any product',
+    retired: 'retired',
+    retireConfirm: 'Retire {{code}} ({{name}})? The code is never reused and it leaves the parts picker.',
+    newColor: 'New colour',
+    addColor: 'Add colour',
+  },
   folders: {
     description: 'Link "{{name}}" to one or more projects and products. Several products (e.g. colour variants) can share the folder.',
     projects: 'Projects and products',
@@ -64,6 +80,22 @@ const en = {
 
 const it: typeof en = {
   nav: { products: 'Prodotti' },
+  components: {
+    search: 'Cerca forma, colore, codice o prodotto…',
+    filter: 'Filtro',
+    all: 'Tutti',
+    noPlate: 'Senza piatto',
+    unused: 'Non usati in nessun prodotto',
+    showRetired: 'Mostra ritirati ({{count}})',
+    summary: '{{shapes}} forme · {{components}} componenti attivi',
+    noShape: 'Senza forma',
+    noPlateYet: 'nessun piatto confermato',
+    notUsed: 'non usato in nessun prodotto',
+    retired: 'ritirato',
+    retireConfirm: 'Ritirare {{code}} ({{name}})? Il codice non viene mai riusato e non compare più fra le parti.',
+    newColor: 'Nuovo colore',
+    addColor: 'Aggiungi colore',
+  },
   folders: {
     description: 'Collega "{{name}}" a uno o più progetti e prodotti. Più prodotti (per esempio varianti di colore) possono usare la stessa cartella.',
     projects: 'Progetti e prodotti',
