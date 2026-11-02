@@ -341,6 +341,90 @@ def test_moonraker_controls_part_cooling_fan_with_m106(monkeypatch):
     assert sent == ["M106 S128"]
 
 
+@pytest.mark.parametrize(
+    ("objects", "expected"),
+    [
+        # Light objects reported by real K2 OpenHost, K1, SV08 and Zero configs.
+        (["output_pin LED", "output_pin axis_twist_compensation", "fan"], "output_pin LED"),
+        (
+            ["led chamber_led", "led nozzle_light", "neopixel bed_lights", "output_pin chamber_heater"],
+            "led chamber_led",
+        ),
+        (["neopixel my_ebb_leds", "output_pin chamber_led"], "output_pin chamber_led"),
+        (["led main_led", "output_pin nozzle_led", "neopixel chamber_led"], "led main_led"),
+        (["output_pin beeper", "fan"], None),
+    ],
+)
+def test_moonraker_picks_main_light(objects, expected):
+    from backend.app.services.printer_providers.moonraker import _moonraker_light_object
+
+    assert _moonraker_light_object(objects) == expected
+
+
+@pytest.mark.parametrize(
+    ("objects", "on", "script"),
+    [
+        (["output_pin LED"], True, "SET_PIN PIN=LED VALUE=1"),
+        (["led chamber_led"], False, "SET_LED LED=chamber_led RED=0 GREEN=0 BLUE=0 WHITE=0"),
+    ],
+)
+def test_moonraker_controls_chamber_light(monkeypatch, objects, on, script):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Generic Klipper Printer")
+    sent: list[str] = []
+    monkeypatch.setattr(client, "_available_objects", lambda: objects)
+    monkeypatch.setattr(client, "send_gcode", lambda s: sent.append(s) or True)
+
+    assert client.set_chamber_light(on) is True
+    assert sent == [script]
+    assert client.state.chamber_light is on
+
+
+def test_moonraker_chamber_light_without_light_object_fails(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Generic Klipper Printer")
+    monkeypatch.setattr(client, "_available_objects", lambda: ["fan"])
+    monkeypatch.setattr(client, "send_gcode", lambda s: pytest.fail(f"unexpected gcode {s}"))
+
+    assert client.set_chamber_light(True) is False
+
+
+def test_moonraker_sets_print_speed_with_m220(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Generic Klipper Printer")
+    sent: list[str] = []
+    monkeypatch.setattr(client, "send_gcode", lambda s: sent.append(s) or True)
+
+    assert client.set_print_speed(3) is True
+    assert client.set_print_speed(9) is False
+    assert sent == ["M220 S124"]
+    assert client.state.speed_level == 3
+
+
+def test_moonraker_status_poll_reads_light_and_speed(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Generic Klipper Printer")
+    base_status = {
+        "print_stats": {"state": "printing", "filename": "part.gcode"},
+        "virtual_sdcard": {"progress": 0.5},
+        "gcode_move": {"speed_factor": 1.66},
+    }
+    light_status = {"led chamber_led": {"color_data": [[0.0, 0.0, 0.0, 0.25]]}}
+    monkeypatch.setattr(
+        client,
+        "_query_objects",
+        lambda names: light_status if names == ["led chamber_led"] else dict(base_status),
+    )
+    monkeypatch.setattr(client, "_available_objects", lambda: ["led chamber_led", "led nozzle_light"])
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+
+    assert client.request_status_update() is True
+    assert client.state.chamber_light is True
+    assert client.state.speed_level == 4
+
+    light_status["led chamber_led"] = {"color_data": [[0.0, 0.0, 0.0, 0.0]]}
+    client.request_status_update()
+    assert client.state.chamber_light is False
+
+
 def test_moonraker_complete_state_clamps_progress_and_remaining_time(monkeypatch):
     client = MoonrakerPrinterClient("http://k2-plus.local:7125", printer_model="Creality K2 Plus")
     status = _moonraker_status_with_cfs("None")

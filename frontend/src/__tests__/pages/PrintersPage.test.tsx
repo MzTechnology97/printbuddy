@@ -1406,6 +1406,32 @@ describe('PrintersPage', () => {
       expect(screen.queryByTitle('Manage plate detection calibration')).toBeNull();
     });
 
+    it('toggles the light on Klipper printers', async () => {
+      const user = userEvent.setup();
+      const lightRequests: string[] = [];
+      server.use(
+        http.get('/api/v1/printers/', () => HttpResponse.json([{ ...mockPrinters[0], name: 'K1', provider: 'klipper', model: 'Creality K1' }])),
+        http.get('/api/v1/printers/:id/status', () => HttpResponse.json({
+          ...mockPrinterStatus,
+          connected: true,
+          chamber_light: false,
+        })),
+        http.post('/api/v1/printers/:id/chamber-light', ({ request }) => {
+          lightRequests.push(new URL(request.url).search);
+          return HttpResponse.json({ success: true, message: 'Chamber light on' });
+        }),
+      );
+
+      render(<PrintersPage />);
+
+      await screen.findByText('K1');
+      await user.click(await screen.findByTitle('Turn on chamber light'));
+
+      await waitFor(() => {
+        expect(lightRequests).toContain('?on=true');
+      });
+    });
+
     it('shows manual controls for Creality K2 Plus Fluidd printers', async () => {
       server.use(
         http.get('/api/v1/printers/', () => HttpResponse.json([{

@@ -4310,7 +4310,8 @@ function PrinterCard({
                         );
                       })}
 
-                      {isElegooSDCPProvider && (
+                      {/* shortcut: shown for every Moonraker printer; the API answers 500 if it has no light object */}
+                      {(isElegooSDCPProvider || isMoonrakerProvider) && (
                         <button
                           type="button"
                           onClick={() => chamberLightMutation.mutate(!status.chamber_light)}
@@ -4327,7 +4328,7 @@ function PrinterCard({
                         </button>
                       )}
 
-                      {(fanItems.length > 0 || isElegooSDCPProvider) && <div className="w-px h-5 bg-bambu-gray/30" />}
+                      {(fanItems.length > 0 || isElegooSDCPProvider || isMoonrakerProvider) && <div className="w-px h-5 bg-bambu-gray/30" />}
 
                       {/* Airduct Mode (P2S / X2D / H2*) */}
                       {(['P2S', 'X2D', 'H2D', 'H2C', 'H2S'].includes(printer.model ?? '')) && (() => {
