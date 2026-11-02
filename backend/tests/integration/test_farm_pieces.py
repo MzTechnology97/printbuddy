@@ -1,0 +1,140 @@
+"""Printfarm (fork): pieces recognised by geometry across plates, whatever the objects are called.
+
+All meshes are generated here (boxes and an irregular tetrahedron); none come from a real farm.
+"""
+
+import json
+import zipfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from backend.app.api.routes import library
+from backend.app.farm.plates.geometry import fingerprint, group, same_piece
+from backend.app.farm.plates.service import parse_plates
+from backend.tests.integration.test_farm_library import BAMBU, add_external, age, scan
+
+API = "/api/v1/farm"
+ROTATE_Z = "0 1 0 -1 0 0 0 0 1 40 15 0"  # 90° around z, moved: same piece
+
+
+def box(dx: float, dy: float, dz: float):
+    V = np.array([[x, y, z] for x in (0, dx) for y in (0, dy) for z in (0, dz)], dtype=float)
+    F = np.array(
+        [[0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4],
+         [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5]]
+    )
+    return V, F
+
+
+def tetra(mirror: bool = False):
+    V = np.array([[0, 0, 0], [4, 0, 0], [0, 2, 0], [1, 1, 3]], dtype=float)
+    F = np.array([[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]])
+    if mirror:
+        V, F = V * [-1, 1, 1], F[:, ::-1]
+    return V, F
+
+
+def make_mesh_project(path: Path, plates: dict[int, list[tuple[str, tuple, str | None]]]) -> Path:
+    """Plates of ``(object name, (V, F), build transform)``; each instance is its own object, as slicers save."""
+    objects, items, settings, plate_xml, oid = [], [], [], [], 0
+    for index, entries in plates.items():
+        instances = []
+        for name, (V, F), transform in entries:
+            oid += 1
+            verts = "".join(f'<vertex x="{x}" y="{y}" z="{z}"/>' for x, y, z in V)
+            tris = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in F)
+            objects.append(f'<object id="{oid}" type="model"><mesh><vertices>{verts}</vertices>'
+                           f"<triangles>{tris}</triangles></mesh></object>")
+            items.append(f'<item objectid="{oid}"' + (f' transform="{transform}"' if transform else "") + "/>")
+            settings.append(f'<object id="{oid}"><metadata key="name" value="{name}"/>'
+                            '<metadata key="extruder" value="1"/></object>')
+            instances.append(f'<model_instance><metadata key="object_id" value="{oid}"/></model_instance>')
+        plate_xml.append(f'<plate><metadata key="plater_id" value="{index}"/>{"".join(instances)}</plate>')
+    meta = "".join(f'<metadata name="{k}">{v}</metadata>' for k, v in BAMBU.items())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "3D/3dmodel.model",
+            '<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" unit="millimeter">'
+            f"{meta}<resources>{''.join(objects)}</resources><build>{''.join(items)}</build></model>",
+        )
+        zf.writestr("Metadata/model_settings.config", f"<config>{''.join(settings)}{''.join(plate_xml)}</config>")
+        zf.writestr(
+            "Metadata/project_settings.config",
+            json.dumps({"printer_model": "Bambu Lab P1S", "filament_type": ["PLA"], "nozzle_diameter": ["0.4"]}),
+        )
+    return age(path)
+
+
+def test_fingerprint_ignores_position_and_rotation_not_size_or_mirror():
+    V, F = box(10, 20, 5)
+    A = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=float)
+    base = fingerprint(V, F)
+    assert base[:2] == pytest.approx([1000, 2 * (200 + 50 + 100)])
+    assert same_piece(base, fingerprint(V @ A + [40, 15, 3], F))
+    assert not same_piece(base, fingerprint(*box(10, 20, 5.1)))  # 2% bigger: another piece
+
+    left, right = fingerprint(*tetra()), fingerprint(*tetra(mirror=True))
+    assert left[:5] == pytest.approx(right[:5])
+    assert {left[5], right[5]} == {1.0, -1.0}
+    assert not same_piece(left, right)
+    assert base[5] == 0  # a box is its own mirror image
+
+    assert group([base, left, fingerprint(V + 7, F), right]) == [[0, 2], [1], [3]]
+
+
+def test_parse_plates_measures_each_object_name(tmp_path):
+    hook, lid = box(10, 20, 5), box(30, 30, 2)
+    path = make_mesh_project(
+        tmp_path / "p.3mf",
+        {1: [("Hook", hook, None), ("Hook", hook, "1 0 0 0 1 0 0 0 1 20 0 0")], 2: [("Lid", lid, None)]},
+    )
+    plates, _ = parse_plates(path)
+    assert [(p.index, p.objects) for p in plates] == [(1, {"Hook": 2}), (2, {"Lid": 1})]
+    assert plates[0].fingerprints["Hook"][0] == pytest.approx(1000)
+    assert plates[1].fingerprints["Lid"][0] == pytest.approx(1800)
+
+
+@pytest.fixture(autouse=True)
+def allow_test_external_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(library.app_settings, "external_roots", str(tmp_path))
+
+
+@pytest.mark.integration
+async def test_link_a_piece_once_for_all_its_plates_and_learn_it(async_client, tmp_path):
+    hook, lid = box(10, 20, 5), box(30, 30, 2)
+    nas = tmp_path / "nas"
+    make_mesh_project(
+        nas / "Hook" / "hook.3mf",
+        {1: [("Hook", hook, None)] * 2, 2: [("Hook renamed", hook, ROTATE_Z), ("Lid", lid, None)]},
+    )
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+
+    pieces = (await async_client.get(f"{API}/pieces")).json()
+    by_name = {p["names"][0]: p for p in pieces}
+    assert sorted(by_name["Hook"]["names"]) == ["Hook", "Hook renamed"]
+    assert (by_name["Hook"]["objects"], by_name["Hook"]["plates"], by_name["Hook"]["unlinked"]) == (3, 2, 2)
+    assert (by_name["Lid"]["objects"], by_name["Lid"]["plates"]) == (1, 1)
+
+    gancio = (await async_client.post(f"{API}/shapes", json={"name": "Gancio"})).json()
+    coperchio = (await async_client.post(f"{API}/shapes", json={"name": "Coperchio"})).json()
+    r = await async_client.put(f"{API}/pieces", json={"yield_ids": by_name["Hook"]["yield_ids"], "shape_id": gancio["id"]})
+    assert r.json() == {"linked": 2, "plates_confirmed": 1}  # plate 2 still has the lid
+    r = await async_client.put(f"{API}/pieces", json={"yield_ids": by_name["Lid"]["yield_ids"], "shape_id": coperchio["id"]})
+    assert r.json() == {"linked": 1, "plates_confirmed": 1}
+    bad = await async_client.put(f"{API}/pieces", json={"yield_ids": by_name["Lid"]["yield_ids"], "shape_id": 999})
+    assert bad.status_code == 422
+    assert all(p["unlinked"] == 0 for p in (await async_client.get(f"{API}/pieces")).json())
+
+    # A new project with the same hook under another name: linked and confirmed on its own.
+    make_mesh_project(nas / "Other" / "other.3mf", {1: [("Gancio v2 (1)", hook, ROTATE_Z)] * 3})
+    await scan(async_client, folder)
+    files = {Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()}
+    plates = (await async_client.get(f"{API}/library/files/{files['other.3mf']}/plates")).json()
+    assert [(p["status"], [(y["object_name"], y["quantity"], y["shape_id"]) for y in p["yields"]]) for p in plates] == [
+        ("confirmed", [("Gancio v2 (1)", 3, gancio["id"])])
+    ]

@@ -166,8 +166,9 @@ class TestPlates:
             resp = await async_client.put(f"/api/v1/farm/plates/{plate['id']}", json=body)
             assert resp.json()["status"] == "confirmed"
 
-        # The project now holds 6 hooks on plate 1; plate 2 is unchanged.
-        changed = {1: [("Hook", 1)] * 6 + [("Base", 2)], 2: TWO_PLATES[2]}
+        # The project now holds 6 hooks and a new strap on plate 1; plate 2 is unchanged.
+        # (Quantities alone would keep it confirmed: every object still has its link.)
+        changed = {1: [("Hook", 1)] * 6 + [("Base", 2), ("Strap", 1)], 2: TWO_PLATES[2]}
         make_project(tmp_path / "nas" / "Hook" / "A1" / "hook.3mf", changed)
         await scan(async_client, farm["folder"])
         first, second = await get_plates(async_client, farm["hook.3mf"])
