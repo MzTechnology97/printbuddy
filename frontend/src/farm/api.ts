@@ -23,6 +23,18 @@ export interface FarmProduct {
   asins: string[];
   updated_at: string;
   parts: FarmPart[];
+  variants?: FarmVariant[];
+}
+
+/** Another listing of the product: ``pieces`` units per sale, in ``color``; parts already resolved per sale. */
+export interface FarmVariant {
+  key: string;
+  name: string;
+  skus: string[];
+  asins: string[];
+  color: string | null;
+  pieces: number;
+  parts: FarmPart[];
 }
 
 export interface FarmComponent {
@@ -193,6 +205,7 @@ export interface FarmProductInput {
   skus: string[];
   asins: string[];
   parts: { component_code: string; quantity: number }[];
+  variants?: { skus: string[]; asins: string[]; color: string | null; pieces: number }[];
 }
 
 export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {

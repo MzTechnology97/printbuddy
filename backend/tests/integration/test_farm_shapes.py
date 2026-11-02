@@ -178,6 +178,52 @@ class TestPlatesByShape:
                 assert [(x["plate"], x["yield"]) for x in part["plates"]] == [(1, 15), (2, 2)]
 
 
+class TestVariants:
+    @pytest.mark.asyncio
+    async def test_packs_and_colours_of_one_product(self, async_client, db_session):
+        top = await post(async_client, "/shapes", {"name": "Tartufo sopra"})
+        bottom = await post(async_client, "/shapes", {"name": "Tartufo sotto"})
+        label = await post(async_client, "/components", {"name": "Etichetta"})  # no shape: same in every colour
+        top_brown = await post(async_client, "/components", {"shape_id": top["id"], "color": "Marrone"})
+        bottom_brown = await post(async_client, "/components", {"shape_id": bottom["id"], "color": "Marrone"})
+        await confirmed_plate(db_session, 1, [("sopra", 15, top["id"])])
+
+        body = {
+            "name": "Tartufo finto",
+            "skus": ["T-1"],
+            "parts": [{"component_code": c["code"]} for c in (top_brown, bottom_brown, label)],
+            "variants": [
+                {"skus": ["T-5"], "asins": ["B0FIVE"], "pieces": 5},
+                {"skus": ["T-2N"], "color": "Nero", "pieces": 2},
+                {"skus": [], "asins": []},  # no listing: dropped
+            ],
+        }
+        project_id = (await post(async_client, "/products", body))["project_id"]
+
+        product = (await async_client.get(f"{API}/products")).json()["products"][0]
+        lines = lambda parts: [(p["component_code"], p["quantity"]) for p in parts]  # noqa: E731
+        assert lines(product["parts"]) == [(top_brown["code"], 1), (bottom_brown["code"], 1), (label["code"], 1)]
+        five, black = product["variants"]
+        assert (five["key"], five["name"], five["skus"], five["asins"]) == (
+            f"{project_id}:1", "Tartufo finto – ×5", ["T-5"], ["B0FIVE"])
+        assert lines(five["parts"]) == [(top_brown["code"], 5), (bottom_brown["code"], 5), (label["code"], 5)]
+        # Black components were created on save; the label (no shape) stays the same.
+        components = {c["code"]: c for c in (await async_client.get(f"{API}/components")).json()}
+        names = [components[p["component_code"]]["name"] for p in black["parts"]]
+        assert names == ["Tartufo sopra – Nero", "Tartufo sotto – Nero", "Etichetta"]
+        assert [p["quantity"] for p in black["parts"]] == [2, 2, 2]
+        assert [(x["plate"], x["yield"]) for x in black["parts"][0]["plates"]] == [(1, 15)]  # plates follow the shape
+
+        # One owner per SKU/ASIN, variants included; saving without "variants" keeps them.
+        r = await async_client.post(f"{API}/products", json={"name": "Altro", "skus": ["T-2N"]})
+        assert r.status_code == 409
+        r = await async_client.put(f"{API}/products/{project_id}", json={**body, "variants": [{"skus": ["T-1"]}]})
+        assert r.status_code == 422
+        r = await async_client.put(f"{API}/products/{project_id}", json={k: v for k, v in body.items() if k != "variants"})
+        assert r.status_code == 200
+        assert len((await async_client.get(f"{API}/products")).json()["products"][0]["variants"]) == 2
+
+
 class TestShapeProposals:
     @pytest.mark.parametrize(
         ("name", "key"),
