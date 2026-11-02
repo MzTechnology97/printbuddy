@@ -1261,6 +1261,12 @@ async def scan_external_folder(
     if not ext_path.exists() or not ext_path.is_dir():
         raise HTTPException(status_code=400, detail=f"External path is not accessible: {folder.external_path}")
 
+    # fork: folders watched by the printfarm module get the hash-aware sync (refresh/relink).
+    from backend.app.farm.library_sync import sync_if_watched
+
+    if (farm_result := await sync_if_watched(db, folder)) is not None:
+        return farm_result
+
     # Collect all existing child external subfolder IDs (single query)
     all_folder_ids = [folder_id]
     child_result = await db.execute(
