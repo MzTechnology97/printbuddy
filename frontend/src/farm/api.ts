@@ -73,6 +73,36 @@ export interface FarmLibraryFileState {
   printer_model: string | null;
 }
 
+export interface FarmProductView {
+  project_id: number;
+  skus: string[];
+  asins: string[];
+  parts: (FarmComponent & {
+    quantity: number;
+    plates: {
+      plate_id: number;
+      library_file_id: number;
+      file: string;
+      plate: number;
+      printer_model: string | null;
+      material: string;
+      yield: number;
+      print_time_seconds: number | null;
+      filament_grams: number | null;
+      sliced: boolean;
+    }[];
+  })[];
+  files: {
+    library_file_id: number;
+    filename: string;
+    path: string;
+    folder: string;
+    proposed: number;
+    confirmed: number;
+    opened: boolean;
+  }[];
+}
+
 export interface FarmShape {
   id: number;
   name: string;
@@ -126,6 +156,7 @@ export const farmApi = {
   getProjectNames: () => farmRequest<{ id: number; name: string }[]>('/projects'),
   renameShape: (id: number, name: string) =>
     farmRequest<FarmShape>(`/shapes/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  getProductView: (projectId: number) => farmRequest<FarmProductView>(`/products/${projectId}/view`),
   getFarmFiles: () => farmRequest<FarmLibraryFileState[]>('/library/files?status=ok'),
   getPlatesSummary: () =>
     farmRequest<{ library_file_id: number; proposed: number; confirmed: number }[]>('/plates/summary'),

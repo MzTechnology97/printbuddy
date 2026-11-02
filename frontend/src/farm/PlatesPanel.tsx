@@ -1,5 +1,6 @@
 // Printfarm (fork): confirm the plates proposed from the NAS 3MF files, linking each object to a shape.
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, ChevronDown, ChevronRight, FileBox, Loader2, Search } from 'lucide-react';
@@ -152,7 +153,8 @@ function FilePlates({ file, shapes, onShapeCreated }: {
 export function PlatesPanel() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [query, setQuery] = useState('');
+  const [params] = useSearchParams();
+  const [query, setQuery] = useState(params.get('q') || ''); // ?q= from a product's page
   const [show, setShow] = useState<Show>('todo');
   const [allFiles, setAllFiles] = useState(false);
   const [open, setOpen] = useState<number | null>(null);

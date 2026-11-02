@@ -4,6 +4,17 @@ import i18n from '../i18n';
 
 const en = {
   nav: { products: 'Products' },
+  project: {
+    title: 'Product',
+    openProducts: 'Open in Products',
+    parts: 'Parts (printed pieces per unit) and their confirmed plates',
+    files: '3MF projects in the linked folders',
+    noFiles: 'No 3MF project in the linked folders.',
+    confirmPlates: 'Confirm plates',
+    yield_one: '{{count}} piece',
+    yield_other: '{{count}} pieces',
+    notSliced: 'to slice',
+  },
   plates: {
     title: 'Plates',
     intro: 'Plates proposed from the 3MF projects on the NAS. Link each object to its shape and confirm: one confirmed plate serves every colour of the shape.',
@@ -102,6 +113,17 @@ const en = {
 
 const it: typeof en = {
   nav: { products: 'Prodotti' },
+  project: {
+    title: 'Prodotto',
+    openProducts: 'Apri in Prodotti',
+    parts: 'Parti (pezzi stampati per unità) e loro piatti confermati',
+    files: 'Progetti 3MF nelle cartelle collegate',
+    noFiles: 'Nessun progetto 3MF nelle cartelle collegate.',
+    confirmPlates: 'Conferma i piatti',
+    yield_one: '{{count}} pezzo',
+    yield_other: '{{count}} pezzi',
+    notSliced: 'da slicare',
+  },
   plates: {
     title: 'Piatti',
     intro: 'Piatti proposti dai progetti 3MF del NAS. Collega ogni oggetto alla sua forma e conferma: un piatto confermato vale per tutti i colori della forma.',

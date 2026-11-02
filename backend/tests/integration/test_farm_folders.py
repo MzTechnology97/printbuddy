@@ -87,3 +87,37 @@ async def test_validation_and_cleanup(async_client, db_session, nas):
     await db_session.delete(await db_session.get(Project, nas["Nero"]))
     await db_session.commit()
     assert (await db_session.execute(select(FarmFolderLink))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_product_view_for_the_project_page(async_client, db_session, nas):
+    from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+
+    api = "/api/v1/farm"
+    assert (await async_client.get(f"{api}/products/{nas['Nero']}/view")).status_code == 404  # not a product yet
+    shape = (await async_client.post(f"{api}/shapes", json={"name": "Sopra"})).json()
+    comp = (await async_client.post(f"{api}/components", json={"shape_id": shape["id"], "color": "Nero"})).json()
+    body = {"project_id": nas["Nero"], "parts": [{"component_code": comp["code"], "quantity": 2}]}
+    assert (await async_client.post(f"{api}/products", json=body)).status_code == 200
+    await link(async_client, nas["root"], [nas["Nero"]])
+    db_session.add(
+        LibraryFile(folder_id=nas["orca"], filename="Sopra.stl", file_path="/x/Sopra.stl", file_type="stl", file_size=1)
+    )
+    orca_file = (await db_session.execute(select(LibraryFile).where(LibraryFile.filename == "Orca.3mf"))).scalar_one()
+    plate = FarmPlate(library_file_id=orca_file.id, plate_index=1, printer_model="A1", materials=["PLA"])
+    plate.status, plate.print_time_seconds = "confirmed", 3600
+    plate.yields = [FarmPlateYield(object_name="sopra", quantity=15, shape_id=shape["id"])]
+    db_session.add_all([plate, FarmPlate(library_file_id=orca_file.id, plate_index=2, printer_model="A1")])
+    await db_session.commit()
+
+    view = (await async_client.get(f"{api}/products/{nas['Nero']}/view")).json()
+    [part] = view["parts"]
+    assert (part["code"], part["shape"], part["color"], part["quantity"]) == (comp["code"], "Sopra", "Nero", 2)
+    assert [(p["plate"], p["yield"], p["printer_model"], p["print_time_seconds"]) for p in part["plates"]] == [
+        (1, 15, "A1", 3600)
+    ]
+    # Only 3MF projects of the linked folders, STL left out, with their plate counts.
+    files = {f["filename"]: f for f in view["files"]}
+    assert sorted(files) == ["Orca.3mf", "Prodotto X.3mf", "v2.3mf"]
+    assert (files["Orca.3mf"]["confirmed"], files["Orca.3mf"]["proposed"], files["Orca.3mf"]["opened"]) == (1, 1, True)
+    assert (files["v2.3mf"]["opened"], files["v2.3mf"]["folder"]) == (False, "Prodotto X / Orca / v2")
