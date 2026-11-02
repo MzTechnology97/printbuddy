@@ -549,6 +549,15 @@ async def put_folder_projects(folder_id: int, data: FolderProjectsIn, db: AsyncS
     return {"folder_id": folder_id, "project_ids": await linked_project_ids(db, folder_id)}
 
 
+from backend.app.farm.plan.routes import router as plan_router  # noqa: E402  (plan imports products models)
+
+router.include_router(plan_router)
+
+from backend.app.farm.jobs.routes import router as jobs_router  # noqa: E402
+
+router.include_router(jobs_router)
+
+
 # ---------------------------------------------------------------- one-off import from Seller Hub
 
 

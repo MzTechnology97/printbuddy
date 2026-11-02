@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Printer, Archive, ListOrdered, BarChart3, Cloud, Settings, Sun, Moon, ChevronLeft, ChevronRight, Keyboard, Github, GripVertical, ArrowUpCircle, Wrench, FolderKanban, FolderOpen, X, Menu, Info, Plug, Bug, LogOut, Key, Loader2, Disc3, ShieldAlert, Bell, Globe, Monitor, PanelLeftClose, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Package } from 'lucide-react'; // fork: printfarm products
+import { Package, ClipboardList } from 'lucide-react'; // fork: printfarm products
 import { useTheme } from '../contexts/ThemeContext';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { InstallAppButton } from './InstallAppButton';
@@ -36,6 +36,7 @@ export const defaultNavItems: NavItem[] = [
   { id: 'queue', to: '/queue', icon: ListOrdered, labelKey: 'nav.queue' },
   { id: 'projects', to: '/projects', icon: FolderKanban, labelKey: 'nav.projects' },
   { id: 'farm-products', to: '/farm/products', icon: Package, labelKey: 'farm.nav.products' },
+  { id: 'farm-print-plan', to: '/farm/print-plan', icon: ClipboardList, labelKey: 'farm.nav.printPlan' },
   { id: 'files', to: '/files', icon: FolderOpen, labelKey: 'nav.files' },
   { id: 'makerworld', to: '/makerworld', icon: Globe, labelKey: 'nav.makerworld' },
   { id: 'profiles', to: '/profiles', icon: Cloud, labelKey: 'nav.profiles' },
@@ -296,6 +297,7 @@ export function Layout() {
       maintenance: 'maintenance:read',
       projects: 'projects:read',
       'farm-products': 'projects:read',
+      'farm-print-plan': 'queue:read',
       inventory: 'inventory:read',
       files: 'library:read',
       makerworld: 'makerworld:view',

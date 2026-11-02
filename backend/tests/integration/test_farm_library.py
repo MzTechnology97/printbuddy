@@ -3,6 +3,7 @@
 All 3MF files are generated here; none come from a real farm.
 """
 
+import io
 import json
 import os
 import time
@@ -406,6 +407,50 @@ class TestEmbeddedSlicing:
                 {"index": 2, "preset": "Generic PLA @K2-all", "type": "PLA", "color": "#FFFFFF"},
             ],
         }
+
+    async def test_printer_inherits_is_fixed_for_the_cli(self, async_client, db_session, watched, nas, sidecar):
+        # As written by an OrcaSlicer beta: a filament where the printer's inherits goes (last entry).
+        settings = {
+            "printer_model": "Bambu Lab H2D",
+            "printer_settings_id": "Bambu Lab H2D 0.4 nozzle",
+            "print_settings_id": "0.16mm Balanced Quality @BBL H2D",
+            "print_compatible_printers": ["Bambu Lab H2D 0.4 nozzle"],
+            "filament_settings_id": ["Generic PETG-CF @H2D", "Generic PETG-CF @H2D"],
+            "inherits_group": ["", "Generic PETG-CF @BBL H2D", "Generic PETG-CF @BBL H2D", "Generic PETG-CF @BBL H2D"],
+        }
+        path = nas / "Dual" / "dual.3mf"
+        path.parent.mkdir()
+        with zipfile.ZipFile(path, "w") as zf:
+            meta = "".join(f'<metadata name="{k}">{v}</metadata>' for k, v in ORCA_25.items())
+            zf.writestr("3D/3dmodel.model", f"<model>{meta}<resources/></model>")
+            zf.writestr("Metadata/project_settings.config", json.dumps(settings))
+        age(path)
+        before = path.read_bytes()
+        await scan(async_client, watched)
+
+        await self._slice(db_session, (await files_by_name(async_client))["dual.3mf"]["library_file_id"])
+        with zipfile.ZipFile(io.BytesIO(sidecar[0]["model_bytes"])) as zf:
+            sent = json.loads(zf.read("Metadata/project_settings.config"))
+            assert zf.read("3D/3dmodel.model").startswith(b"<model>")  # other entries copied as they were
+        assert sent["inherits_group"] == ["", "Generic PETG-CF @BBL H2D", "Generic PETG-CF @BBL H2D", ""]
+        assert sent["print_compatible_printers"] == settings["print_compatible_printers"]
+        assert path.read_bytes() == before  # the project file itself is untouched
+
+    def test_printer_inherits_left_alone_when_consistent(self, tmp_path):
+        from backend.app.farm.slicing import fix_printer_inherits
+
+        # A user printer listed as compatible, with its own (empty) inherits: nothing to change.
+        ok = {
+            "printer_settings_id": "Creality K2 Pro 0.4 nozzle - custom",
+            "print_compatible_printers": ["Creality K2 Pro 0.4 nozzle - custom"],
+            "inherits_group": ["0.20mm Standard @Creality K2 Pro 0.4 nozzle", "", ""],
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("Metadata/project_settings.config", json.dumps(ok))
+        assert fix_printer_inherits(buf.getvalue()) == buf.getvalue()
+        no_settings = make_3mf(tmp_path / "cad.3mf").read_bytes()
+        assert fix_printer_inherits(no_settings) == no_settings
 
     async def test_cad_export_is_rejected(self, async_client, watched, nas, sidecar):
         make_3mf(nas / "cad.3mf", {})
