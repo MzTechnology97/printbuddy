@@ -13,7 +13,7 @@ const STRINGS = {
   it: {
     title: 'NAS (libreria della farm)',
     intro:
-      'Printbuddy legge i file di stampa di una sottocartella della share direttamente via SMB, senza copiarli: la scansione legge solo elenco e intestazioni dei 3MF. Un file viene scaricato nella cache solo quando lo usi (slicing, stampa, download). La radice della share non viene mai letta.',
+      'Printbuddy legge i file di stampa di una sottocartella della share direttamente via SMB, senza copiarli: la scansione legge solo elenco e intestazioni dei 3MF. Un file viene scaricato nella cache solo quando lo usi (slicing, stampa, download). La radice della share non viene mai letta. I file caricati nella cartella NAS della libreria e gli output dello slicing vengono scritti sul NAS senza mai sostituire un file esistente; "Sola lettura" vuol dire che dalla libreria non si sposta né si cancella niente sul NAS.',
     host: 'Host (nome o IP)',
     share: 'Share',
     path: 'Sottocartella',
@@ -38,7 +38,7 @@ const STRINGS = {
   en: {
     title: 'NAS (farm library)',
     intro:
-      'Printbuddy reads the print files of one share subfolder straight over SMB, without copying them: the scan reads only the listing and 3MF headers. A file is downloaded into the cache only when you use it (slicing, printing, download). The share root is never read.',
+      'Printbuddy reads the print files of one share subfolder straight over SMB, without copying them: the scan reads only the listing and 3MF headers. A file is downloaded into the cache only when you use it (slicing, printing, download). The share root is never read. Files uploaded to the NAS library folder and slicing outputs are written to the NAS without ever replacing an existing file; "Read-only" means the library never moves or deletes anything on the NAS.',
     host: 'Host (name or IP)',
     share: 'Share',
     path: 'Subfolder',

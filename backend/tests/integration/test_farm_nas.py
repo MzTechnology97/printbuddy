@@ -340,6 +340,57 @@ class TestNasSlicing:
         assert Path(out.file_path).read_bytes() == output
 
 
+@pytest.mark.integration
+class TestNasUpload:
+    async def _folder_id(self, db_session, name):
+        from backend.app.models.library import LibraryFolder
+
+        return await db_session.scalar(select(LibraryFolder.id).where(LibraryFolder.name == name))
+
+    async def test_upload_goes_onto_the_nas_without_replacing(self, async_client, db_session, share, tmp_path):
+        await configure(async_client)
+        await sync(async_client)
+        box = await self._folder_id(db_session, "Box")
+        before = (share / SUB / "Box" / "box.3mf").read_bytes()
+        mine = make_3mf(tmp_path / "upload.3mf", BAMBU, "Bambu Lab A1", body="<!-- uploaded -->").read_bytes()
+
+        resp = await async_client.post(
+            f"/api/v1/library/files?folder_id={box}", files={"file": ("box.3mf", mine, "application/octet-stream")}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["filename"] == "box (2).3mf"  # the name was taken: never replaced
+        assert (share / SUB / "Box" / "box (2).3mf").read_bytes() == mine
+        assert (share / SUB / "Box" / "box.3mf").read_bytes() == before
+        assert not any(p.name.startswith(".") for p in (share / SUB / "Box").iterdir())
+        lib_file = await db_session.get(LibraryFile, resp.json()["id"])
+        assert Path(lib_file.file_path).read_bytes() == mine  # cached copy
+        assert (await files_by_name(async_client))["box (2).3mf"]["printer_model"] == "A1"
+
+        result = await sync(async_client)
+        assert (result["added"], result["updated"], result["relinked"]) == (0, 0, 0)  # already known
+
+    async def test_only_print_files_and_nothing_is_deleted_or_moved(self, async_client, db_session, share):
+        await configure(async_client)
+        await sync(async_client)
+        box = await self._folder_id(db_session, "Box")
+        resp = await async_client.post(
+            f"/api/v1/library/files?folder_id={box}", files={"file": ("notes.png", b"\x89PNG\r\n", "image/png")}
+        )
+        assert resp.status_code == 400
+        assert not (share / SUB / "Box" / "notes.png").exists()
+
+        box_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
+        hook = await self._folder_id(db_session, "Hook")
+        resp = await async_client.post("/api/v1/library/files/move", json={"file_ids": [box_id], "folder_id": hook})
+        assert resp.status_code == 403 or resp.json().get("moved", 0) == 0
+        # Upstream "delete" of an external file only drops the library row: the NAS file stays
+        # and the next scan brings it back.
+        assert (await async_client.delete(f"/api/v1/library/files/{box_id}")).status_code == 200
+        assert (share / SUB / "Box" / "box.3mf").exists()
+        assert not any(op in ("write", "rename") for op, _ in FakeRemote.calls)
+        assert (await sync(async_client))["added"] == 1
+
+
 def test_lru_eviction_keeps_recent_files(tmp_path):
     root = tmp_path / "cache"
     now = time.time()

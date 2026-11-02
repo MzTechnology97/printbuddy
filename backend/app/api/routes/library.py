@@ -1658,6 +1658,12 @@ async def upload_file(
             if not target_folder:
                 raise HTTPException(status_code=404, detail="Folder not found")
 
+        # fork: NAS folders (read-only for moves/deletes) take uploads straight onto the NAS, never replacing a file.
+        from backend.app.farm.nas.library import upload_if_nas
+
+        if (nas_upload := await upload_if_nas(db, target_folder, file, current_user)) is not None:
+            return nas_upload
+
         # Writable external folders write through to the mount so the file is
         # visible outside Printbuddy (#1112); everything else lands under the
         # internal library dir with a UUID-scoped filename. Resolved BEFORE
