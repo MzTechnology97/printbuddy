@@ -276,7 +276,7 @@ async def list_printers(
 ):
     """List all configured printers."""
     result = await db.execute(select(Printer).order_by(Printer.name))
-    return list(result.scalars().all())
+    return [PrinterResponse.from_orm_with_roi(printer) for printer in result.scalars().all()]
 
 
 @router.post("/", response_model=PrinterResponse)
@@ -573,7 +573,7 @@ async def get_printer(
     printer = result.scalar_one_or_none()
     if not printer:
         raise HTTPException(404, "Printer not found")
-    return printer
+    return PrinterResponse.from_orm_with_roi(printer)
 
 
 @router.patch("/{printer_id}", response_model=PrinterResponse)

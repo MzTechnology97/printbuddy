@@ -50,6 +50,14 @@ describe('FilamentSlotCircle', () => {
     expectColor(circle.style.backgroundColor, '#00FF00', 'rgb(0, 255, 0)');
   });
 
+  it('accepts Moonraker colors with a leading #', () => {
+    const { container } = render(
+      <FilamentSlotCircle trayColor="#F75403" trayType="PETG" isEmpty={false} slotNumber={2} />
+    );
+    const circle = container.firstChild as HTMLElement;
+    expectColor(circle.style.backgroundColor, '#F75403', 'rgb(247, 84, 3)');
+  });
+
   it('uses dark background when trayType is set but no color', () => {
     const { container } = render(
       <FilamentSlotCircle trayType="PLA" isEmpty={false} slotNumber={1} />

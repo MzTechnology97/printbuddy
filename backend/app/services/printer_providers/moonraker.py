@@ -943,10 +943,15 @@ class MoonrakerPrinterClient:
         """Map the K2 OpenHost (Kalico) CFS: a flat ``box.slots`` list grouped by ``box.boxes`` units."""
         box = status["box"]
         slots: dict[int, dict[str, Any]] = {}
+        external_slot: dict[str, Any] | None = None
         for slot in box.get("slots") or []:
             index = _safe_int(slot.get("index")) if isinstance(slot, dict) else None
-            # External spool holder has no CFS position; Printbuddy has no vt_tray for Moonraker yet.
-            if index is not None and _creality_cfs_slot_name(index) and not slot.get("external"):
+            if index is None:
+                continue
+            # The external spool holder has no CFS position: it becomes vt_tray, like a Bambu external spool.
+            if slot.get("external"):
+                external_slot = slot
+            elif _creality_cfs_slot_name(index):
                 slots[index] = slot
         units = [unit for unit in box.get("boxes") or [] if isinstance(unit, dict) and unit.get("online", True)]
         if not units:
@@ -957,6 +962,21 @@ class MoonrakerPrinterClient:
 
         loaded_slot = _safe_int(box.get("loaded_slot"))
         self.state.tray_now = loaded_slot if loaded_slot in slots else 255
+        if external_slot is not None:
+            if loaded_slot == _safe_int(external_slot.get("index")):
+                self.state.tray_now = 254
+            remain = _safe_int(external_slot.get("rfid_percent"))
+            self.state.raw_data["vt_tray"] = [
+                {
+                    "id": 254,
+                    "tray_type": str(external_slot.get("material") or ""),
+                    "tray_sub_brands": str(external_slot.get("name") or ""),
+                    "tray_color": _normalize_creality_cfs_color(external_slot.get("color")),
+                    "remain": -1 if remain is None else remain,
+                    "tray_uuid": "",
+                    "tag_uid": "",
+                }
+            ]
         ams_units: list[dict[str, Any]] = []
         active_slots: list[str] = []
         for unit in units:

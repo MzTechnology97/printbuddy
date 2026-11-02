@@ -3,7 +3,7 @@
  * number centered inside, matching the style used on AMS cards in PrintersPage.
  *
  * Props:
- *   trayColor  - 6-char hex color string WITHOUT leading '#' (e.g. "FF0000").
+ *   trayColor  - hex color string, with or without leading '#' (e.g. "FF0000").
  *                Pass undefined / empty string when the slot is empty.
  *   trayType   - Filament material string (e.g. "PLA").  Used to decide the
  *                fallback background when there is no color but a type is known.
@@ -37,18 +37,20 @@ export function FilamentSlotCircle({ trayColor, trayType, isEmpty, emptyKind, sl
   // "cleared but possibly still has a spool the firmware hasn't confirmed
   // gone" rather than "definitely no spool".
   const emptyBorderColor = emptyKind === 'reset' ? '#3d3d3d' : '#666';
+  // Moonraker providers report "#RRGGBB"; Bambu reports "RRGGBBAA" without '#'.
+  const hex = trayColor?.replace(/^#/, '');
   return (
     <div
       className="w-3.5 h-3.5 rounded-full mx-auto mb-0.5 border-2 flex items-center justify-center"
       style={{
-        backgroundColor: trayColor ? `#${trayColor}` : (trayType ? '#333' : 'transparent'),
+        backgroundColor: hex ? `#${hex}` : (trayType ? '#333' : 'transparent'),
         borderColor: isEmpty ? emptyBorderColor : 'rgba(255,255,255,0.1)',
         borderStyle: isEmpty ? 'dashed' : 'solid',
       }}
     >
       <span
         className="text-[6px] font-bold leading-none select-none"
-        style={{ color: trayColor && isLightFilamentColor(trayColor) ? '#000' : '#fff' }}
+        style={{ color: hex && isLightFilamentColor(hex) ? '#000' : '#fff' }}
       >
         {slotNumber}
       </span>
