@@ -279,6 +279,19 @@ class TestSellerHubImport:
         assert await component(async_client, "Nuovo") == "C-0013"
 
     @pytest.mark.asyncio
+    async def test_import_keeps_listings_with_the_same_title(self, async_client):
+        data = plan()
+        # Two Amazon listings, same title, different ASIN and component.
+        data["parts"].append(
+            {"key": "asin:B0TEST0003", "name": "Lampada", "skus": [{"sku": "LA-02", "asin": "B0TEST0003"}]}
+        )
+        data["components"][2]["products"] = [{"key": "asin:B0TEST0003", "name": "Lampada", "qty": 1}]
+        r = await async_client.post(f"{API}/import/sellerhub", json=data)
+        assert r.json()["products_created"] == 3
+        lamps = [p for p in await products(async_client) if p["name"] == "Lampada"]
+        assert sorted(p["asins"][0] for p in lamps) == ["B0TEST0002", "B0TEST0003"]
+
+    @pytest.mark.asyncio
     async def test_import_skips_products_already_defined(self, async_client, db_session):
         await product(async_client, name="Fatto a mano", skus=["LA-01"])
         r = await async_client.post(f"{API}/import/sellerhub", json=plan())

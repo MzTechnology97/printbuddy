@@ -302,7 +302,8 @@ async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> di
     """Import components and bills of materials from Seller Hub's ``GET /api/print-plan`` body.
 
     Keeps Seller Hub's ``C-…`` codes (its stock is keyed by them). Idempotent: existing
-    components keep their name, and a product whose SKU, ASIN or name already exists is skipped.
+    components keep their name, and a product whose SKU or ASIN already exists (or, without
+    either, whose name does) is skipped.
     """
     parts_by_key = {p["key"]: p for p in plan.get("parts") or [] if isinstance(p, dict) and p.get("key")}
     existing = {c.code: c for c in (await db.execute(select(FarmComponent))).scalars()}
@@ -351,7 +352,12 @@ async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> di
             [str(s.get("asin") or "") for s in rows] or ([key[5:]] if key.startswith("asin:") else []), "ASIN"
         )
         name = _clean(str(part.get("name") or names[key] or key), 255)
-        if taken_skus & set(skus) or taken_asins & set(asins) or name.casefold() in taken_names:
+        # Amazon has distinct listings with the same title: the name only identifies products without SKU/ASIN.
+        if (
+            taken_skus & set(skus)
+            or taken_asins & set(asins)
+            or (not skus and not asins and name.casefold() in taken_names)
+        ):
             result["products_skipped"] += 1
             continue
         project = Project(name=name)
