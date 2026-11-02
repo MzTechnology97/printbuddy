@@ -26,6 +26,9 @@ cryptography>=46.0.7
 # 3MF Processing (standard zipfile is sufficient for Bambu 3MF files)
 defusedxml>=0.7.0  # Safe XML parsing (prevents XXE attacks)
 
+# Fork (printfarm): read-only SMB client for the NAS library mirror
+smbprotocol>=1.17.0
+
 # Excel Export
 openpyxl>=3.1.0
 

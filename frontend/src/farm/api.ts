@@ -46,7 +46,7 @@ export interface FarmProductInput {
   parts: { component_code: string; quantity: number }[];
 }
 
-async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
   const response = await fetch(`/api/v1/farm${path}`, {
     ...init,

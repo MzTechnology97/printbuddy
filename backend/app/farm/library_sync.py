@@ -193,8 +193,14 @@ async def sync_if_watched(db: AsyncSession, folder: LibraryFolder) -> dict | Non
 
 
 async def sync_external_folder(db: AsyncSession, folder: LibraryFolder) -> dict:
+    from backend.app.farm.nas.service import refresh_mirror_if_nas  # nas imports this module
+
     async with _folder_locks[folder.id]:
-        return await _sync(db, folder)
+        nas = await refresh_mirror_if_nas(db, folder)
+        result = await _sync(db, folder)
+        if nas is not None:
+            result["nas"] = nas
+        return result
 
 
 async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:

@@ -14,6 +14,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.library_sync import sync_external_folder
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+from backend.app.farm.nas.routes import router as nas_router
 from backend.app.farm.plates.routes import router as plates_router
 from backend.app.models.library import LibraryFile, LibraryFolder
 
@@ -186,3 +187,4 @@ async def slice_farm_file(library_file_id: int, body: FarmSliceRequest, db: Asyn
 
 
 router.include_router(plates_router)
+router.include_router(nas_router)
