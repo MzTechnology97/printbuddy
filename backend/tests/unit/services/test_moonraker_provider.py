@@ -764,7 +764,7 @@ def test_moonraker_maps_k2_openhost_cfs_slots_to_ams_shape():
     ams = client.state.raw_data["ams"]
     assert [(unit["id"], unit["name"], unit["humidity"], unit["temp"]) for unit in ams] == [(0, "CFS T1", 30, 27)]
     trays = ams[0]["tray"]
-    assert [tray["slot"] for tray in trays] == ["T1A", "T1B", "T1C", "T1D"]  # external spool holder skipped
+    assert [tray["slot"] for tray in trays] == ["T1A", "T1B", "T1C", "T1D"]  # external spool holder is vt_tray
     assert trays[1] == {
         "id": 1,
         "slot": "T1B",
@@ -788,6 +788,34 @@ def test_moonraker_maps_k2_openhost_cfs_slots_to_ams_shape():
     assert cfs["type"] == "k2_openhost_cfs"
     assert cfs["active_slots"] == ["T1B"]
     assert cfs["print_mapping"]["map"] == {"0": 1}
+    # External spool holder is exposed like a Bambu external spool, empty here.
+    assert client.state.raw_data["vt_tray"] == [
+        {
+            "id": 254,
+            "tray_type": "",
+            "tray_sub_brands": "",
+            "tray_color": None,
+            "remain": -1,
+            "tray_uuid": "",
+            "tag_uid": "",
+        }
+    ]
+
+
+def test_moonraker_k2_openhost_loaded_external_spool_is_vt_tray():
+    status = _k2_openhost_cfs_status()
+    box = status["box"]
+    box["loaded_slot"] = 4
+    box["slots"][1]["loaded"] = False
+    box["slots"][4].update(loaded=True, material="PLA", color="#0A2989", name="Acme PLA")
+    client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+
+    client._apply_creality_cfs_box(status)
+
+    vt = client.state.raw_data["vt_tray"][0]
+    assert (vt["id"], vt["tray_type"], vt["tray_color"], vt["tray_sub_brands"]) == (254, "PLA", "#0A2989", "Acme PLA")
+    assert client.state.tray_now == 254
+    assert not any(tray["active"] for tray in client.state.raw_data["ams"][0]["tray"])
 
 
 def test_moonraker_k2_openhost_without_boxes_groups_slots_by_four():

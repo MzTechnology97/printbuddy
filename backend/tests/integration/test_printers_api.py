@@ -357,6 +357,29 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_klipper_printer_exposes_discovered_webcam(self, async_client: AsyncClient, printer_factory):
+        """A Moonraker webcam found at connect() reaches the printer list, so the UI enables the camera."""
+        from types import SimpleNamespace
+
+        from backend.app.services.printer_manager import printer_manager
+
+        printer = await printer_factory(name="K2", provider="klipper", api_url="http://k2.local:7125")
+        webcam = {
+            "enabled": True,
+            "stream_url": "http://k2.local/webcam/?action=stream",
+            "snapshot_url": "http://k2.local/webcam/?action=snapshot",
+            "camera_type": "mjpeg",
+        }
+        with patch.dict(printer_manager._clients, {printer.id: SimpleNamespace(webcams=[webcam])}):
+            listed = (await async_client.get("/api/v1/printers/")).json()
+            single = (await async_client.get(f"/api/v1/printers/{printer.id}")).json()
+
+        for result in ([p for p in listed if p["id"] == printer.id][0], single):
+            assert result["external_camera_enabled"] is True
+            assert result["external_camera_url"] == webcam["stream_url"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_printer_not_found(self, async_client: AsyncClient):
         """Verify 404 for non-existent printer."""
         response = await async_client.get("/api/v1/printers/9999")
