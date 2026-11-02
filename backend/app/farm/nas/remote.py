@@ -1,9 +1,9 @@
 """Read-only access to the NAS share: path rules and the SMB implementation.
 
 Security rules, enforced here and nowhere else:
-- nothing on the NAS is ever deleted or replaced: the only writes are new files
-  (slicing outputs, library uploads), written under a temporary dot name and renamed
-  without overwrite;
+- nothing on the NAS is ever deleted; files are written under a temporary dot name and
+  then renamed. Library uploads never replace a file; a slicing output replaces only the
+  previous output of the same project plate (in the project's ``Printbuddy`` folder);
 - paths are lists of plain names: no separators, no ``.``/``..``, so nothing can
   climb out of the folder a caller is scoped to;
 - the share root may hold credential files: callers list its *directories* only
@@ -67,6 +67,7 @@ class Remote(Protocol):
     def makedirs(self, parts: tuple[str, ...]) -> None: ...
     def write(self, parts: tuple[str, ...], data: bytes) -> None: ...
     def rename(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None: ...
+    def replace(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None: ...
     def close(self) -> None: ...
 
 
@@ -172,11 +173,18 @@ class SmbRemote:
             dst.write(data)
 
     def rename(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None:
-        """Fails if ``dst`` exists: nothing on the NAS is ever replaced."""
+        """Fails if ``dst`` exists: nothing on the NAS is replaced this way."""
         import smbclient
 
         with self._lock, self._connection_errors():
             smbclient.rename(self._unc(src), self._unc(dst), **self._kwargs)
+
+    def replace(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None:
+        """Rename over ``dst``: only for the farm's own slicing outputs, which a new slice replaces."""
+        import smbclient
+
+        with self._lock, self._connection_errors():
+            smbclient.replace(self._unc(src), self._unc(dst), **self._kwargs)
 
     def close(self) -> None:
         import smbclient
