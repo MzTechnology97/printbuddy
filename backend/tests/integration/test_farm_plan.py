@@ -33,6 +33,10 @@ async def farm(async_client, db_session, monkeypatch):
     """Shape 'Sopra' in black, plates on A1 (15 pcs), P1S (20 pcs) and K1 (10 pcs); Seller Hub answering."""
     shape = (await async_client.post(f"{API}/shapes", json={"name": "Sopra"})).json()
     black = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Nero"})).json()
+    r = await async_client.post(
+        f"{API}/products", json={"name": "Tappo – Nero", "parts": [{"component_code": black["code"], "quantity": 2}]}
+    )
+    assert r.status_code == 200, r.text
     for index, (model, pieces) in enumerate([("A1", 15), ("P1S", 20), ("K1", 10)], start=1):
         plate = FarmPlate(library_file_id=40 + index, plate_index=1, printer_model=model, materials=["PLA"])
         plate.status = "confirmed"
@@ -69,6 +73,8 @@ async def test_most_urgent_first_and_best_plate_first(async_client, farm):
     unknown, black = body["components"]
     assert (unknown["known"], unknown["plates"]) == (False, [])
     assert (black["color"], black["color_hex"], black["shape"], black["missing"]) == ("Nero", "111111", "Sopra", 30)
+    assert [(p["name"], p["has_cover"]) for p in black["products"]] == [("Tappo – Nero", False)]
+    assert unknown["products"] == []
     # A1 has a free printer with black PLA; P1S is free but white; K1 can't tell what it has loaded.
     assert [(o["printer_model"], o["score"], o["yield"]) for o in black["plates"]] == [
         ("A1", 2, 15),

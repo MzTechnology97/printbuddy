@@ -131,6 +131,7 @@ export interface FarmPlanComponent {
   shape: string | null;
   shape_id: number | null;
   known: boolean;
+  products: { project_id: number; name: string; has_cover: boolean }[];
   in_queue: number;
   missing: number;
   plates: FarmPlanPlate[];
@@ -212,7 +213,7 @@ export const farmApi = {
       '/plan',
     ),
   getJobs: () => farmRequest<FarmJob[]>('/jobs'),
-  createJobs: (jobs: { component_code: string; plate_ids: number[] }[]) =>
+  createJobs: (jobs: { component_code: string; plate_ids: number[]; printer_id?: number }[]) =>
     farmRequest<FarmJob[]>('/jobs', { method: 'POST', body: JSON.stringify({ jobs }) }),
   cancelJob: (id: number) => farmRequest<{ id: number; state: string }>(`/jobs/${id}`, { method: 'DELETE' }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),

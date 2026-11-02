@@ -4,9 +4,11 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, ClipboardList, ListPlus, Loader2, RefreshCw, Settings2, X } from 'lucide-react';
+import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmJob, type FarmPlanComponent, type FarmPlanPlate, type FarmPlanSettings } from './api';
+import { PlateThumb } from './PlatesPanel';
 import './i18n';
 
 const INPUT =
@@ -67,6 +69,27 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
   );
 }
 
+/** The cover of a product using the component (its variant, so in its colour) and the proposed plate's preview. */
+function ComponentPictures({ c }: { c: FarmPlanComponent }) {
+  const { t } = useTranslation();
+  const product = c.products.find((p) => p.has_cover);
+  const plate = c.plates[0];
+  if (!product && !plate) return null;
+  return (
+    <div className="flex gap-2 shrink-0">
+      {product && (
+        <Link to={`/projects/${product.project_id}`} title={c.products.map((p) => p.name).join(', ')}
+          className="w-24 h-24 rounded bg-bambu-dark overflow-hidden hover:ring-2 hover:ring-bambu-green">
+          <img alt={`${t('farm.plan.productPhoto')} ${product.name}`} loading="lazy" decoding="async"
+            className="w-full h-full object-cover" src={api.getProjectCoverImageUrl(product.project_id)} />
+        </Link>
+      )}
+      {plate && <PlateThumb fileId={plate.library_file_id} plateIndex={plate.plate} fileName={fileName(plate.file)}
+        className="w-24 h-24" />}
+    </div>
+  );
+}
+
 function ComponentCard({ c, selected, onSelect, onAccoda }: {
   c: FarmPlanComponent;
   selected: boolean;
@@ -89,11 +112,15 @@ function ComponentCard({ c, selected, onSelect, onAccoda }: {
           <span aria-hidden className="mt-0.5 w-4 h-4 rounded-full border border-bambu-gray/60"
             style={{ background: `#${c.color_hex}` }} />
         )}
+        <ComponentPictures c={c} />
         <div className="min-w-0 flex-1">
           <p className="text-white">
             <span className="font-mono text-bambu-green mr-2">{c.code}</span>
             {c.name}
           </p>
+          {c.products.length > 0 && (
+            <p className="text-xs text-bambu-gray">{t('farm.plan.usedIn', { names: c.products.map((p) => p.name).join(', ') })}</p>
+          )}
           <p className="text-xs text-bambu-gray">
             {t('farm.plan.missing', { count: c.missing })}
             {c.in_queue > 0 && ` · ${t('farm.plan.inQueue', { count: c.in_queue })}`}
@@ -192,9 +219,18 @@ function AccodaSummary({ components, onClose, onDone }: {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const usable = components.filter((c) => c.plates.length > 0 && c.missing > 0);
+  const [chosen, setChosen] = useState<Record<string, number>>({}); // component -> printer; none: first free
+  const [chosenPlate, setChosenPlate] = useState<Record<string, number>>({}); // none: the loaded material decides
+  const platesFor = (c: FarmPlanComponent) =>
+    chosen[c.code] ? c.plates.filter((p) => p.printers.some((pr) => pr.id === chosen[c.code])) : c.plates;
   const create = useMutation({
     mutationFn: () =>
-      farmApi.createJobs(usable.map((c) => ({ component_code: c.code, plate_ids: c.plates.map((p) => p.plate_id) }))),
+      farmApi.createJobs(
+        usable.map((c) => {
+          const plateIds = chosenPlate[c.code] ? [chosenPlate[c.code]] : platesFor(c).map((p) => p.plate_id);
+          return { component_code: c.code, plate_ids: plateIds, printer_id: chosen[c.code] || undefined };
+        }),
+      ),
     onSuccess: (jobs) => {
       queryClient.invalidateQueries({ queryKey: ['farm'] });
       showToast(t('farm.jobs.created', { count: jobs.length }), 'success');
@@ -217,6 +253,7 @@ function AccodaSummary({ components, onClose, onDone }: {
           <p className="text-sm text-bambu-gray">{t('farm.jobs.summaryIntro')}</p>
           {usable.map((c) => {
             const best = c.plates[0];
+            const printers = [...new Map(c.plates.flatMap((p) => p.printers).map((pr) => [pr.id, pr])).values()];
             return (
               <section key={c.code} className="space-y-2">
                 <p className="text-white flex items-center gap-2">
@@ -231,10 +268,41 @@ function AccodaSummary({ components, onClose, onDone }: {
                   {best.print_time_seconds ? ` · ${duration(best.print_time_seconds)}` : ''}
                   {best.filament_grams ? ` · ${Math.round(best.filament_grams)} g` : ''}
                 </p>
+                <label className="flex flex-wrap items-center gap-2 text-sm text-white">
+                  {t('farm.jobs.printer')}
+                  <select className={`${INPUT} py-1`} value={chosen[c.code] ?? ''}
+                    onChange={(e) => {
+                      setChosen({ ...chosen, [c.code]: Number(e.target.value) || 0 });
+                      setChosenPlate({ ...chosenPlate, [c.code]: 0 });
+                    }}>
+                    <option value="">{t('farm.jobs.firstFree')}</option>
+                    {printers.map((pr) => (
+                      <option key={pr.id} value={pr.id}>
+                        {pr.name} · {pr.idle ? t('farm.plan.free') : t('farm.plan.busy')}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {chosen[c.code] ? <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p> : null}
+                <label className="flex flex-wrap items-center gap-2 text-sm text-white">
+                  {t('farm.jobs.plate')}
+                  <select className={`${INPUT} py-1 max-w-full`} value={chosenPlate[c.code] || ''}
+                    onChange={(e) => setChosenPlate({ ...chosenPlate, [c.code]: Number(e.target.value) || 0 })}>
+                    <option value="">{t('farm.jobs.anyPlate')}</option>
+                    {platesFor(c).map((p) => (
+                      <option key={p.plate_id} value={p.plate_id}>
+                        {fileName(p.file)} · {t('farm.plates.plate', { index: p.plate })} · {p.printer_model} · {p.material}
+                        {' · '}{t('farm.plan.yield', { count: p.yield })}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <ul className="space-y-2">
-                  {c.plates.map((p, i) => (
-                    <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
-                  ))}
+                  {platesFor(c)
+                    .filter((p) => !chosenPlate[c.code] || p.plate_id === chosenPlate[c.code])
+                    .map((p, i) => (
+                      <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
+                    ))}
                 </ul>
               </section>
             );

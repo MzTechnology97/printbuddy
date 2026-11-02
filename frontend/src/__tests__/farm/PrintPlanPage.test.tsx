@@ -25,7 +25,7 @@ const plate = (id: number, model: string, score: number, sliced: boolean, printe
   printers,
 });
 
-const base = { stock: 0, known: true, in_queue: 0 };
+const base = { stock: 0, known: true, in_queue: 0, products: [] };
 const plan = {
   fetched_at: '2026-01-01T10:00:00Z',
   error: 'Seller Hub did not answer (ConnectError: refused)',
@@ -44,6 +44,7 @@ const plan = {
       shape: 'Tartufo sopra',
       shape_id: 1,
       missing: 30,
+      products: [{ project_id: 65, name: 'Tartufo – Marrone', has_cover: true }],
       plates: [
         plate(1, 'A1', 2, true, [{ id: 1, name: 'A1 uno', idle: true, material_ok: true, color_ok: true }]),
         plate(2, 'P1S', 1, false, [{ id: 3, name: 'P1S', idle: true, material_ok: true, color_ok: false }]),
@@ -108,6 +109,12 @@ describe('PrintPlanPage', () => {
     expect(within(first).getByText(/A1-truffle\.3mf/)).toBeInTheDocument();
     expect(within(first).getByText(/to slice/)).toBeInTheDocument(); // the P1S plate
     expect(within(first).getByText(/colour not loaded/)).toBeInTheDocument();
+    // The product's photo (its colour variant) and the proposed plate's preview, opening the 3D viewer.
+    expect(within(first).getByText('In: Tartufo – Marrone')).toBeInTheDocument();
+    expect(within(first).getByRole('img', { name: 'Photo of Tartufo – Marrone' }).getAttribute('src')).toContain(
+      '/projects/65/cover',
+    );
+    expect(within(first).getByRole('button', { name: 'Open in the 3D viewer Plate 1' })).toBeInTheDocument();
 
     const second = screen.getByText('Supporto Velux').closest('li')!;
     expect(within(second).getByText('urgent')).toBeInTheDocument();
@@ -132,6 +139,23 @@ describe('PrintPlanPage', () => {
     expect(within(dialog).getByText(/One print: 15 pieces with the proposed plate \(30 missing\)/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1, 2] }] }));
+
+    // A chosen printer keeps only the plates of its model and goes with the job.
+    await user.click(within(first).getByRole('button', { name: /Queue/ }));
+    const again = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    await user.selectOptions(within(again).getByLabelText('Printer'), 'P1S · free');
+    expect(within(again).queryByText(/A1-truffle\.3mf/)).not.toBeInTheDocument();
+    await user.click(within(again).getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() =>
+      expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [2], printer_id: 3 }] }),
+    );
+
+    // A chosen 3MF goes alone.
+    await user.click(within(first).getByRole('button', { name: /Queue/ }));
+    const third = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    await user.selectOptions(within(third).getByLabelText('3MF and plate'), '1');
+    await user.click(within(third).getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1] }] }));
 
     // The component without plates can't be selected.
     expect(screen.getByLabelText('Select C-0004')).toBeDisabled();

@@ -22,8 +22,9 @@ from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.products.models import FarmComponent, FarmShape
+from backend.app.farm.products.models import FarmComponent, FarmProductPart, FarmShape
 from backend.app.models.printer import Printer
+from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
 from backend.app.services.printer_manager import printer_manager
 
@@ -213,6 +214,15 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
         ).all()
     )
     shape_names = dict((await db.execute(select(FarmShape.id, FarmShape.name))).all())
+    # The products (variants) using each component: their cover shows the piece in its colour.
+    used_in: dict[int, list[dict]] = {}
+    for component_id, project_id, name, cover in await db.execute(
+        select(FarmProductPart.component_id, Project.id, Project.name, Project.cover_image_filename)
+        .join(Project, Project.id == FarmProductPart.project_id)
+        .where(FarmProductPart.component_id.in_([c.id for c in ours.values()]))
+        .order_by(Project.cover_image_filename.is_(None), Project.name)
+    ):
+        used_in.setdefault(component_id, []).append({"project_id": project_id, "name": name, "has_cover": bool(cover)})
     resolver = await PrinterModelResolver.load(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
     printers = printer_snapshot(active)
@@ -270,6 +280,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
                 "shape": shape_names.get(comp.shape_id) if comp and comp.shape_id else None,
                 "shape_id": comp.shape_id if comp else None,
                 "known": comp is not None,
+                "products": used_in.get(comp.id, []) if comp else [],
                 "in_queue": in_queue,
                 "missing": max(0, c["to_print"] - in_queue),
                 "plates": options,

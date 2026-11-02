@@ -6,6 +6,10 @@ model that has one of them sliced, with the plate's material and the component's
 loaded, and only then creates the queue item, pinned to that printer, with the colour of
 the loaded spool forced. Starting it stays with the upstream scheduler, so its plate-clear
 confirmation still applies: nothing prints without the user saying the plate is clear.
+
+A job created for a printer the user chose (``printer_id`` set while waiting) goes into that
+printer's queue as soon as its plate is sliced, busy or not, and with a manual start when the
+loaded spool can't be matched: the user picked the printer, the upstream queue waits for it.
 """
 
 from __future__ import annotations
@@ -92,8 +96,16 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
     await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=lib_file.filename, run=run)
 
 
+def _plate_model(resolver: PrinterModelResolver, plate: FarmPlate) -> str:
+    return (resolver.resolve(plate.printer_model).target_model or plate.printer_model or "").lower()
+
+
 async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJob]:
-    """One job per request ``{component_code, plate_ids}``; plates not sliced yet are sliced now."""
+    """One job per request ``{component_code, plate_ids, printer_id?}``; plates not sliced yet are sliced now.
+
+    With ``printer_id`` only the plates of that printer's model are kept.
+    """
+    resolver = await PrinterModelResolver.load(db)
     jobs = []
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
@@ -105,6 +117,14 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             if plate is None or plate.status != "confirmed" or not _pieces(plate, comp):
                 raise HTTPException(422, f"Plate {plate_id} is not a confirmed plate of {comp.code}")
             plates.append(plate)
+        printer_id = req.get("printer_id")
+        if printer_id is not None:
+            printer = await db.get(Printer, printer_id)
+            if printer is None or not printer.is_active:
+                raise HTTPException(422, f"Unknown or inactive printer {printer_id}")
+            plates = [p for p in plates if _plate_model(resolver, p) == (printer.model or "").lower()]
+            if not plates:
+                raise HTTPException(422, f"No confirmed plate of {comp.code} for {printer.name} ({printer.model})")
         if not plates:
             raise HTTPException(422, f"No plate for {comp.code}")
         job = FarmPrintJob(
@@ -112,6 +132,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             color=comp.color,
             plate_ids=[p.id for p in plates],
             expected_pieces=_pieces(plates[0], comp),
+            printer_id=printer_id,
         )
         db.add(job)
         jobs.append(job)
@@ -248,80 +269,95 @@ async def dispatch_once(db: AsyncSession) -> int:
             continue
         reasons = []
         placed = False
-        for plate_id in job.plate_ids:
-            plate = await db.get(FarmPlate, plate_id)
-            if plate is None or plate.status != "confirmed":
-                continue
-            sliced = await sliced_file(db, plate)
-            if sliced is None:
-                await ask_slicing(db, plate)
-                reasons.append(f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced")
-                continue
-            model = (resolver.resolve(plate.printer_model).target_model or plate.printer_model or "").lower()
-            for printer in snapshot:
-                if printer["model"].lower() != model or not printer["idle"] or printer["id"] in busy:
+        slicing = False
+        # A chosen printer first takes a plate (a 3MF, often one per material) whose material and colour
+        # are loaded; only when none is, the first one, for a manual start after changing the spool.
+        for strict in (True, False) if job.printer_id is not None else (True,):
+            if placed or (not strict and slicing):
+                break
+            for plate_id in job.plate_ids:
+                plate = await db.get(FarmPlate, plate_id)
+                if plate is None or plate.status != "confirmed":
                     continue
-                klipper = normalize_provider(printers_by_id[printer["id"]].provider) != "bambu"
-                # Single-spool Klipper printers don't report what is loaded: queued for a manual start.
-                unreadable = klipper and not printer["loaded"]
-                spool = (
-                    None
-                    if unreadable
-                    else _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
-                )
-                if spool is None and not unreadable:
-                    reasons.append(f"{printer['name']}: no {job.color} {'+'.join(plate.materials or [])} loaded")
+                sliced = await sliced_file(db, plate)
+                if sliced is None:
+                    await ask_slicing(db, plate)
+                    slicing = True
+                    reasons.append(f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced")
                     continue
-                path = await _local_path(db, sliced)
-                plate_no = _plate_in_file(path, plate.plate_index)
-                send = sliced
-                if klipper and not sliced.filename.endswith(".gcode"):
-                    send = await gcode_for_klipper(db, sliced, path, plate_no)
-                    if send is None:
-                        reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
+                model = _plate_model(resolver, plate)
+                for printer in snapshot:
+                    if printer["model"].lower() != model:
                         continue
-                slots = await asyncio.to_thread(extract_filament_requirements, path, plate_no)
-                overrides = (
-                    []
-                    if spool is None
-                    else [
-                        {
-                            "slot_id": s["slot_id"],
-                            "type": s.get("type") or spool["type"],
-                            "color": f"#{spool['color']}",
-                            "force_color_match": True,
-                        }
-                        for s in slots
-                    ]
-                )
-                position = (await db.scalar(select(func.max(PrintQueueItem.position)))) or 0
-                item = PrintQueueItem(
-                    printer_id=printer["id"],
-                    library_file_id=send.id,
-                    manual_start=spool is None,
-                    plate_id=plate_no,
-                    position=position + 1,
-                    required_filament_types=json.dumps(sorted({s.get("type") for s in slots if s.get("type")})),
-                    filament_overrides=json.dumps(overrides) if overrides else None,
-                    print_time_seconds=(sliced.file_metadata or {}).get("print_time_seconds")
-                    or plate.print_time_seconds,
-                )
-                db.add(item)
-                await db.flush()
-                job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
-                job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
-                job.note = None if spool else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
-                busy.add(printer["id"])
-                created += 1
-                placed = True
-                logger.info(
-                    "Farm job %d: %s queued on %s (plate %d)", job.id, job.component_code, printer["name"], plate.id
-                )
-                break
-            if placed:
-                break
+                    if job.printer_id is not None:  # chosen by the user: its queue, whatever its state
+                        if printer["id"] != job.printer_id:
+                            continue
+                    elif not printer["idle"] or printer["id"] in busy:
+                        continue
+                    klipper = normalize_provider(printers_by_id[printer["id"]].provider) != "bambu"
+                    # Single-spool Klipper printers don't report what is loaded: queued for a manual start.
+                    unreadable = klipper and not printer["loaded"]
+                    spool = (
+                        None
+                        if unreadable
+                        else _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
+                    )
+                    if spool is None and not unreadable and strict:
+                        reasons.append(f"{printer['name']}: no {job.color} {'+'.join(plate.materials or [])} loaded")
+                        continue
+                    path = await _local_path(db, sliced)
+                    plate_no = _plate_in_file(path, plate.plate_index)
+                    send = sliced
+                    if klipper and not sliced.filename.endswith(".gcode"):
+                        send = await gcode_for_klipper(db, sliced, path, plate_no)
+                        if send is None:
+                            reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
+                            continue
+                    slots = await asyncio.to_thread(extract_filament_requirements, path, plate_no)
+                    overrides = (
+                        []
+                        if spool is None
+                        else [
+                            {
+                                "slot_id": s["slot_id"],
+                                "type": s.get("type") or spool["type"],
+                                "color": f"#{spool['color']}",
+                                "force_color_match": True,
+                            }
+                            for s in slots
+                        ]
+                    )
+                    position = (await db.scalar(select(func.max(PrintQueueItem.position)))) or 0
+                    item = PrintQueueItem(
+                        printer_id=printer["id"],
+                        library_file_id=send.id,
+                        manual_start=spool is None,
+                        plate_id=plate_no,
+                        position=position + 1,
+                        required_filament_types=json.dumps(sorted({s.get("type") for s in slots if s.get("type")})),
+                        filament_overrides=json.dumps(overrides) if overrides else None,
+                        print_time_seconds=(sliced.file_metadata or {}).get("print_time_seconds")
+                        or plate.print_time_seconds,
+                    )
+                    db.add(item)
+                    await db.flush()
+                    job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
+                    job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
+                    job.note = (
+                        None if spool else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
+                    )
+                    busy.add(printer["id"])
+                    created += 1
+                    placed = True
+                    logger.info(
+                        "Farm job %d: %s queued on %s (plate %d)", job.id, job.component_code, printer["name"], plate.id
+                    )
+                    break
+                if placed:
+                    break
         if not placed:
-            job.note = ("; ".join(dict.fromkeys(reasons)) or "No free printer of a matching model")[:255]
+            fallback = "Chosen printer is not active" if job.printer_id else "No free printer of a matching model"
+            job.note = ("; ".join(dict.fromkeys(reasons)) or fallback)[:255]
     await db.commit()
     return created
 
