@@ -78,8 +78,8 @@ describe('ProductsPage', () => {
     expect(screen.getByText(/Queued 3/)).toBeInTheDocument();
     expect(screen.getByText(/Printed in 7 days 12/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Prints and queue' })).toHaveAttribute('href', '/projects/7');
-    // Components are listed with their stable codes.
-    expect(screen.getByLabelText('Name C-0002')).toHaveValue('Gancio');
+    // Components live on their own tab now.
+    expect(screen.getByRole('tab', { name: 'Components' })).toHaveAttribute('aria-selected', 'false');
   });
 
   it('filters products by name, SKU, ASIN or component', async () => {
@@ -111,7 +111,7 @@ describe('ProductsPage', () => {
       await user.clear(search);
       await user.type(search, query);
       expect(screen.getByRole('heading', { name: visible })).toBeInTheDocument();
-      expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([visible, 'Components']);
+      expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([visible]);
     }
     await user.clear(search);
     await user.type(search, 'nessuno');

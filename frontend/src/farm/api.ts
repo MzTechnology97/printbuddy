@@ -34,6 +34,14 @@ export interface FarmComponent {
   retired: boolean;
 }
 
+export interface FarmPlateSummary {
+  id: number;
+  library_file_id: number;
+  plate_index: number;
+  status: string;
+  yields: { object_name: string; quantity: number; shape_id: number | null; component_code: string | null }[];
+}
+
 export interface FarmShape {
   id: number;
   name: string;
@@ -84,6 +92,10 @@ export const farmApi = {
   updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
     farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  renameShape: (id: number, name: string) =>
+    farmRequest<FarmShape>(`/shapes/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  getPlates: (status?: string) =>
+    farmRequest<FarmPlateSummary[]>(`/plates${status ? `?status=${encodeURIComponent(status)}` : ''}`),
   getFolderProjects: (folderId: number) =>
     farmRequest<{ folder_id: number; project_ids: number[] }>(`/folders/${folderId}/projects`),
   setFolderProjects: (folderId: number, projectIds: number[]) =>

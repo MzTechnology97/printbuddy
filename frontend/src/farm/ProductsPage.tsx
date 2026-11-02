@@ -1,13 +1,14 @@
 // Printfarm (fork) products: projects with Amazon SKUs and printed parts, read by Seller Hub.
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2, Search } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search, Layers } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
+import { ComponentsPanel } from './ComponentsPanel';
 import './i18n';
 
 const INPUT =
@@ -228,66 +229,12 @@ function ProductForm({
   );
 }
 
-function ComponentRow({ component }: { component: FarmComponent }) {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const update = useMutation({
-    mutationFn: (data: { name?: string; retired?: boolean }) => farmApi.updateComponent(component.code, data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  return (
-    <li className={`flex flex-wrap items-center gap-3 ${component.retired ? 'opacity-50' : ''}`}>
-      <span className="font-mono text-bambu-green w-20 shrink-0">{component.code}</span>
-      <input aria-label={`${t('farm.products.name')} ${component.code}`} className={`${INPUT} flex-1 min-w-[12rem]`}
-        defaultValue={component.name} maxLength={200} onBlur={(e) => {
-          const name = e.target.value.trim();
-          if (name && name !== component.name) update.mutate({ name });
-        }} />
-      {component.shape && (
-        <span className="text-xs text-bambu-gray">{component.shape} · {component.color || '—'}</span>
-      )}
-      <Button type="button" variant="ghost" size="sm" onClick={() => update.mutate({ retired: !component.retired })}>
-        {component.retired ? t('farm.products.restore') : t('farm.products.retire')}
-      </Button>
-    </li>
-  );
-}
-
-function ShapesEditor({ shapes }: { shapes: FarmShape[] }) {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const [name, setName] = useState('');
-  const create = useMutation({
-    mutationFn: () => farmApi.createShape(name.trim()),
-    onSuccess: () => {
-      setName('');
-      queryClient.invalidateQueries({ queryKey: ['farm'] });
-    },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  return (
-    <div className="space-y-2 max-w-3xl">
-      <p className="text-sm text-white">{t('farm.products.shapes')}</p>
-      <p className="text-xs text-bambu-gray">{shapes.map((s) => s.name).join(' · ') || '—'}</p>
-      <div className="flex gap-2">
-        <input aria-label={t('farm.products.newShape')} className={`${INPUT} md:w-64`} value={name} maxLength={200}
-          placeholder={t('farm.products.newShape')} onChange={(e) => setName(e.target.value)} />
-        <Button type="button" variant="secondary" size="sm" disabled={!name.trim() || create.isPending}
-          onClick={() => create.mutate()}>
-          {t('farm.products.createShape')}
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 export function ProductsPage() {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<Draft | null>(null);
   const [query, setQuery] = useState('');
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') === 'components' ? 'components' : 'products';
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
@@ -301,12 +248,32 @@ export function ProductsPage() {
         <h1 className="text-2xl font-bold text-white flex items-center gap-3">
           <Package className="w-7 h-7 text-bambu-green" /> {t('farm.products.title')}
         </h1>
-        {!editing && (
+        {!editing && tab === 'products' && (
           <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [] })}>
             <Plus className="w-4 h-4" /> {t('farm.products.new')}
           </Button>
         )}
       </div>
+      <div role="tablist" className="flex gap-2 border-b border-bambu-dark-tertiary">
+        {(['products', 'components'] as const).map((id) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setParams(id === 'products' ? {} : { tab: id })}
+            className={`flex items-center gap-2 px-4 py-2 -mb-px border-b-2 text-sm ${
+              tab === id ? 'border-bambu-green text-white' : 'border-transparent text-bambu-gray hover:text-white'
+            }`}
+          >
+            {id === 'products' ? <Package className="w-4 h-4" /> : <Layers className="w-4 h-4" />}
+            {t(id === 'products' ? 'farm.products.title' : 'farm.products.components')}
+          </button>
+        ))}
+      </div>
+      {tab === 'components' ? (
+        <ComponentsPanel />
+      ) : (
+        <>
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.products.intro')}</p>
       <div className="relative max-w-md">
         <Search className="w-4 h-4 text-bambu-gray absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -338,7 +305,7 @@ export function ProductsPage() {
               <li key={p.project_id} className="flex gap-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4">
                 <div className="w-20 h-20 shrink-0 rounded bg-bambu-dark overflow-hidden flex items-center justify-center">
                   {s?.has_cover ? (
-                    <img alt="" className="w-full h-full object-cover"
+                    <img alt="" loading="lazy" decoding="async" className="w-full h-full object-cover"
                       src={`${api.getProjectCoverImageUrl(p.project_id)}${api.getProjectCoverImageUrl(p.project_id).includes('?') ? '&' : '?'}v=${encodeURIComponent(p.updated_at)}`} />
                   ) : (
                     <Package className="w-8 h-8 text-bambu-gray/50" />
@@ -380,16 +347,8 @@ export function ProductsPage() {
         </ul>
       )}
 
-      <section className="space-y-2">
-        <h2 className="text-lg font-semibold text-white">{t('farm.products.components')}</h2>
-        <p className="text-bambu-gray text-sm">{t('farm.products.componentsHint')}</p>
-        <ShapesEditor shapes={shapes.data || []} />
-        <ul className="space-y-2 max-w-3xl">
-          {(components.data || []).map((c) => (
-            <ComponentRow key={`${c.code}-${c.name}`} component={c} />
-          ))}
-        </ul>
-      </section>
+        </>
+      )}
     </div>
   );
 }
