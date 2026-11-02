@@ -192,6 +192,13 @@ def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
     }
 
 
+@router.get("/projects", dependencies=[_read])
+async def list_project_names(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Every project's id and name, for pickers (upstream ``GET /projects`` computes stats and takes ~1 s)."""
+    rows = (await db.execute(select(Project.id, Project.name).order_by(Project.name))).all()
+    return [{"id": pid, "name": name} for pid, name in rows]
+
+
 @router.get("/shapes", dependencies=[_read])
 async def list_shapes(db: AsyncSession = Depends(get_db)) -> list[dict]:
     rows = (await db.execute(select(FarmShape).order_by(FarmShape.name))).scalars()

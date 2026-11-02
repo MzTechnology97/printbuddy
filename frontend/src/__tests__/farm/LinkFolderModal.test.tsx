@@ -34,7 +34,7 @@ describe('FarmLinkFolderModal', () => {
   beforeEach(() => {
     saved = undefined;
     server.use(
-      http.get('/api/v1/projects/', () =>
+      http.get('/api/v1/farm/projects', () =>
         HttpResponse.json([
           { id: 1, name: 'Lavoro una tantum' },
           { id: 2, name: 'Prodotto X nero' },

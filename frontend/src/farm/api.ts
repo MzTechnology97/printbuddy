@@ -92,6 +92,7 @@ export const farmApi = {
   updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
     farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  getProjectNames: () => farmRequest<{ id: number; name: string }[]>('/projects'),
   renameShape: (id: number, name: string) =>
     farmRequest<FarmShape>(`/shapes/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getPlates: (status?: string) =>

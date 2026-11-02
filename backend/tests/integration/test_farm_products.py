@@ -54,6 +54,16 @@ class TestComponents:
         assert r.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_project_names_for_pickers(async_client, db_session):
+    db_session.add_all([Project(name="Zeta"), Project(name="Alfa")])
+    await db_session.commit()
+    pid = await product(async_client, name="Beta")
+    rows = (await async_client.get(f"{API}/projects")).json()
+    assert [r["name"] for r in rows] == ["Alfa", "Beta", "Zeta"]
+    assert {"id": pid, "name": "Beta"} in rows
+
+
 class TestProducts:
     @pytest.mark.asyncio
     async def test_contract_shape(self, async_client):
