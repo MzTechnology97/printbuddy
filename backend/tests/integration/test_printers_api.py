@@ -716,6 +716,37 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_get_k2_openhost_status_with_empty_cfs_slots(self, async_client: AsyncClient, printer_factory):
+        """OpenHost slots with rfid_percent=null go through the provider and /status without a 503."""
+        from unittest.mock import MagicMock, patch
+
+        from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient
+        from backend.tests.unit.services.test_moonraker_provider import _k2_openhost_cfs_status
+
+        printer = await printer_factory(
+            provider="klipper", model="K2", api_url="http://k2.local:7125", serial_number="KLIPPER-K2-OH"
+        )
+        client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+        client._apply_creality_cfs_box(_k2_openhost_cfs_status())
+        client.state.connected = True
+        client.state.state = "RUNNING"
+
+        with patch("backend.app.api.routes.printers.printer_manager") as mock_pm:
+            mock_pm.get_status = MagicMock(return_value=client.state)
+            mock_pm.is_awaiting_plate_clear = MagicMock(return_value=False)
+            response = await async_client.get(f"/api/v1/printers/{printer.id}/status")
+
+        assert response.status_code == 200
+        trays = response.json()["ams"][0]["tray"]
+        assert [(tray["tray_type"], tray["remain"]) for tray in trays] == [
+            ("", -1),
+            ("PETG", 40),
+            ("PLA", 50),
+            ("", -1),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_printer_status_not_found(self, async_client: AsyncClient):
         """Verify 404 for status of non-existent printer."""
         response = await async_client.get("/api/v1/printers/9999/status")
