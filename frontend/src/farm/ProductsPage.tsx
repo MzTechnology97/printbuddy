@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2 } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
@@ -24,6 +24,14 @@ interface Draft {
 }
 
 const splitList = (value: string) => value.split(',').map((s) => s.trim()).filter(Boolean);
+
+/** Every word must appear in the name, a SKU, an ASIN or a part (code or name). */
+function matches(p: FarmProduct, query: string): boolean {
+  const text = [p.name, ...p.skus, ...p.asins, ...p.parts.flatMap((x) => [x.component_code, x.name])]
+    .join(' ')
+    .toLowerCase();
+  return query.toLowerCase().split(/\s+/).every((word) => text.includes(word));
+}
 
 function draftOf(p: FarmProduct): Draft {
   return {
@@ -223,10 +231,12 @@ function ComponentRow({ component }: { component: FarmComponent }) {
 export function ProductsPage() {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<Draft | null>(null);
+  const [query, setQuery] = useState('');
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
   const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
+  const shown = (products.data?.products || []).filter((p) => matches(p, query.trim()));
 
   return (
     <div className="p-4 md:p-8 space-y-6">
@@ -241,6 +251,17 @@ export function ProductsPage() {
         )}
       </div>
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.products.intro')}</p>
+      <div className="relative max-w-md">
+        <Search className="w-4 h-4 text-bambu-gray absolute left-2.5 top-1/2 -translate-y-1/2" />
+        <input
+          type="search"
+          aria-label={t('farm.products.search')}
+          placeholder={t('farm.products.search')}
+          className={`${INPUT} pl-8`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
 
       {editing && (
         <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} onDone={() => setEditing(null)} />
@@ -250,11 +271,11 @@ export function ProductsPage() {
         <Loader2 className="w-8 h-8 animate-spin text-bambu-green" />
       ) : products.error ? (
         <p className="text-red-400">{(products.error as Error).message}</p>
-      ) : products.data?.products.length === 0 ? (
-        <p className="text-bambu-gray">{t('farm.products.empty')}</p>
+      ) : shown.length === 0 ? (
+        <p className="text-bambu-gray">{t(query.trim() ? 'farm.products.noMatch' : 'farm.products.empty')}</p>
       ) : (
         <ul className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {products.data?.products.map((p) => {
+          {shown.map((p) => {
             const s = stats.get(p.project_id);
             return (
               <li key={p.project_id} className="flex gap-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4">
