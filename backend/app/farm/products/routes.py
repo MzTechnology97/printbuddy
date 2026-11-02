@@ -28,8 +28,10 @@ from backend.app.core.auth import (
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.plates.service import plates_by_component, plates_by_shape
+from backend.app.farm.products.folders import linked_project_ids, set_linked_projects
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.archive import PrintArchive
+from backend.app.models.library import LibraryFolder
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.project import Project
 from backend.app.schemas.print_queue import serialize_utc_datetime
@@ -112,6 +114,10 @@ class ComponentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     # Retired: no longer made; its code stays reserved and it can't go in new parts.
     retired: bool | None = None
+
+
+class FolderProjectsIn(BaseModel):
+    project_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
 class ShapeIn(BaseModel):
@@ -385,6 +391,34 @@ async def rename_shape(shape_id: int, data: ShapeIn, db: AsyncSession = Depends(
     shape.name = name
     await db.commit()
     return {"id": shape.id, "name": shape.name}
+
+
+# ---------------------------------------------------------------- library folders <-> projects
+
+_folders_read = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_READ))
+_folders_write = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_UPDATE_ALL))
+
+
+@router.get("/folders/{folder_id}/projects", dependencies=[_folders_read])
+async def get_folder_projects(folder_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Projects and products linked to a library folder (its subfolders come with it)."""
+    if await db.get(LibraryFolder, folder_id) is None:
+        raise HTTPException(404, "Folder not found")
+    return {"folder_id": folder_id, "project_ids": await linked_project_ids(db, folder_id)}
+
+
+@router.put("/folders/{folder_id}/projects", dependencies=[_folders_write])
+async def put_folder_projects(folder_id: int, data: FolderProjectsIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Link a folder to several projects/products at once; an empty list unlinks it."""
+    folder = await db.get(LibraryFolder, folder_id)
+    if folder is None:
+        raise HTTPException(404, "Folder not found")
+    found = set((await db.execute(select(Project.id).where(Project.id.in_(data.project_ids)))).scalars())
+    if missing := sorted(set(data.project_ids) - found):
+        raise HTTPException(422, f"Unknown projects: {missing}")
+    await set_linked_projects(db, folder, data.project_ids)
+    await db.commit()
+    return {"folder_id": folder_id, "project_ids": await linked_project_ids(db, folder_id)}
 
 
 # ---------------------------------------------------------------- one-off import from Seller Hub

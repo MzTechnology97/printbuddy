@@ -751,6 +751,10 @@ async def list_folders(
         elif folder.parent_id in folder_map:
             folder_map[folder.parent_id].children.append(folder_item)
 
+    # fork: a folder can be linked to several projects/products (farm module).
+    from backend.app.farm.products.folders import decorate_tree
+
+    await decorate_tree(db, folder_map)
     return root_folders
 
 
@@ -761,13 +765,17 @@ async def get_folders_by_project(
     _: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_READ)),
 ):
     """Get all folders linked to a specific project."""
+    # fork: several projects per folder, and a linked folder brings its subfolders (farm module).
+    from backend.app.farm.products.folders import project_folders
+
+    labels = await project_folders(db, project_id)
     result = await db.execute(
         select(LibraryFolder, Project.name)
         .outerjoin(Project, LibraryFolder.project_id == Project.id)
-        .where(LibraryFolder.project_id == project_id)
-        .order_by(LibraryFolder.name)
+        .where(LibraryFolder.id.in_(labels))
     )
-    rows = result.all()
+    order = list(labels)
+    rows = sorted(result.all(), key=lambda row: order.index(row[0].id))
 
     folders = []
     for folder, project_name in rows:
@@ -783,7 +791,7 @@ async def get_folders_by_project(
         folders.append(
             FolderResponse(
                 id=folder.id,
-                name=folder.name,
+                name=labels[folder.id],
                 parent_id=folder.parent_id,
                 project_id=folder.project_id,
                 archive_id=folder.archive_id,
@@ -1563,9 +1571,10 @@ async def list_files(
     if folder_id is not None:
         query = query.where(LibraryFile.folder_id == folder_id)
     elif project_id is not None:
-        # Single join instead of one query per folder (avoids N+1 pattern)
-        query = query.join(LibraryFolder, LibraryFile.folder_id == LibraryFolder.id)
-        query = query.where(LibraryFolder.project_id == project_id)
+        # fork: linked folders of the project and their subfolders (farm module).
+        from backend.app.farm.products.folders import project_folders
+
+        query = query.where(LibraryFile.folder_id.in_(await project_folders(db, project_id)))
     elif include_root:
         query = query.where(LibraryFile.folder_id.is_(None))
 
