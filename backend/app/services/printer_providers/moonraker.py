@@ -329,6 +329,48 @@ def _snapmaker_u1_filament_metadata(values: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Bambu speed modes (silent, standard, sport, ludicrous) as M220 percentages, as shown in the UI.
+_SPEED_MODE_PERCENT = {1: 50, 2: 100, 3: 124, 4: 166}
+
+
+def _moonraker_light_object(available: list[str]) -> str | None:
+    """Pick the printer's main light among ``output_pin``/``led``/``neopixel`` objects."""
+    candidates = []
+    for name in available:
+        kind, _, pin = name.partition(" ")
+        pin = pin.lower()
+        if kind not in {"output_pin", "led", "neopixel"} or not pin:
+            continue
+        if any(marker in pin for marker in ("nozzle", "bed", "heater", "wiper", "twist")):
+            continue
+        if kind == "output_pin" and not any(marker in pin for marker in ("led", "light")):
+            continue
+        candidates.append(name)
+    for marker in ("main", "chamber", "case"):
+        for name in candidates:
+            if marker in name.partition(" ")[2].lower():
+                return name
+    return candidates[0] if candidates else None
+
+
+def _moonraker_light_is_on(values: Any) -> bool:
+    if not isinstance(values, dict):
+        return False
+    if "value" in values:
+        return (_safe_float(values.get("value")) or 0) > 0
+    colors = values.get("color_data")
+    return isinstance(colors, list) and any(
+        (_safe_float(channel) or 0) > 0 for led in colors if isinstance(led, list) for channel in led
+    )
+
+
+def _moonraker_speed_level(gcode_move: Any) -> int | None:
+    factor = _safe_float(gcode_move.get("speed_factor")) if isinstance(gcode_move, dict) else None
+    if factor is None:
+        return None
+    return min(_SPEED_MODE_PERCENT, key=lambda mode: abs(_SPEED_MODE_PERCENT[mode] - factor * 100))
+
+
 def _apply_moonraker_fans(state: MoonrakerPrinterState, status: dict[str, Any]) -> None:
     """Map reported Klipper/Moonraker fan objects onto Printbuddy fan badges.
 
@@ -1413,7 +1455,7 @@ class MoonrakerPrinterClient:
     def request_status_update(self) -> bool:
         previous_state = self._last_state if self._has_status_sample else None
         status = self._query_objects(
-            ["webhooks", "print_stats", "virtual_sdcard", "display_status", "extruder", "heater_bed"]
+            ["webhooks", "print_stats", "virtual_sdcard", "display_status", "extruder", "heater_bed", "gcode_move"]
         )
         try:
             available_objects = self._available_objects()
@@ -1422,6 +1464,13 @@ class MoonrakerPrinterClient:
         fan_status = self._query_fan_status(available_objects)
         if fan_status:
             status.update(fan_status)
+        light_object = _moonraker_light_object(available_objects)
+        if light_object:
+            try:
+                status.update(self._query_objects([light_object]))
+            except Exception:  # noqa: BLE001 - the light is optional
+                pass
+            self.state.chamber_light = _moonraker_light_is_on(status.get(light_object))
         cfs_status = self._query_cfs_status(available_objects)
         if cfs_status:
             status.update(cfs_status)
@@ -1465,6 +1514,9 @@ class MoonrakerPrinterClient:
             self.state.progress = raw_progress
             self.state.remaining_time = _remaining_minutes(print_stats, self.state.progress)
         self.state.temperatures = _moonraker_temperatures(status)
+        speed_level = _moonraker_speed_level(status.get("gcode_move"))
+        if speed_level is not None:
+            self.state.speed_level = speed_level
         self._apply_snapmaker_u1_status(status)
         _apply_moonraker_fans(self.state, status)
         self._emit_status_callbacks(previous_state)
@@ -1548,6 +1600,28 @@ class MoonrakerPrinterClient:
             klipper_fan_name = target_object.removeprefix("fan_generic ")
             return self.send_gcode(f"SET_FAN_SPEED FAN={klipper_fan_name} SPEED={clamped_speed / 100:.2f}")
         raise ValueError(f"Fan '{fan}' is not controllable through Moonraker")
+
+    def set_chamber_light(self, on: bool) -> bool:
+        light_object = _moonraker_light_object(self._available_objects())
+        if light_object is None:
+            return False
+        kind, _, name = light_object.partition(" ")
+        value = 1 if on else 0
+        if kind == "output_pin":
+            script = f"SET_PIN PIN={name} VALUE={value}"
+        else:
+            script = f"SET_LED LED={name} RED={value} GREEN={value} BLUE={value} WHITE={value}"
+        if not self.send_gcode(script):
+            return False
+        self.state.chamber_light = bool(on)
+        return True
+
+    def set_print_speed(self, mode: int) -> bool:
+        percent = _SPEED_MODE_PERCENT.get(int(mode))
+        if percent is None or not self.send_gcode(f"M220 S{percent}"):
+            return False
+        self.state.speed_level = int(mode)
+        return True
 
     def home_axes(self, axes: list[str] | None = None) -> bool:
         script = ("G28 " + " ".join(a.upper() for a in axes)) if axes else "G28"
