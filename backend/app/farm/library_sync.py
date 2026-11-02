@@ -144,6 +144,15 @@ def _analyze(entry: _DiskEntry) -> _Analysis:
     return result
 
 
+async def _try_analyze(entry: _DiskEntry) -> _Analysis | None:
+    """None when the share fails to read the file (EIO on SMB): retried next scan, never marked corrupt."""
+    try:
+        return await asyncio.to_thread(_analyze, entry)
+    except OSError as exc:
+        logger.warning("Farm sync: cannot read %s, retrying next scan: %s", entry.path, exc)
+        return None
+
+
 def _drop_thumbnail(rel: str | None) -> None:
     abs_thumb = lib.to_absolute_path(rel)
     try:
@@ -261,7 +270,7 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         db.add(st)
         return st
 
-    counts = dict.fromkeys(("added", "updated", "relinked", "missing", "corrupt", "pending"), 0)
+    counts = dict.fromkeys(("added", "updated", "relinked", "missing", "corrupt", "pending", "unreadable"), 0)
     disk_paths = {e.path for e in entries}
     fresh: list[_DiskEntry] = []
     touched = False
@@ -288,7 +297,10 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         if not settled:
             counts["pending"] += 1
             continue
-        analysis = await asyncio.to_thread(_analyze, entry)
+        analysis = await _try_analyze(entry)
+        if analysis is None:
+            counts["unreadable"] += 1
+            continue
         if st is None:
             st = state_by_file[lib_file.id] = new_state(library_file_id=lib_file.id, path=entry.path, mtime=0, size=0)
         elif not analysis.corrupt:
@@ -309,8 +321,10 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
     # Analyse new paths first: their hashes decide which missing files were moved.
     candidates: defaultdict[str, list[tuple[_DiskEntry, _Analysis]]] = defaultdict(list)
     for entry in fresh:
-        analysis = await asyncio.to_thread(_analyze, entry)
-        if analysis.corrupt:
+        analysis = await _try_analyze(entry)
+        if analysis is None:
+            counts["unreadable"] += 1
+        elif analysis.corrupt:
             st = corrupt_by_path.get(entry.path) or new_state(path=entry.path, mtime=0, size=0)
             _apply_detection(st, entry, analysis)
             corrupt_by_path[entry.path] = st

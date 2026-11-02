@@ -225,6 +225,21 @@ class TestWatchedFolderSync:
         assert (await scan(async_client, watched))["added"] == 1
         assert (await files_by_name(async_client))["broken.3mf"]["status"] == "ok"
 
+    async def test_read_error_skips_file_without_aborting(self, async_client, watched, monkeypatch):
+        real_analyze = library_sync._analyze
+
+        def flaky(entry):
+            if entry.filename == "box.3mf":
+                raise OSError(5, "Input/output error")  # what a flaky SMB mount returns
+            return real_analyze(entry)
+
+        monkeypatch.setattr(library_sync, "_analyze", flaky)
+        result = await scan(async_client, watched)
+        assert (result["added"], result["unreadable"], result["corrupt"]) == (1, 1, 0)
+
+        monkeypatch.setattr(library_sync, "_analyze", real_analyze)
+        assert (await scan(async_client, watched))["added"] == 1
+
     async def test_tracked_file_saved_corrupt_keeps_record(self, async_client, watched, nas):
         await scan(async_client, watched)
         before = (await files_by_name(async_client))["box.3mf"]
