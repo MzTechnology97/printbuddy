@@ -23,6 +23,18 @@ export interface FarmProduct {
   asins: string[];
   updated_at: string;
   parts: FarmPart[];
+  variants?: FarmVariant[];
+}
+
+/** Another listing of the product: ``pieces`` units per sale, in ``color``; parts already resolved per sale. */
+export interface FarmVariant {
+  key: string;
+  name: string;
+  skus: string[];
+  asins: string[];
+  color: string | null;
+  pieces: number;
+  parts: FarmPart[];
 }
 
 export interface FarmComponent {
@@ -180,6 +192,23 @@ export interface FarmShape {
   name: string;
 }
 
+/** One distinct piece across all plates (same geometry, any object name). */
+export interface FarmPiece {
+  yield_ids: number[];
+  names: string[];
+  objects: number;
+  plates: number;
+  files: string[];
+  file_count: number;
+  shape_id: number | null;
+  mixed: boolean;
+  unlinked: number;
+  suggested_shape_id: number | null;
+  volume_mm3: number;
+  hand: number;
+  sample: { library_file_id: number; plate_index: number };
+}
+
 export interface FarmProductOverview {
   project_id: number;
   has_cover: boolean;
@@ -194,6 +223,7 @@ export interface FarmProductInput {
   skus: string[];
   asins: string[];
   parts: { component_code: string; quantity: number }[];
+  variants?: { skus: string[]; asins: string[]; color: string | null; pieces: number }[];
 }
 
 export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -222,8 +252,15 @@ export const farmApi = {
   unmarkProduct: (id: number) => farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'DELETE' }),
   createComponent: (data: { name?: string; shape_id?: number; color?: string }) =>
     farmRequest<FarmComponent>('/components', { method: 'POST', body: JSON.stringify(data) }),
-  updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
-    farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateComponent: (
+    code: string,
+    data: { name?: string; retired?: boolean; shape_id?: number | null; color?: string | null },
+  ) => farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  mergeComponent: (code: string, into: string) =>
+    farmRequest<{ merged: string; into: string; products: number }>(`/components/${code}/merge`, {
+      method: 'POST',
+      body: JSON.stringify({ into }),
+    }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
   getPlan: () =>
     farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
@@ -261,4 +298,10 @@ export const farmApi = {
       body: JSON.stringify({ project_ids: projectIds }),
     }),
   createShape: (name: string) => farmRequest<FarmShape>('/shapes', { method: 'POST', body: JSON.stringify({ name }) }),
+  getPieces: () => farmRequest<FarmPiece[]>('/pieces'),
+  linkPiece: (yieldIds: number[], shapeId: number | null) =>
+    farmRequest<{ linked: number; plates_confirmed: number }>('/pieces', {
+      method: 'PUT',
+      body: JSON.stringify({ yield_ids: yieldIds, shape_id: shapeId }),
+    }),
 };

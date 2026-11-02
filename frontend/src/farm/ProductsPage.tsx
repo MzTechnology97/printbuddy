@@ -3,12 +3,13 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2, Search, Layers, Grid3x3 } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search, Layers, Grid3x3, Shapes } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
 import { ComponentsPanel } from './ComponentsPanel';
+import { PiecesPanel } from './PiecesPanel';
 import { PlatesPanel } from './PlatesPanel';
 import './i18n';
 
@@ -23,13 +24,20 @@ interface Draft {
   skus: string;
   asins: string;
   parts: { code: string; quantity: number }[];
+  variants: { skus: string; asins: string; color: string; pieces: number }[];
 }
 
 const splitList = (value: string) => value.split(',').map((s) => s.trim()).filter(Boolean);
 
-/** Every word must appear in the name, a SKU, an ASIN or a part (code or name). */
+/** Every word must appear in the name, a SKU, an ASIN (variants' too) or a part (code or name). */
 function matches(p: FarmProduct, query: string): boolean {
-  const text = [p.name, ...p.skus, ...p.asins, ...p.parts.flatMap((x) => [x.component_code, x.name])]
+  const text = [
+    p.name,
+    ...p.skus,
+    ...p.asins,
+    ...(p.variants || []).flatMap((v) => [...v.skus, ...v.asins, v.color || '']),
+    ...p.parts.flatMap((x) => [x.component_code, x.name]),
+  ]
     .join(' ')
     .toLowerCase();
   return query.toLowerCase().split(/\s+/).every((word) => text.includes(word));
@@ -42,6 +50,12 @@ function draftOf(p: FarmProduct): Draft {
     skus: p.skus.join(', '),
     asins: p.asins.join(', '),
     parts: p.parts.map((x) => ({ code: x.component_code, quantity: x.quantity })),
+    variants: (p.variants || []).map((v) => ({
+      skus: v.skus.join(', '),
+      asins: v.asins.join(', '),
+      color: v.color || '',
+      pieces: v.pieces,
+    })),
   };
 }
 
@@ -71,6 +85,12 @@ function ProductForm({
         skus: splitList(d.skus),
         asins: splitList(d.asins),
         parts: d.parts.filter((p) => p.code).map((p) => ({ component_code: p.code, quantity: p.quantity })),
+        variants: d.variants.map((v) => ({
+          skus: splitList(v.skus),
+          asins: splitList(v.asins),
+          color: v.color.trim() || null,
+          pieces: v.pieces,
+        })),
       };
       if (d.id) return farmApi.updateProduct(d.id, { ...body, name: d.name });
       return farmApi.createProduct({ ...body, project_id: d.projectId });
@@ -119,6 +139,8 @@ function ProductForm({
 
   const setPart = (i: number, patch: Partial<Draft['parts'][number]>) =>
     setD({ ...d, parts: d.parts.map((p, j) => (j === i ? { ...p, ...patch } : p)) });
+  const setVariant = (i: number, patch: Partial<Draft['variants'][number]>) =>
+    setD({ ...d, variants: d.variants.map((v, j) => (j === i ? { ...v, ...patch } : v)) });
 
   return (
     <form
@@ -209,6 +231,33 @@ function ProductForm({
           </div>
         </div>
       </div>
+      <div>
+        <span className={LABEL}>{t('farm.products.variants')}</span>
+        <p className="text-xs text-bambu-gray mb-2 max-w-3xl">{t('farm.products.variantsHint')}</p>
+        <div className="space-y-2">
+          {d.variants.map((v, i) => (
+            <div key={i} className="grid grid-cols-2 md:grid-cols-[1fr_1fr_10rem_7rem_auto] gap-2 items-center">
+              <input aria-label={t('farm.products.skus')} className={INPUT} value={v.skus}
+                placeholder={t('farm.products.skus')} onChange={(e) => setVariant(i, { skus: e.target.value })} />
+              <input aria-label={t('farm.products.asins')} className={INPUT} value={v.asins}
+                placeholder={t('farm.products.asins')} onChange={(e) => setVariant(i, { asins: e.target.value })} />
+              <input aria-label={t('farm.products.variantColor')} className={INPUT} value={v.color} maxLength={50}
+                placeholder={t('farm.products.variantColor')} onChange={(e) => setVariant(i, { color: e.target.value })} />
+              <input aria-label={t('farm.products.variantPieces')} type="number" min={1} max={1000} className={INPUT}
+                title={t('farm.products.variantPieces')} value={v.pieces}
+                onChange={(e) => setVariant(i, { pieces: Number(e.target.value) })} />
+              <Button type="button" variant="ghost" size="sm" aria-label={t('farm.products.remove')}
+                onClick={() => setD({ ...d, variants: d.variants.filter((_, j) => j !== i) })}>
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            </div>
+          ))}
+          <Button type="button" variant="secondary" size="sm"
+            onClick={() => setD({ ...d, variants: [...d.variants, { skus: '', asins: '', color: '', pieces: 2 }] })}>
+            <Plus className="w-4 h-4" /> {t('farm.products.addVariant')}
+          </Button>
+        </div>
+      </div>
       {d.id && (
         <div>
           <label className={LABEL} htmlFor="farm-cover">{t('farm.products.cover')}</label>
@@ -235,7 +284,7 @@ export function ProductsPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [query, setQuery] = useState('');
   const [params, setParams] = useSearchParams();
-  const tab = (['components', 'plates'] as const).find((id) => id === params.get('tab')) ?? 'products';
+  const tab = (['components', 'pieces', 'plates'] as const).find((id) => id === params.get('tab')) ?? 'products';
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
@@ -250,13 +299,13 @@ export function ProductsPage() {
           <Package className="w-7 h-7 text-bambu-green" /> {t('farm.products.title')}
         </h1>
         {!editing && tab === 'products' && (
-          <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [] })}>
+          <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [], variants: [] })}>
             <Plus className="w-4 h-4" /> {t('farm.products.new')}
           </Button>
         )}
       </div>
       <div role="tablist" className="flex gap-2 border-b border-bambu-dark-tertiary">
-        {(['products', 'components', 'plates'] as const).map((id) => (
+        {(['products', 'components', 'pieces', 'plates'] as const).map((id) => (
           <button
             key={id}
             role="tab"
@@ -266,13 +315,17 @@ export function ProductsPage() {
               tab === id ? 'border-bambu-green text-white' : 'border-transparent text-bambu-gray hover:text-white'
             }`}
           >
-            {{ products: <Package className="w-4 h-4" />, components: <Layers className="w-4 h-4" />, plates: <Grid3x3 className="w-4 h-4" /> }[id]}
-            {t({ products: 'farm.products.title', components: 'farm.products.components', plates: 'farm.plates.title' }[id])}
+            {{ products: <Package className="w-4 h-4" />, components: <Layers className="w-4 h-4" />,
+              pieces: <Shapes className="w-4 h-4" />, plates: <Grid3x3 className="w-4 h-4" /> }[id]}
+            {t({ products: 'farm.products.title', components: 'farm.products.components', pieces: 'farm.pieces.title',
+              plates: 'farm.plates.title' }[id])}
           </button>
         ))}
       </div>
       {tab === 'components' ? (
         <ComponentsPanel />
+      ) : tab === 'pieces' ? (
+        <PiecesPanel />
       ) : tab === 'plates' ? (
         <PlatesPanel />
       ) : (
@@ -322,6 +375,15 @@ export function ProductsPage() {
                   {(p.skus.length > 0 || p.asins.length > 0) && (
                     <p className="text-xs text-bambu-gray break-words">
                       {p.skus.join(' · ')}{p.asins.length > 0 && ` — ASIN ${p.asins.join(' · ')}`}
+                    </p>
+                  )}
+                  {!!p.variants?.length && (
+                    <p className="text-xs text-bambu-gray break-words">
+                      {t('farm.products.variantsOf', {
+                        list: p.variants
+                          .map((v) => `${[v.color, `×${v.pieces}`].filter(Boolean).join(' ')} (${[...v.skus, ...v.asins].join(', ')})`)
+                          .join(' · '),
+                      })}
                     </p>
                   )}
                   <ul className="text-sm text-bambu-gray-light">

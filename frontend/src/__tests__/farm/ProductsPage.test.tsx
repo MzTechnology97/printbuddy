@@ -140,7 +140,28 @@ describe('ProductsPage', () => {
           { component_code: 'C-0001', quantity: 1 },
           { component_code: 'C-0002', quantity: 4 },
         ],
+        variants: [],
       }),
+    );
+  });
+
+  it('saves another listing of the product as a pack in a colour', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+    await user.click(screen.getByRole('button', { name: 'Add listing' }));
+
+    await user.type(screen.getAllByLabelText('Amazon SKUs')[1], 'PX-5N');
+    await user.type(screen.getByLabelText('Colour (empty: as above)'), 'Nero');
+    const pieces = screen.getByLabelText('Pieces per sale');
+    await user.clear(pieces);
+    await user.type(pieces, '5');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect((saved as { variants: unknown }).variants).toEqual([
+        { skus: ['PX-5N'], asins: [], color: 'Nero', pieces: 5 },
+      ]),
     );
   });
 });

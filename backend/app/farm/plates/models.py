@@ -66,8 +66,10 @@ class FarmPlateYield(Base):
     shape_id: Mapped[int | None] = mapped_column(ForeignKey(FarmShape.id), nullable=True, index=True)
     # Before shapes, yields named a component code (C-…); still honoured for those plates.
     component_code: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # Geometry of the object (plates.geometry): NULL = not measured yet, [] = no mesh to measure.
+    fingerprint: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     plate: Mapped[FarmPlate] = relationship(back_populates="yields")
 
 
-add_columns("farm_plate_yields", {"shape_id": "INTEGER"})
+add_columns("farm_plate_yields", {"shape_id": "INTEGER", "fingerprint": "JSON"})

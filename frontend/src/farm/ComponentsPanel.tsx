@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Layers, Loader2, Pencil, Plus, Search } from 'lucide-react';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmComponent } from './api';
+import { farmApi, type FarmComponent, type FarmShape } from './api';
 import './i18n';
 
 const INPUT =
@@ -76,6 +76,48 @@ function InlineName({ value, label, onSave }: { value: string; label: string; on
   );
 }
 
+// A component made before shapes (e.g. imported as a whole product) gets its shape, keeping its code.
+// If another active component is already that shape in that colour, the two are one piece: offer to merge.
+function LinkShape({
+  component,
+  shapes,
+  components,
+  onLink,
+  onMerge,
+}: {
+  component: FarmComponent;
+  shapes: FarmShape[];
+  components: FarmComponent[];
+  onLink: (shapeId: number, color: string | null) => void;
+  onMerge: (into: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [shapeId, setShapeId] = useState('');
+  const [color, setColor] = useState('');
+  return (
+    <form className="flex flex-wrap gap-2 pt-1" title={t('farm.components.linkShapeHint')} onSubmit={(e) => {
+      e.preventDefault();
+      const id = Number(shapeId);
+      const c = color.trim() || null;
+      const twin = components.find((x) => !x.retired && x.code !== component.code && x.shape_id === id
+        && (x.color || '').toLowerCase() === (c || '').toLowerCase());
+      if (!twin) onLink(id, c);
+      else if (window.confirm(t('farm.components.mergeConfirm', { code: component.code, into: twin.code, name: twin.name })))
+        onMerge(twin.code);
+    }}>
+      <select aria-label={`${t('farm.products.shape')} ${component.code}`} className={`${INPUT} py-1 text-sm`}
+        value={shapeId} onChange={(e) => setShapeId(e.target.value)}>
+        <option value="">{t('farm.components.pickShape')}</option>
+        {shapes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+      <input aria-label={`${t('farm.components.colorOptional')} ${component.code}`} className={`${INPUT} py-1 text-sm w-36`}
+        placeholder={t('farm.components.colorOptional')} maxLength={50} value={color}
+        onChange={(e) => setColor(e.target.value)} />
+      <Button type="submit" size="sm" variant="secondary" disabled={!shapeId}>{t('farm.components.linkShape')}</Button>
+    </form>
+  );
+}
+
 export function ComponentsPanel() {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -94,8 +136,13 @@ export function ComponentsPanel() {
   const onError = (e: Error) => showToast(e.message, 'error');
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
   const updateComponent = useMutation({
-    mutationFn: ({ code, ...data }: { code: string; name?: string; retired?: boolean }) =>
+    mutationFn: ({ code, ...data }: { code: string; name?: string; retired?: boolean; shape_id?: number; color?: string | null }) =>
       farmApi.updateComponent(code, data),
+    onSuccess: refresh,
+    onError,
+  });
+  const mergeComponent = useMutation({
+    mutationFn: ({ code, into }: { code: string; into: string }) => farmApi.mergeComponent(code, into),
     onSuccess: refresh,
     onError,
   });
@@ -248,6 +295,11 @@ export function ComponentsPanel() {
                                 ` · ${loose ? t('farm.products.plates', { count: loose }) : t('farm.components.noPlateYet')}`}
                               {c.retired && ` · ${t('farm.components.retired')}`}
                             </p>
+                            {!shape && !c.retired && (
+                              <LinkShape component={c} shapes={shapes.data || []} components={components.data || []}
+                                onLink={(shapeId, color) => updateComponent.mutate({ code: c.code, shape_id: shapeId, color })}
+                                onMerge={(into) => mergeComponent.mutate({ code: c.code, into })} />
+                            )}
                           </div>
                           <Button type="button" variant="ghost" size="sm" onClick={() => {
                             if (c.retired) updateComponent.mutate({ code: c.code, retired: false });

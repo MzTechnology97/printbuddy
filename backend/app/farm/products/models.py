@@ -50,8 +50,14 @@ class FarmProduct(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
     skus: Mapped[list] = mapped_column(JSON, default=list)
     asins: Mapped[list] = mapped_column(JSON, default=list)
+    # Other listings of the same object: [{"skus", "asins", "color", "pieces"}]. Each sells ``pieces`` units
+    # of the product, in ``color`` (parts with a shape take the component of that shape in that colour).
+    variants: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+add_columns("farm_products", {"variants": "JSON"})
 
 
 class FarmProductPart(Base):

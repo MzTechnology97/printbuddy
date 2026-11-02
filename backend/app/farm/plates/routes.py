@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -11,12 +13,14 @@ from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plates.geometry import group
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield, FarmPrinterModelMap
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model
 from backend.app.farm.plates.service import (
     PlateReadError,
     confirm,
     folder_hint_warning,
+    link_by_geometry,
     refresh_plates,
     suggest_shapes,
 )
@@ -163,6 +167,84 @@ async def confirm_plate(plate_id: int, body: PlateUpdate, db: AsyncSession = Dep
     await db.commit()
     await db.refresh(plate, ["yields"])
     return _plate_dict(plate, await PrinterModelResolver.load(db))
+
+
+# ---------------------------------------------------------------- pieces (same geometry across plates)
+
+
+class PieceLink(BaseModel):
+    yield_ids: list[int] = Field(min_length=1, max_length=5000)
+    shape_id: int | None = None
+
+
+@router.get("/pieces")
+async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
+    """Distinct pieces on every plate, recognised by geometry whatever the object is called.
+
+    Linking a piece to its shape once covers all its plates (``PUT /pieces``). Pieces
+    with objects still to link come first.
+    """
+    rows = (
+        await db.execute(
+            select(FarmPlateYield, FarmPlate.library_file_id, FarmPlate.plate_index)
+            .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
+            .order_by(FarmPlateYield.id)
+        )
+    ).all()
+    files = dict(
+        (await db.execute(select(LibraryFile.id, LibraryFile.filename).where(LibraryFile.deleted_at.is_(None)))).all()
+    )
+    rows = [r for r in rows if r[0].fingerprint and r[1] in files]
+    pieces = []
+    for members in group([r[0].fingerprint for r in rows]):
+        items = [rows[i] for i in members]
+        names = Counter(y.object_name for y, _, _ in items)
+        shapes = Counter(y.shape_id for y, _, _ in items if y.shape_id is not None)
+        y0, file_id, plate_index = items[0]
+        pieces.append(
+            {
+                "yield_ids": [y.id for y, _, _ in items],
+                "names": [n for n, _ in names.most_common(5)],
+                "objects": sum(y.quantity for y, _, _ in items),
+                "plates": len({y.plate_id for y, _, _ in items}),
+                "files": sorted({files[f] for _, f, _ in items})[:3],
+                "file_count": len({f for _, f, _ in items}),
+                "shape_id": shapes.most_common(1)[0][0] if shapes else None,
+                "mixed": len(shapes) > 1,
+                "unlinked": sum(1 for y, _, _ in items if y.shape_id is None and y.component_code is None),
+                "suggested_shape_id": None,
+                "volume_mm3": round(y0.fingerprint[0], 1),
+                "hand": int(y0.fingerprint[5]),
+                "sample": {"library_file_id": file_id, "plate_index": plate_index},
+            }
+        )
+    open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
+    proposals = await suggest_shapes(db, open_names)
+    for p in pieces:
+        if p["shape_id"] is None:
+            p["suggested_shape_id"] = next((proposals[n] for n in p["names"] if n in proposals), None)
+    pieces.sort(key=lambda p: (p["unlinked"] == 0, -p["plates"]))
+    return pieces
+
+
+@router.put("/pieces")
+async def link_piece(body: PieceLink, db: AsyncSession = Depends(get_db), _=_write):
+    """Link every object of one piece (``yield_ids`` from ``GET /pieces``) to a shape.
+
+    Plates whose objects all have a shape are confirmed; other objects with the same
+    geometry on those plates get the shape too.
+    """
+    if body.shape_id is not None and await db.get(FarmShape, body.shape_id) is None:
+        raise HTTPException(status_code=422, detail="Unknown shape")
+    yields = list((await db.execute(select(FarmPlateYield).where(FarmPlateYield.id.in_(body.yield_ids)))).scalars())
+    for y in yields:
+        y.shape_id = body.shape_id
+    await db.flush()
+    plate_ids = {y.plate_id for y in yields}
+    plates = list((await db.execute(select(FarmPlate).where(FarmPlate.id.in_(plate_ids)))).scalars())
+    confirmed = await link_by_geometry(db, plates)
+    await db.commit()
+    return {"linked": len(yields), "plates_confirmed": confirmed}
 
 
 # ---------------------------------------------------------------- printer models
