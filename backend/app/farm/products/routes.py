@@ -31,7 +31,7 @@ from backend.app.farm.plates.service import plates_by_component, plates_by_shape
 from backend.app.farm.products.folders import linked_project_ids, set_linked_projects
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.archive import PrintArchive
-from backend.app.models.library import LibraryFolder
+from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.project import Project
 from backend.app.schemas.print_queue import serialize_utc_datetime
@@ -203,6 +203,127 @@ async def list_project_names(db: AsyncSession = Depends(get_db)) -> list[dict]:
 async def list_shapes(db: AsyncSession = Depends(get_db)) -> list[dict]:
     rows = (await db.execute(select(FarmShape).order_by(FarmShape.name))).scalars()
     return [{"id": s.id, "name": s.name} for s in rows]
+
+
+@router.get("/products/{project_id}/view", dependencies=[_read])
+async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """What the project page of a product shows: parts with their confirmed plates, and its 3MF files.
+
+    404 for projects that are not products (the page then keeps the upstream panels).
+    STL/STEP models are left out: only 3MF projects have plates.
+    """
+    from backend.app.farm.models import FarmLibraryFile
+    from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+    from backend.app.farm.plates.printer_map import PrinterModelResolver
+    from backend.app.farm.products.folders import project_folders
+
+    product = await db.get(FarmProduct, project_id)
+    if product is None:
+        raise HTTPException(404, "Not a product")
+    parts = (
+        await db.execute(
+            select(FarmProductPart, FarmComponent)
+            .join(FarmComponent, FarmComponent.id == FarmProductPart.component_id)
+            .where(FarmProductPart.project_id == project_id)
+            .order_by(FarmProductPart.sort_order)
+        )
+    ).all()
+    shapes = await _shape_names(db)
+    shape_ids = {c.shape_id for _, c in parts if c.shape_id}
+    codes = {c.code for _, c in parts if not c.shape_id}
+    plates = list(
+        (
+            await db.execute(
+                select(FarmPlate).where(
+                    FarmPlate.status == "confirmed",
+                    FarmPlate.yields.any(
+                        FarmPlateYield.shape_id.in_(shape_ids) | FarmPlateYield.component_code.in_(codes)
+                    ),
+                )
+            )
+        ).scalars()
+    )
+    folders = await project_folders(db, project_id)
+    files = list(
+        (
+            await db.execute(
+                LibraryFile.active()
+                .where(LibraryFile.folder_id.in_(folders), LibraryFile.filename.ilike("%.3mf"))
+                .where(LibraryFile.filename.not_ilike("%.gcode.3mf"))
+                .order_by(LibraryFile.filename)
+            )
+        ).scalars()
+    )
+    file_ids = {f.id for f in files} | {p.library_file_id for p in plates}
+    paths = dict(
+        (
+            await db.execute(
+                select(FarmLibraryFile.library_file_id, FarmLibraryFile.path).where(
+                    FarmLibraryFile.library_file_id.in_(file_ids)
+                )
+            )
+        ).all()
+    )
+    counts: dict[int, dict] = {}
+    for file_id, status, n in (
+        await db.execute(
+            select(FarmPlate.library_file_id, FarmPlate.status, func.count())
+            .where(FarmPlate.library_file_id.in_({f.id for f in files}))
+            .group_by(FarmPlate.library_file_id, FarmPlate.status)
+        )
+    ).all():
+        counts.setdefault(file_id, {"proposed": 0, "confirmed": 0})[status] = n
+    resolver = await PrinterModelResolver.load(db)
+
+    def plates_of(c: FarmComponent) -> list[dict]:
+        out = []
+        for p in plates:
+            pieces = sum(
+                y.quantity
+                for y in p.yields
+                if (c.shape_id and y.shape_id == c.shape_id) or (not c.shape_id and y.component_code == c.code)
+            )
+            if pieces:
+                out.append(
+                    {
+                        "plate_id": p.id,
+                        "library_file_id": p.library_file_id,
+                        "file": paths.get(p.library_file_id, ""),
+                        "plate": p.plate_index,
+                        "printer_model": resolver.resolve(p.printer_model).target_model or p.printer_model,
+                        "material": "+".join(p.materials or []),
+                        "yield": pieces,
+                        "print_time_seconds": p.print_time_seconds,
+                        "filament_grams": p.filament_grams,
+                        "sliced": p.sliced_file_id is not None,
+                    }
+                )
+        return sorted(out, key=lambda o: (-o["yield"], o["printer_model"] or ""))
+
+    return {
+        "project_id": project_id,
+        "skus": product.skus or [],
+        "asins": product.asins or [],
+        "parts": [
+            {
+                **_component_dict(c, shapes),
+                "quantity": part.quantity,
+                "plates": plates_of(c),
+            }
+            for part, c in parts
+        ],
+        "files": [
+            {
+                "library_file_id": f.id,
+                "filename": f.filename,
+                "path": paths.get(f.id, f.filename),
+                "folder": folders.get(f.folder_id, ""),
+                **counts.get(f.id, {"proposed": 0, "confirmed": 0}),
+                "opened": f.id in counts,
+            }
+            for f in files
+        ],
+    }
 
 
 @router.get("/products/overview", dependencies=[_read])

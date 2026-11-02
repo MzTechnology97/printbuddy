@@ -4,6 +4,17 @@ import i18n from '../i18n';
 
 const en = {
   nav: { products: 'Products', printPlan: 'What to print' },
+  project: {
+    title: 'Product',
+    openProducts: 'Open in Products',
+    parts: 'Parts (printed pieces per unit) and their confirmed plates',
+    files: '3MF projects in the linked folders',
+    noFiles: 'No 3MF project in the linked folders.',
+    confirmPlates: 'Confirm plates',
+    yield_one: '{{count}} piece',
+    yield_other: '{{count}} pieces',
+    notSliced: 'to slice',
+  },
   jobs: {
     title: 'Accoda jobs',
     accoda: 'Queue',
@@ -165,6 +176,17 @@ const en = {
 
 const it: typeof en = {
   nav: { products: 'Prodotti', printPlan: 'Cosa stampare' },
+  project: {
+    title: 'Prodotto',
+    openProducts: 'Apri in Prodotti',
+    parts: 'Parti (pezzi stampati per unità) e loro piatti confermati',
+    files: 'Progetti 3MF nelle cartelle collegate',
+    noFiles: 'Nessun progetto 3MF nelle cartelle collegate.',
+    confirmPlates: 'Conferma i piatti',
+    yield_one: '{{count}} pezzo',
+    yield_other: '{{count}} pezzi',
+    notSliced: 'da slicare',
+  },
   jobs: {
     title: 'Lavori in Accoda',
     accoda: 'Accoda',

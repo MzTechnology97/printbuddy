@@ -36,6 +36,7 @@ import {
   FileBox,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { FarmProductGate } from '../farm/ProductProjectPanel'; // fork: printfarm products
 import { parseUTCDate, formatDateOnly, formatDateTime, formatDurationFromHours, type TimeFormat } from '../utils/date';
 import type { Archive, ProjectUpdate, BOMItem, BOMItemCreate, BOMItemUpdate, LibraryFileListItem, Printer as PrintbuddyPrinter, PrinterStatus, PrintQueueItem, SpoolAssignment } from '../api/client';
 import { Card, CardContent } from '../components/Card';
@@ -1124,8 +1125,10 @@ export function ProjectDetailPage() {
         </div>
       )}
 
+      <FarmProductGate projectId={projectId} panel>{/* fork: products get the farm view */}
       <ProductionPlan bomItems={bomItems || []} archives={archives || []} files={allProjectFiles || []} fileStates={productionFileStates} onStageFile={(file) => { setSchedulePrinterIds([]); setScheduleFile(file); }} />
       <DispatchSuggestions suggestions={dispatchSuggestions} onReview={(suggestion) => { setSchedulePrinterIds(suggestion.printer ? [suggestion.printer.id] : []); setScheduleFile(suggestion.file); }} />
+      </FarmProductGate>
 
       {/* Cost tracking */}
       {stats && (() => {
@@ -1479,6 +1482,7 @@ export function ProjectDetailPage() {
       </Card>
 
       {/* BOM Section - Parts to source/purchase */}
+      <FarmProductGate projectId={projectId}>{/* fork: products have no upstream BOM */}
       <Card>
         <CardContent className="p-4">
           <div className="flex items-center justify-between mb-4">
@@ -1760,6 +1764,7 @@ export function ProjectDetailPage() {
           )}
         </CardContent>
       </Card>
+      </FarmProductGate>
 
       {/* Timeline Section */}
       <Card>
