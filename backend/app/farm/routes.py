@@ -166,11 +166,10 @@ async def get_project_settings(library_file_id: int, db: AsyncSession = Depends(
 
     Reads only ``project_settings.config`` (a ranged read for NAS files: nothing is downloaded).
     """
-    import asyncio
     import zipfile
 
     from backend.app.farm.detect import SLICEABLE, read_project_settings
-    from backend.app.farm.nas.access import read_file
+    from backend.app.farm.nas.access import read_file, run as access_run
     from backend.app.farm.slicing import sidecar_url
 
     lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == library_file_id))
@@ -180,7 +179,7 @@ async def get_project_settings(library_file_id: int, db: AsyncSession = Depends(
         raise HTTPException(status_code=400, detail="Only unsliced 3MF projects carry project settings")
     st = await _file_state(db, library_file_id)
     try:
-        cfg = await asyncio.to_thread(read_file, lib_file.file_path, read_project_settings)
+        cfg = await access_run(read_file, lib_file.file_path, read_project_settings)
     except (OSError, zipfile.BadZipFile) as exc:
         raise HTTPException(status_code=422, detail=f"Cannot read the project settings: {exc}"[:500]) from exc
 

@@ -108,7 +108,7 @@ async def ensure_local(db: AsyncSession, lib_file: LibraryFile) -> bool:
         path = access.library_path(lib_file.file_path)
         async with _locks[str(path)]:
             if not await asyncio.to_thread(_fresh, path, state.size, state.mtime):
-                await asyncio.to_thread(_download, active, parts, path, state.mtime)
+                await access.run(_download, active, parts, path, state.mtime)
         cfg = await service.load(db)
         await asyncio.to_thread(evict, active.cache_root, cfg.cache_mb * 1024 * 1024)
         return True

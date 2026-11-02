@@ -7,8 +7,11 @@ plates) go straight to the NAS instead, so nothing is downloaded for them.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO, TypeVar
 
@@ -16,6 +19,15 @@ from backend.app.core.config import settings as app_settings
 from backend.app.farm.nas.remote import Remote, with_retry
 
 T = TypeVar("T")
+
+# SMB calls run in their own small pool, not in the default one that printer polling also uses:
+# a NAS that stops answering can hold these threads, never the rest of Printbuddy.
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nas")
+
+
+async def run(fn: Callable[..., T], *args) -> T:
+    """``asyncio.to_thread`` for anything that may talk to the NAS."""
+    return await asyncio.get_running_loop().run_in_executor(_executor, partial(fn, *args))
 
 
 def library_path(path: str | Path) -> Path:

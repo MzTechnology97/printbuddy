@@ -515,3 +515,55 @@ def test_smb_refused_connection_is_retryable(monkeypatch):
     monkeypatch.setattr(smbclient, "open_file", refused)
     with pytest.raises(NasConnectionError, match="refused"):
         SmbRemote("nas.test", "share", "farm", "x").copy_to((SUB, "a.3mf"), io.BytesIO())
+
+
+def test_unanswered_request_is_dropped_and_frees_the_session(monkeypatch):
+    """smbprotocol waits for a response forever: the watchdog drops the connection instead."""
+    import threading
+
+    from smbprotocol.exceptions import SMBConnectionClosed
+
+    from backend.app.farm.nas.remote import NasBusyError, NasConnectionError, SmbRemote
+
+    monkeypatch.setattr(remote, "OP_TIMEOUT", 0.2)
+    monkeypatch.setattr(remote, "LOCK_TIMEOUT", 0.3)
+    nas = SmbRemote("nas.test", "share", "farm", "x")
+    dropped = threading.Event()
+
+    class StuckConnection:  # what a NAS that never answers looks like from the caller
+        def disconnect(self, close=True):
+            assert close is False  # no polite logoff: it would wait on the server too
+            dropped.set()
+
+    nas._cache["nas.test:445"] = StuckConnection()
+
+    with pytest.raises(NasConnectionError), nas._session():
+        assert dropped.wait(5), "the watchdog never fired"
+        raise SMBConnectionClosed("socket closed")  # what the woken request raises
+    assert nas._cache == {}  # the next request opens a new connection
+    with nas._session():  # and the session is free again
+        pass
+
+    # A session held for too long makes the next caller give up instead of waiting forever.
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with nas._session():
+            holding.set()
+            release.wait(5)
+
+    monkeypatch.setattr(remote, "OP_TIMEOUT", 10)
+    worker = threading.Thread(target=hold)
+    worker.start()
+    holding.wait(5)
+    with pytest.raises(NasBusyError), nas._session():
+        pass
+    release.set()
+    worker.join()
+
+
+async def test_nas_calls_run_in_their_own_pool():
+    import threading
+
+    assert (await access.run(lambda: threading.current_thread().name)).startswith("nas")

@@ -155,7 +155,7 @@ async def _store(
     db: AsyncSession, active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes, overwrite: bool = False
 ) -> tuple[RemoteEntry, Path]:
     """Write a file on the NAS and keep its cache copy; returns the NAS entry and the library path."""
-    entry = await asyncio.to_thread(_publish, active, out_dir, name, data, overwrite)
+    entry = await access.run(_publish, active, out_dir, name, data, overwrite)
     path = active.cache_root.joinpath(*out_dir[len(active.base) :], entry.name)
 
     def keep_copy() -> None:
