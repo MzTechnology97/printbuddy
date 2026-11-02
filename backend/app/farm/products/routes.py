@@ -432,6 +432,10 @@ from backend.app.farm.plan.routes import router as plan_router  # noqa: E402  (p
 
 router.include_router(plan_router)
 
+from backend.app.farm.jobs.routes import router as jobs_router  # noqa: E402
+
+router.include_router(jobs_router)
+
 
 # ---------------------------------------------------------------- one-off import from Seller Hub
 

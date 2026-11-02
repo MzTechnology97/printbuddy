@@ -75,6 +75,7 @@ from backend.app.core.config import APP_VERSION, settings as app_settings
 from backend.app.core.database import async_session, engine, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.farm import routes as farm_routes  # fork: printfarm
+from backend.app.farm.jobs.service import farm_job_dispatcher  # fork: printfarm Accoda
 from backend.app.farm.library_sync import farm_library_scheduler  # fork: printfarm
 from backend.app.farm.nas.cache import NasCacheMiddleware  # fork: printfarm
 from backend.app.models.smart_plug import SmartPlug
@@ -6012,6 +6013,7 @@ async def lifespan(app: FastAPI):
     # Start the library trash sweeper (#1008)
     await library_trash_service.start_scheduler()
     farm_library_scheduler.start()  # fork: periodic sync of watched NAS folders
+    farm_job_dispatcher.start()  # fork: places Accoda jobs on free printers
 
     # Start the archive auto-purge sweeper (#1008 follow-up)
     await archive_purge_service.start_scheduler()
@@ -6062,6 +6064,7 @@ async def lifespan(app: FastAPI):
     local_backup_service.stop_scheduler()
     library_trash_service.stop_scheduler()
     farm_library_scheduler.stop()
+    farm_job_dispatcher.stop()
     archive_purge_service.stop_scheduler()
     obico_detection_service.stop()
     stop_ams_history_recording()

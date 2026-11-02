@@ -3,10 +3,10 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ClipboardList, Loader2, RefreshCw, Settings2 } from 'lucide-react';
+import { AlertTriangle, ClipboardList, ListPlus, Loader2, RefreshCw, Settings2, X } from 'lucide-react';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmPlanComponent, type FarmPlanPlate, type FarmPlanSettings } from './api';
+import { farmApi, type FarmJob, type FarmPlanComponent, type FarmPlanPlate, type FarmPlanSettings } from './api';
 import './i18n';
 
 const INPUT =
@@ -67,13 +67,21 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
   );
 }
 
-function ComponentCard({ c }: { c: FarmPlanComponent }) {
+function ComponentCard({ c, selected, onSelect, onAccoda }: {
+  c: FarmPlanComponent;
+  selected: boolean;
+  onSelect: (on: boolean) => void;
+  onAccoda: () => void;
+}) {
   const { t } = useTranslation();
   const [all, setAll] = useState(false);
   const plates = all ? c.plates : c.plates.slice(0, 2);
+  const canQueue = c.plates.length > 0 && c.missing > 0;
   return (
     <li className="bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4 space-y-3">
       <div className="flex flex-wrap items-start gap-3">
+        <input type="checkbox" aria-label={`${t('farm.jobs.select')} ${c.code}`} className="mt-1"
+          disabled={!canQueue} checked={selected} onChange={(e) => onSelect(e.target.checked)} />
         <span className={`text-xs px-2 py-0.5 rounded border ${STATUS_STYLE[c.status] || 'border-bambu-dark-tertiary text-bambu-gray'}`}>
           {t(`farm.plan.status.${c.status}`, { defaultValue: c.status })}
         </span>
@@ -93,6 +101,10 @@ function ComponentCard({ c }: { c: FarmPlanComponent }) {
             {c.days_left != null && ` · ${t('farm.plan.daysLeft', { count: Math.round(c.days_left) })}`}
           </p>
         </div>
+        <Button size="sm" disabled={!canQueue} onClick={onAccoda}
+          title={c.missing <= 0 ? t('farm.jobs.covered') : undefined}>
+          <ListPlus className="w-4 h-4" /> {t('farm.jobs.accoda')}
+        </Button>
       </div>
       {!c.known ? (
         <p className="text-sm text-amber-400">{t('farm.plan.unknown')}</p>
@@ -171,9 +183,115 @@ function SettingsCard({ settings, onClose }: { settings: FarmPlanSettings; onClo
   );
 }
 
+function AccodaSummary({ components, onClose, onDone }: {
+  components: FarmPlanComponent[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const usable = components.filter((c) => c.plates.length > 0 && c.missing > 0);
+  const create = useMutation({
+    mutationFn: () =>
+      farmApi.createJobs(usable.map((c) => ({ component_code: c.code, plate_ids: c.plates.map((p) => p.plate_id) }))),
+    onSuccess: (jobs) => {
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+      showToast(t('farm.jobs.created', { count: jobs.length }), 'success');
+      onDone();
+      onClose();
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div role="dialog" aria-label={t('farm.jobs.summaryTitle')}
+        className="bg-bambu-dark-secondary rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col border border-bambu-dark-tertiary">
+        <div className="p-4 border-b border-bambu-dark-tertiary flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">{t('farm.jobs.summaryTitle')}</h2>
+          <button onClick={onClose} className="p-1 hover:bg-bambu-dark rounded" aria-label={t('farm.products.cancel')}>
+            <X className="w-5 h-5 text-bambu-gray" />
+          </button>
+        </div>
+        <div className="p-4 space-y-4 overflow-y-auto">
+          <p className="text-sm text-bambu-gray">{t('farm.jobs.summaryIntro')}</p>
+          {usable.map((c) => {
+            const best = c.plates[0];
+            return (
+              <section key={c.code} className="space-y-2">
+                <p className="text-white flex items-center gap-2">
+                  {c.color_hex && (
+                    <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60"
+                      style={{ background: `#${c.color_hex}` }} />
+                  )}
+                  <span className="font-mono text-bambu-green">{c.code}</span> {c.name}
+                </p>
+                <p className="text-xs text-bambu-gray">
+                  {t('farm.jobs.onePrint', { pieces: best.yield, missing: c.missing })}
+                  {best.print_time_seconds ? ` · ${duration(best.print_time_seconds)}` : ''}
+                  {best.filament_grams ? ` · ${Math.round(best.filament_grams)} g` : ''}
+                </p>
+                <ul className="space-y-2">
+                  {c.plates.map((p, i) => (
+                    <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+          {usable.length < components.length && <p className="text-xs text-amber-400">{t('farm.jobs.skipped')}</p>}
+        </div>
+        <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>
+          <Button disabled={!usable.length || create.isPending} onClick={() => create.mutate()}>
+            {create.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t('farm.jobs.confirm', { count: usable.length })}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JobsList() {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const jobs = useQuery({ queryKey: ['farm', 'jobs'], queryFn: farmApi.getJobs, refetchInterval: 30_000 });
+  const cancel = useMutation({
+    mutationFn: (id: number) => farmApi.cancelJob(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  if (!jobs.data?.length) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-lg font-semibold text-white">{t('farm.jobs.title')}</h2>
+      <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
+        {jobs.data.map((j: FarmJob) => (
+          <li key={j.id} className="p-3 flex flex-wrap items-center gap-3 text-sm">
+            <span className="font-mono text-bambu-green">{j.component_code}</span>
+            <span className="text-white">{j.color}</span>
+            <span className="text-bambu-gray">{t('farm.plan.yield', { count: j.pieces })}</span>
+            <span className="text-white">{t(`farm.jobs.state.${j.state}`, { defaultValue: j.state })}</span>
+            {j.printer && <span className="text-bambu-gray">· {j.printer}</span>}
+            {j.state === 'waiting' && j.note && <span className="text-xs text-amber-400 break-words min-w-0 flex-1">{j.note}</span>}
+            {(j.state === 'waiting' || j.state === 'pending') && (
+              <Button size="sm" variant="ghost" className="ml-auto" onClick={() => cancel.mutate(j.id)}>
+                {t('farm.jobs.cancel')}
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function PrintPlanPage() {
   const { t } = useTranslation();
   const [showSettings, setShowSettings] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [summary, setSummary] = useState<FarmPlanComponent[] | null>(null);
   const plan = useQuery({ queryKey: ['farm', 'plan'], queryFn: farmApi.getPlan, refetchInterval: 60_000 });
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
   const rows = plan.data?.components || [];
@@ -195,6 +313,8 @@ export function PrintPlanPage() {
       </div>
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.plan.intro')}</p>
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
+      <JobsList />
+      {summary && <AccodaSummary components={summary} onClose={() => setSummary(null)} onDone={() => setSelected(new Set())} />}
       {plan.data?.error && (
         <p className="text-sm text-amber-400 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" />
@@ -210,13 +330,26 @@ export function PrintPlanPage() {
         <p className="text-bambu-gray">{t('farm.plan.nothing')}</p>
       ) : (
         <>
-          <p className="text-xs text-bambu-gray">
-            {t('farm.plan.summary', { count: rows.length, pieces: rows.reduce((n, r) => n + r.missing, 0) })}
-            {plan.data?.fetched_at && ` · ${t('farm.plan.updated', { at: plan.data.fetched_at })}`}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-bambu-gray">
+              {t('farm.plan.summary', { count: rows.length, pieces: rows.reduce((n, r) => n + r.missing, 0) })}
+              {plan.data?.fetched_at && ` · ${t('farm.plan.updated', { at: plan.data.fetched_at })}`}
+            </p>
+            <Button size="sm" disabled={selected.size === 0}
+              onClick={() => setSummary(rows.filter((r) => selected.has(r.code)))}>
+              <ListPlus className="w-4 h-4" /> {t('farm.jobs.accodaSelected', { count: selected.size })}
+            </Button>
+          </div>
           <ul className="space-y-3">
             {rows.map((c) => (
-              <ComponentCard key={c.code} c={c} />
+              <ComponentCard key={c.code} c={c} selected={selected.has(c.code)}
+                onSelect={(on) => {
+                  const next = new Set(selected);
+                  if (on) next.add(c.code);
+                  else next.delete(c.code);
+                  setSelected(next);
+                }}
+                onAccoda={() => setSummary([c])} />
             ))}
           </ul>
         </>

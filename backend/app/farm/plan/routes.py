@@ -25,7 +25,9 @@ class PlanSettingsIn(BaseModel):
 
 @router.get("/plan", dependencies=[_read])
 async def get_plan(db: AsyncSession = Depends(get_db)) -> dict:
-    return await service.build_plan(db)
+    from backend.app.farm.jobs.service import queued_pieces
+
+    return await service.build_plan(db, queued=await queued_pieces(db))
 
 
 @router.get("/plan/settings", dependencies=[_read])
