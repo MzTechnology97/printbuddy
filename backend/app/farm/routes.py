@@ -154,6 +154,59 @@ async def set_slicer_override(
     return _state_dict(st)
 
 
+def _as_list(value) -> list[str]:
+    if value is None:
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+
+@router.get("/library/files/{library_file_id}/project")
+async def get_project_settings(library_file_id: int, db: AsyncSession = Depends(get_db), _=_read):
+    """What slicing with the project's own settings will use: slicer and sidecar, printer, process, filaments.
+
+    Reads only ``project_settings.config`` (a ranged read for NAS files: nothing is downloaded).
+    """
+    import asyncio
+    import zipfile
+
+    from backend.app.farm.detect import SLICEABLE, read_project_settings
+    from backend.app.farm.nas.access import read_file
+    from backend.app.farm.slicing import sidecar_url
+
+    lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == library_file_id))
+    if lib_file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    if lib_file.file_type != "3mf":
+        raise HTTPException(status_code=400, detail="Only unsliced 3MF projects carry project settings")
+    st = await _file_state(db, library_file_id)
+    try:
+        cfg = await asyncio.to_thread(read_file, lib_file.file_path, read_project_settings)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot read the project settings: {exc}"[:500]) from exc
+
+    names, types, colors = (_as_list(cfg.get(k)) for k in ("filament_settings_id", "filament_type", "filament_colour"))
+    sliceable = st.status == "ok" and st.slicer in SLICEABLE
+    return {
+        "slicer": st.slicer,
+        "sliceable": sliceable,
+        "sidecar_url": await sidecar_url(db, st.slicer) if sliceable else None,
+        "printer_model": st.printer_model,
+        "printer_model_raw": st.printer_model_raw,
+        "printer_preset": next(iter(_as_list(cfg.get("printer_settings_id"))), None),
+        "process_preset": next(iter(_as_list(cfg.get("print_settings_id"))), None),
+        "nozzle_diameter": next(iter(_as_list(cfg.get("nozzle_diameter"))), None),
+        "filaments": [
+            {
+                "index": i + 1,
+                "preset": names[i] if i < len(names) else None,
+                "type": types[i] if i < len(types) else None,
+                "color": colors[i] if i < len(colors) else None,
+            }
+            for i in range(max(len(names), len(types), len(colors)))
+        ],
+    }
+
+
 @router.post("/library/files/{library_file_id}/slice", status_code=202)
 async def slice_farm_file(library_file_id: int, body: FarmSliceRequest, db: AsyncSession = Depends(get_db), _=_write):
     """Slice with the 3MF's own settings on the sidecar of its slicer. Poll ``status_url``."""

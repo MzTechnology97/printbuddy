@@ -370,6 +370,43 @@ class TestEmbeddedSlicing:
         assert out.file_metadata["sliced_with"] == "orcaslicer"
         assert response.used_embedded_settings is True
 
+    async def test_project_settings_show_what_the_slice_will_use(self, async_client, watched, nas):
+        path = nas / "Handle" / "K2-handle.3mf"
+        path.parent.mkdir()
+        settings = {
+            "printer_model": "Creality K2 Pro",
+            "printer_settings_id": "Creality K2 Pro 0.4 nozzle",
+            "print_settings_id": "0.20mm Standard @Creality K2 Pro",
+            "nozzle_diameter": ["0.4"],
+            "filament_settings_id": ["Generic PETG-CF @K2-all", "Generic PLA @K2-all"],
+            "filament_type": ["PETG-CF", "PLA"],
+            "filament_colour": ["#000000", "#FFFFFF"],
+        }
+        with zipfile.ZipFile(path, "w") as zf:
+            meta = "".join(f'<metadata name="{k}">{v}</metadata>' for k, v in ORCA_25.items())
+            zf.writestr("3D/3dmodel.model", f"<model>{meta}<resources/></model>")
+            zf.writestr("Metadata/project_settings.config", json.dumps(settings))
+        age(path)
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["K2-handle.3mf"]["library_file_id"]
+
+        resp = await async_client.get(f"/api/v1/farm/library/files/{file_id}/project")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "slicer": "orcaslicer",
+            "sliceable": True,
+            "sidecar_url": library.app_settings.slicer_api_url.strip(),
+            "printer_model": resp.json()["printer_model"],  # canonical name, covered by detection tests
+            "printer_model_raw": "Creality K2 Pro",
+            "printer_preset": "Creality K2 Pro 0.4 nozzle",
+            "process_preset": "0.20mm Standard @Creality K2 Pro",
+            "nozzle_diameter": "0.4",
+            "filaments": [
+                {"index": 1, "preset": "Generic PETG-CF @K2-all", "type": "PETG-CF", "color": "#000000"},
+                {"index": 2, "preset": "Generic PLA @K2-all", "type": "PLA", "color": "#FFFFFF"},
+            ],
+        }
+
     async def test_cad_export_is_rejected(self, async_client, watched, nas, sidecar):
         make_3mf(nas / "cad.3mf", {})
         await scan(async_client, watched)

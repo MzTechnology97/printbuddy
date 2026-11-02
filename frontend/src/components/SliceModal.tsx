@@ -25,6 +25,9 @@ import {
   EMPTY_COMPATIBILITY_INDEX,
   type PrinterCompatibilityIndex,
 } from '../utils/slicerPrinterMatch';
+// fork: printfarm — slice with the 3MF's own project settings by default.
+import { ProjectModeToggle, ProjectSettingsPanel } from '../farm/projectSlice';
+import { farmProjectApi, isProjectFile, pickProjectPrinter, projectFilamentName } from '../farm/projectSliceApi';
 
 export type SliceSource =
   | { kind: 'libraryFile'; id: number; filename: string }
@@ -403,6 +406,20 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
     staleTime: 60_000,
   });
 
+  // fork: printfarm — what the 3MF carries (slicer, printer, process, filaments). For a
+  // sliceable project the default is to slice with those settings; presets are opt-in.
+  const projectQuery = useQuery({
+    queryKey: ['farmProjectSettings', source.id],
+    queryFn: () => farmProjectApi.get(source.id),
+    enabled: source.kind === 'libraryFile' && isProjectFile(source.filename),
+    retry: false,
+    staleTime: 60_000,
+  });
+  const projectInfo = projectQuery.data;
+  const [projectChoice, setProjectChoice] = useState<boolean | null>(null);
+  const projectMode = !!projectInfo?.sliceable && (projectChoice ?? true);
+  const projectPending = projectQuery.isLoading;
+
   const isMultiPlate =
     !!platesQuery.data?.is_multi_plate && (platesQuery.data?.plates?.length ?? 0) > 1;
   // Single-plate / non-3MF / fetch failure: skip the picker, default to plate 1
@@ -438,7 +455,8 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       }
       return api.getArchiveFilamentRequirements(source.id, effectivePlateId, previewRequestId);
     },
-    enabled: !needsPlatePicker,
+    // fork: not in project mode — the preview slice isn't needed (and would fetch NAS files).
+    enabled: !needsPlatePicker && !projectPending && !projectMode,
     staleTime: 60_000,
   });
 
@@ -550,14 +568,17 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   // presets first arrive; later re-renders preserve any manual choice.
   useEffect(() => {
     const data = presetsQuery.data;
-    if (!data) return;
+    if (!data || projectPending) return;
     if (printerPreset == null) {
       setPrinterPreset(
-        findPresetByName(data, 'printer', embeddedPrinter) ?? pickDefault(data, 'printer'),
+        findPresetByName(data, 'printer', embeddedPrinter) ??
+          // fork: same printer model and nozzle as the 3MF before falling back to the first listed one.
+          pickProjectPrinter(data, projectInfo) ??
+          pickDefault(data, 'printer'),
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetsQuery.data, embeddedPrinter]);
+  }, [presetsQuery.data, embeddedPrinter, projectPending, projectInfo]);
 
   // Process pre-pick / re-pick (#1325): defaults to a process compatible with
   // the selected printer, and re-defaults when a printer change leaves the
@@ -594,6 +615,16 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
             return cur;
           }
         }
+        // fork: the filament preset saved in the 3MF for this slot, when available and compatible.
+        const projectRef = findPresetByName(data, 'filament', projectFilamentName(projectInfo, slot.slot_id));
+        const projectPreset = findPreset(data, projectRef, 'filament');
+        if (
+          projectRef &&
+          projectPreset &&
+          presetCompatibility(projectPreset, 'filament', selectedPrinterName, compatIndex) !== 'mismatch'
+        ) {
+          return projectRef;
+        }
         return (
           pickFilamentForLoadedSpool(
             data,
@@ -611,7 +642,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
         );
       });
     });
-  }, [presetsQuery.data, filamentSlots, selectedPrinterName, compatIndex, loadedSpoolForSelectedPrinter]);
+  }, [presetsQuery.data, filamentSlots, selectedPrinterName, compatIndex, loadedSpoolForSelectedPrinter, projectInfo]);
 
   // Bundle-mode auto-pick: when the user picks a bundle (or the slot count
   // changes after the picker is open), default the process to the bundle's
@@ -644,6 +675,8 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
 
   const enqueueMutation = useMutation({
     mutationFn: async (plate: number | null) => {
+      // fork: project settings go to the sidecar of the slicer that saved the file.
+      if (projectMode) return farmProjectApi.slice(source.id, plate);
       const body = buildSliceBody(plate);
       if (source.kind === 'libraryFile') {
         return api.sliceLibraryFile(source.id, body);
@@ -709,7 +742,9 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   // Slice button stays disabled until the preview slice / embedded-metadata
   // read has succeeded (filamentReqsQuery.isSuccess) and every filament slot
   // has a picked profile.
-  const isReady = isBundleMode
+  const isReady = projectMode
+    ? true
+    : isBundleMode
     ? selectedBundle != null &&
       bundleProcessName != null &&
       filamentReqsQuery.isSuccess &&
@@ -722,7 +757,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       filamentPresets.every((r) => r != null);
   const isEnqueuing = enqueueMutation.isPending;
   const totalPlateCount = platesQuery.data?.plates?.length ?? 0;
-  const canSliceAll = isMultiPlate && totalPlateCount > 1 && !needsPlatePicker;
+  const canSliceAll = isMultiPlate && totalPlateCount > 1 && !needsPlatePicker && !projectMode;
 
   // Step 1: plate picker for multi-plate 3MF sources. Cancelling closes the
   // entire flow (matches the existing PlatePickerModal contract used by the
@@ -777,17 +812,24 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* fork: printfarm — project settings (default) or presets. */}
+          {projectInfo?.sliceable && (
+            <ProjectModeToggle projectMode={projectMode} onChange={setProjectChoice} disabled={isEnqueuing} />
+          )}
+          {projectInfo && (projectMode || !projectInfo.sliceable) && (
+            <ProjectSettingsPanel info={projectInfo} plate={selectedPlate} />
+          )}
           {/* Preset listing loader — printer/process dropdowns can't render
               without it. Plate query reuses the same spinner since it's
               also blocking. */}
-          {(platesQuery.isLoading || presetsQuery.isLoading) && (
+          {!projectMode && (platesQuery.isLoading || presetsQuery.isLoading) && (
             <div className="flex items-center gap-2 text-bambu-gray text-sm">
               <Loader2 className="w-4 h-4 animate-spin" />
               {t('slice.loadingPresets')}
             </div>
           )}
 
-          {presetsQuery.isError && (
+          {!projectMode && presetsQuery.isError && (
             <div className="text-sm text-red-400" role="alert">
               {t(
                 'slice.presetsLoadFailed',
@@ -796,7 +838,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
             </div>
           )}
 
-          {presetsQuery.data && (
+          {!projectMode && presetsQuery.data && (
             <>
               <CloudStatusBanner status={presetsQuery.data.cloud_status} />
               {/* Bundle picker — only renders when at least one .bbscfg has
