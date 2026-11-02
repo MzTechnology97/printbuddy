@@ -3923,6 +3923,8 @@ export const api = {
     }>(`/printers/${printerId}/files/plates?path=${encodeURIComponent(path)}`),
   getPrinterFilePlateThumbnail: (printerId: number, plateIndex: number, path: string) =>
     withStreamToken(`${API_BASE}/printers/${printerId}/files/plate-thumbnail/${plateIndex}?path=${encodeURIComponent(path)}`),
+  getPrinterFileThumbnail: (printerId: number, path: string, version?: string | null) =>
+    withStreamToken(`${API_BASE}/printers/${printerId}/files/thumbnail?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version ?? '')}`),
   downloadPrinterFile: async (printerId: number, path: string): Promise<void> => {
     const headers: Record<string, string> = {};
     if (authToken) {

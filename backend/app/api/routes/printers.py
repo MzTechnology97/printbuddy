@@ -1289,6 +1289,31 @@ _cover_cache: dict[int, dict[tuple[str, str], bytes]] = {}
 _cover_404_cache: dict[int, set[tuple[str, str]]] = {}
 
 
+# Provider (Moonraker) gcode thumbnails: (printer_id, path, version) -> PNG bytes,
+# b"" when the file has none. The browser never talks to the printer directly.
+# shortcut: cleared wholesale at 512 entries, swap for an LRU if file lists get larger.
+_provider_thumb_cache: dict[tuple[int, str, str], bytes] = {}
+
+
+async def _provider_file_thumbnail(printer_id: int, provider_client, path: str, version: str = "") -> bytes:
+    get_thumbnail = getattr(provider_client, "get_thumbnail", None)
+    if get_thumbnail is None:
+        raise HTTPException(404, "This printer provider does not expose file thumbnails")
+    key = (printer_id, path, version)
+    if key not in _provider_thumb_cache:
+        try:
+            image = await asyncio.to_thread(get_thumbnail, path)
+        except Exception as exc:  # noqa: BLE001 - printer unreachable or metadata missing
+            logger.debug("Thumbnail lookup failed for printer %s: %s", printer_id, type(exc).__name__)
+            raise HTTPException(502, f"Could not read thumbnail: {type(exc).__name__}") from exc
+        if len(_provider_thumb_cache) >= 512:
+            _provider_thumb_cache.clear()
+        _provider_thumb_cache[key] = image or b""
+    if not _provider_thumb_cache[key]:
+        raise HTTPException(404, f"No thumbnail for {path}")
+    return _provider_thumb_cache[key]
+
+
 def clear_cover_cache(printer_id: int) -> None:
     """Clear cached cover images for a printer. Call on print start to avoid stale thumbnails."""
     _cover_cache.pop(printer_id, None)
@@ -1321,6 +1346,11 @@ async def get_printer_cover(
     subtask_name = state.subtask_name
     if not subtask_name:
         raise HTTPException(404, f"No subtask_name in printer state (state={state.state})")
+
+    provider_client = _provider_for_printer(printer)
+    if provider_client is not None:
+        image = await _provider_file_thumbnail(printer_id, provider_client, state.gcode_file or subtask_name)
+        return Response(content=image, media_type="image/png")
 
     # Resolve the active plate. Precedence (#1166):
     #   1. The plate Printbuddy dispatched (authoritative when we sent the print)
@@ -2235,6 +2265,26 @@ async def get_printer_file_plate_thumbnail(
         pass  # Corrupt or unreadable 3MF; fall through to 404
 
     raise HTTPException(status_code=404, detail=f"Thumbnail for plate {plate_index} not found")
+
+
+@router.get("/{printer_id}/files/thumbnail")
+async def get_printer_file_thumbnail(
+    printer_id: int,
+    path: str = Query(..., description="Full path to the gcode file on the printer"),
+    v: str = Query("", max_length=64, description="Cache version, e.g. the file mtime"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the slicer thumbnail of a gcode file stored on a provider (Moonraker) printer."""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+    provider_client = _provider_for_printer(printer)
+    if provider_client is None:
+        raise HTTPException(404, "File thumbnails are only available for provider printers")
+    image = await _provider_file_thumbnail(printer_id, provider_client, path, v)
+    return Response(content=image, media_type="image/png")
 
 
 @router.post("/{printer_id}/files/download-zip")
