@@ -66,6 +66,19 @@ class TestShapesAndComponents:
         assert (await post(async_client, "/components", {"name": "Nuovo"}))["code"] == "C-0002"
 
 
+@pytest.mark.asyncio
+async def test_plates_summary_per_file(async_client, db_session):
+    await confirmed_plate(db_session, 1, [("sopra", 15, None)], file_id=42)
+    await confirmed_plate(db_session, 2, [("sopra", 2, None)], file_id=42)
+    db_session.add(FarmPlate(library_file_id=43, plate_index=1, printer_model="A1", materials=["PLA"]))
+    await db_session.commit()
+    rows = (await async_client.get(f"{API}/plates/summary")).json()
+    assert sorted(rows, key=lambda r: r["library_file_id"]) == [
+        {"library_file_id": 42, "proposed": 0, "confirmed": 2},
+        {"library_file_id": 43, "proposed": 1, "confirmed": 0},
+    ]
+
+
 class TestPlatesByShape:
     @pytest.mark.asyncio
     async def test_one_plate_serves_every_colour(self, async_client, db_session):

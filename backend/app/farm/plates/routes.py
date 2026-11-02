@@ -113,6 +113,20 @@ async def get_file_plates(library_file_id: int, db: AsyncSession = Depends(get_d
     return [_plate_dict(p, resolver, warning, proposals) for p in plates]
 
 
+@router.get("/plates/summary")
+async def plates_summary(db: AsyncSession = Depends(get_db), _=_read):
+    """Plates per file and status, for the confirmation page: ``[{library_file_id, proposed, confirmed}]``."""
+    rows = await db.execute(
+        select(FarmPlate.library_file_id, FarmPlate.status, func.count()).group_by(
+            FarmPlate.library_file_id, FarmPlate.status
+        )
+    )
+    out: dict[int, dict] = {}
+    for file_id, status, count in rows.all():
+        out.setdefault(file_id, {"library_file_id": file_id, "proposed": 0, "confirmed": 0})[status] = count
+    return list(out.values())
+
+
 @router.get("/plates")
 async def list_plates(
     status: str | None = None,

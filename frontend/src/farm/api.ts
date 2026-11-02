@@ -42,6 +42,37 @@ export interface FarmPlateSummary {
   yields: { object_name: string; quantity: number; shape_id: number | null; component_code: string | null }[];
 }
 
+export interface FarmPlateDetail {
+  id: number;
+  library_file_id: number;
+  plate_index: number;
+  name: string | null;
+  printer_model: string | null;
+  target_model: string | null;
+  materials: string[];
+  nozzle_diameter: number | null;
+  print_time_seconds: number | null;
+  filament_grams: number | null;
+  sliced_file_id: number | null;
+  status: string;
+  warning: string | null;
+  yields: {
+    object_name: string;
+    quantity: number;
+    shape_id: number | null;
+    suggested_shape_id: number | null;
+    component_code: string | null;
+  }[];
+}
+
+export interface FarmLibraryFileState {
+  library_file_id: number | null;
+  path: string;
+  status: string;
+  slicer: string | null;
+  printer_model: string | null;
+}
+
 export interface FarmShape {
   id: number;
   name: string;
@@ -95,6 +126,12 @@ export const farmApi = {
   getProjectNames: () => farmRequest<{ id: number; name: string }[]>('/projects'),
   renameShape: (id: number, name: string) =>
     farmRequest<FarmShape>(`/shapes/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  getFarmFiles: () => farmRequest<FarmLibraryFileState[]>('/library/files?status=ok'),
+  getPlatesSummary: () =>
+    farmRequest<{ library_file_id: number; proposed: number; confirmed: number }[]>('/plates/summary'),
+  getFilePlates: (libraryFileId: number) => farmRequest<FarmPlateDetail[]>(`/library/files/${libraryFileId}/plates`),
+  confirmPlate: (plateId: number, yields: { object_name: string; quantity: number; shape_id: number | null }[]) =>
+    farmRequest<FarmPlateDetail>(`/plates/${plateId}`, { method: 'PUT', body: JSON.stringify({ yields }) }),
   getPlates: (status?: string) =>
     farmRequest<FarmPlateSummary[]>(`/plates${status ? `?status=${encodeURIComponent(status)}` : ''}`),
   getFolderProjects: (folderId: number) =>
