@@ -27,6 +27,7 @@ from backend.app.core.auth import (
 )
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
+from backend.app.farm.plates.models import FarmPlateYield
 from backend.app.farm.plates.service import plates_by_component, plates_by_shape
 from backend.app.farm.products.folders import linked_project_ids, set_linked_projects
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
@@ -114,6 +115,9 @@ class ComponentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     # Retired: no longer made; its code stays reserved and it can't go in new parts.
     retired: bool | None = None
+    # Sent explicitly (null clears): links a component made before shapes to its plates, code unchanged.
+    shape_id: int | None = None
+    color: str | None = Field(default=None, max_length=50)
 
 
 class FolderProjectsIn(BaseModel):
@@ -456,22 +460,31 @@ async def _shape_names(db: AsyncSession) -> dict[int, str]:
     return {s.id: s.name for s in (await db.execute(select(FarmShape))).scalars()}
 
 
+async def _check_shape(
+    db: AsyncSession, shapes: dict[int, str], shape_id: int | None, color: str | None, code: str | None = None
+) -> None:
+    """A shape must exist, and an active component per shape and colour."""
+    if shape_id is None:
+        return
+    if shape_id not in shapes:
+        raise HTTPException(422, "Unknown shape")
+    twin = await db.scalar(
+        select(FarmComponent).where(
+            FarmComponent.shape_id == shape_id,
+            func.lower(func.coalesce(FarmComponent.color, "")) == (color or "").lower(),
+            FarmComponent.retired_at.is_(None),
+            FarmComponent.code != (code or ""),
+        )
+    )
+    if twin is not None:
+        raise HTTPException(409, f"{twin.code} is already this shape in this colour")
+
+
 @router.post("/components", dependencies=[_create])
 async def create_component(data: ComponentIn, db: AsyncSession = Depends(get_db)) -> dict:
     shapes = await _shape_names(db)
     color = _clean(data.color, 50) if data.color else None
-    if data.shape_id is not None:
-        if data.shape_id not in shapes:
-            raise HTTPException(422, "Unknown shape")
-        twin = await db.scalar(
-            select(FarmComponent).where(
-                FarmComponent.shape_id == data.shape_id,
-                func.lower(FarmComponent.color) == (color or "").lower(),
-                FarmComponent.retired_at.is_(None),
-            )
-        )
-        if twin is not None:
-            raise HTTPException(409, f"{twin.code} is already this shape in this colour")
+    await _check_shape(db, shapes, data.shape_id, color)
     default = " – ".join(x for x in (shapes.get(data.shape_id or 0), color) if x)
     name = _clean(data.name or default, 200)
     if not name:
@@ -491,8 +504,57 @@ async def update_component(code: str, data: ComponentUpdate, db: AsyncSession = 
         component.name = _clean(data.name, 200) or component.name
     if data.retired is not None:
         component.retired_at = (component.retired_at or _now()) if data.retired else None
+    shapes = await _shape_names(db)
+    if {"shape_id", "color"} & data.model_fields_set:
+        shape_id = data.shape_id if "shape_id" in data.model_fields_set else component.shape_id
+        color = component.color
+        if "color" in data.model_fields_set:
+            color = _clean(data.color or "", 50) or None
+        if component.retired_at is None:
+            await _check_shape(db, shapes, shape_id, color, component.code)
+        elif shape_id is not None and shape_id not in shapes:
+            raise HTTPException(422, "Unknown shape")
+        component.shape_id, component.color = shape_id, color
     await db.commit()
-    return _component_dict(component, await _shape_names(db))
+    return _component_dict(component, shapes)
+
+
+class MergeIn(BaseModel):
+    into: str = Field(pattern=CODE_RE.pattern)
+
+
+@router.post("/components/{code}/merge", dependencies=[_update])
+async def merge_component(code: str, data: MergeIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """One piece under two codes (e.g. one per pack size): products and plates move to ``into``.
+
+    Quantities add up where a product already uses ``into``; the duplicate is retired,
+    never deleted (Seller Hub may still hold stock under it).
+    """
+    found = {
+        c.code: c
+        for c in (await db.execute(select(FarmComponent).where(FarmComponent.code.in_([code, data.into])))).scalars()
+    }
+    if code not in found or data.into not in found:
+        raise HTTPException(404, "Component not found")
+    if code == data.into or found[data.into].retired_at is not None:
+        raise HTTPException(422, "Merge into another, active component")
+    old, new = found[code], found[data.into]
+    parts = (
+        await db.execute(select(FarmProductPart).where(FarmProductPart.component_id.in_([old.id, new.id])))
+    ).scalars()
+    kept: dict[int, FarmProductPart] = {}
+    for part in sorted(parts, key=lambda p: p.component_id != new.id):  # rows already on ``into`` first
+        if part.project_id in kept:
+            kept[part.project_id].quantity = min(QTY_MAX, kept[part.project_id].quantity + part.quantity)
+            await db.delete(part)
+        else:
+            part.component_id = new.id
+            kept[part.project_id] = part
+    for y in (await db.execute(select(FarmPlateYield).where(FarmPlateYield.component_code == old.code))).scalars():
+        y.component_code = new.code
+    old.retired_at = old.retired_at or _now()
+    await db.commit()
+    return {"merged": old.code, "into": new.code, "products": len(kept)}
 
 
 @router.post("/shapes", dependencies=[_create])

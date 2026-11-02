@@ -117,6 +117,12 @@ const en = {
     retireConfirm: 'Retire {{code}} ({{name}})? The code is never reused and it leaves the parts picker.',
     newColor: 'New colour',
     addColor: 'Add colour',
+    pickShape: 'Shape…',
+    colorOptional: 'Colour (optional)',
+    linkShape: 'Link',
+    linkShapeHint: 'Link to its shape: the code stays the same and the shape\'s plates count for it.',
+    mergeConfirm:
+      '{{into}} ({{name}}) is already this shape in this colour. Merge {{code}} into {{into}}? Products using {{code}} move to {{into}} (quantities add up) and {{code}} is retired.',
   },
   folders: {
     description: 'Link "{{name}}" to one or more projects and products. Several products (e.g. colour variants) can share the folder.',
@@ -291,6 +297,12 @@ const it: typeof en = {
     retireConfirm: 'Ritirare {{code}} ({{name}})? Il codice non viene mai riusato e non compare più fra le parti.',
     newColor: 'Nuovo colore',
     addColor: 'Aggiungi colore',
+    pickShape: 'Forma…',
+    colorOptional: 'Colore (facoltativo)',
+    linkShape: 'Collega',
+    linkShapeHint: 'Collegalo alla sua forma: il codice resta lo stesso e i piatti della forma valgono anche per lui.',
+    mergeConfirm:
+      '{{into}} ({{name}}) è già questa forma in questo colore. Unire {{code}} in {{into}}? I prodotti che usano {{code}} passano a {{into}} (le quantità si sommano) e {{code}} viene ritirato.',
   },
   folders: {
     description: 'Collega "{{name}}" a uno o più progetti e prodotti. Più prodotti (per esempio varianti di colore) possono usare la stessa cartella.',

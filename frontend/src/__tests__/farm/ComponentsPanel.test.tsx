@@ -56,13 +56,13 @@ describe('ComponentsPanel', () => {
   it('groups colours under their shape with plates and products', async () => {
     const user = userEvent.setup();
     render(<ComponentsPanel />);
-    const truffle = (await screen.findByText('Tartufo sopra')).closest('li')!;
+    const truffle = (await screen.findByText('Tartufo sopra', { ignore: 'option' })).closest('li')!;
     expect(within(truffle).getByText('2 plates')).toBeInTheDocument();
     expect(within(truffle).getByText('C-0101')).toBeInTheDocument();
     expect(within(truffle).getByText('2× Set di 2 tartufi neri · 5× Set di 5 tartufi neri')).toBeInTheDocument();
     expect(within(truffle).getByText('not used in any product')).toBeInTheDocument(); // the white one
 
-    const hook = screen.getByText('Gancio SX').closest('li')!;
+    const hook = screen.getByText('Gancio SX', { ignore: 'option' }).closest('li')!;
     expect(within(hook).getByText('no confirmed plate')).toBeInTheDocument();
     // Retired components are hidden until asked for.
     expect(screen.queryByText('C-0010')).not.toBeInTheDocument();
@@ -73,7 +73,7 @@ describe('ComponentsPanel', () => {
   it('filters and searches', async () => {
     const user = userEvent.setup();
     render(<ComponentsPanel />);
-    await screen.findByText('Tartufo sopra');
+    await screen.findByText('Tartufo sopra', { ignore: 'option' });
 
     await user.selectOptions(screen.getByLabelText('Filter'), 'Not used in any product');
     expect(screen.getByText('C-0102')).toBeInTheDocument();
@@ -86,7 +86,36 @@ describe('ComponentsPanel', () => {
     await user.selectOptions(screen.getByLabelText('Filter'), 'All');
     await user.type(screen.getByRole('searchbox'), 'portachiavi');
     expect(screen.getByText('C-0020')).toBeInTheDocument();
-    expect(screen.queryByText('Tartufo sopra')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tartufo sopra', { ignore: 'option' })).not.toBeInTheDocument();
+  });
+
+  it('links a component without a shape, or merges it into the one already that shape and colour', async () => {
+    let merged: { code: string; body: unknown } | undefined;
+    server.use(
+      http.post('/api/v1/farm/components/:code/merge', async ({ params, request }) => {
+        merged = { code: String(params.code), body: await request.json() };
+        return HttpResponse.json({ merged: params.code, into: 'C-0101', products: 3 });
+      }),
+    );
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<ComponentsPanel />);
+    const row = (await screen.findByText('C-0020')).closest('li')!;
+
+    await user.selectOptions(within(row).getByLabelText('Shape C-0020'), 'Gancio SX');
+    await user.click(within(row).getByRole('button', { name: 'Link' }));
+    await waitFor(() => expect(patched).toEqual({ code: 'C-0020', body: { shape_id: 2, color: null } }));
+    expect(confirm).not.toHaveBeenCalled();
+
+    // Tartufo sopra in Nero is already C-0101: one piece under two codes, so merge (after asking).
+    patched = undefined;
+    await user.selectOptions(within(row).getByLabelText('Shape C-0020'), 'Tartufo sopra');
+    await user.type(within(row).getByLabelText('Colour (optional) C-0020'), 'nero');
+    await user.click(within(row).getByRole('button', { name: 'Link' }));
+    await waitFor(() => expect(merged).toEqual({ code: 'C-0020', body: { into: 'C-0101' } }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(patched).toBeUndefined();
+    confirm.mockRestore();
   });
 
   it('asks before retiring', async () => {
