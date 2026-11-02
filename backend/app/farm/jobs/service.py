@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -138,35 +139,46 @@ async def queued_pieces(db: AsyncSession) -> dict[str, int]:
 
 
 async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, plate: int) -> LibraryFile | None:
-    """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once."""
+    """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once.
+
+    A sliced output replaced by a new slice keeps its row, so the extracted G-code is refreshed in
+    its own row when the output's bytes change: Klipper queue items follow it like Bambu ones.
+    """
     from backend.app.api.routes import library as lib
 
     name = f"{sliced.filename.removesuffix('.gcode.3mf').removesuffix('.3mf')}_plate{plate}.gcode"
+    gcode = None
     for candidate in (await db.execute(LibraryFile.active().where(LibraryFile.filename == name))).scalars():
         meta = candidate.file_metadata or {}
         if meta.get("extracted_from_library_file_id") == sliced.id and meta.get("plate") == plate:
-            return candidate
+            if meta.get("extracted_from_hash") == sliced.file_hash:
+                return candidate
+            gcode = candidate  # the output was sliced again: extract into the same row
     try:
         with zipfile.ZipFile(path) as zf:
             data = zf.read(f"Metadata/plate_{plate}.gcode")
     except (KeyError, OSError, zipfile.BadZipFile):
         return None
-    out = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode"
-    await asyncio.to_thread(out.write_bytes, data)
-    gcode = LibraryFile(
-        folder_id=sliced.folder_id,
-        filename=name,
-        file_path=lib.to_relative_path(out),
-        file_type="gcode",
-        file_size=len(data),
-        source_type="sliced",
-        file_metadata={
-            **(sliced.file_metadata or {}),
-            "extracted_from_library_file_id": sliced.id,
-            "plate": plate,
-        },
-    )
-    db.add(gcode)
+    out = lib.to_absolute_path(gcode.file_path) if gcode else lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode"
+    tmp = out.with_name(f".{out.name}.part")
+    await asyncio.to_thread(tmp.write_bytes, data)
+    os.replace(tmp, out)  # a print starting meanwhile never reads half a file
+    if gcode is None:
+        gcode = LibraryFile(
+            folder_id=sliced.folder_id,
+            filename=name,
+            file_path=lib.to_relative_path(out),
+            file_type="gcode",
+            source_type="sliced",
+        )
+        db.add(gcode)
+    gcode.file_size = len(data)
+    gcode.file_metadata = {
+        **(sliced.file_metadata or {}),
+        "extracted_from_library_file_id": sliced.id,
+        "extracted_from_hash": sliced.file_hash,
+        "plate": plate,
+    }
     await db.flush()
     return gcode
 

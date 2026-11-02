@@ -35,7 +35,7 @@ async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, li
     for out in rows.scalars():
         meta = out.file_metadata or {}
         pid = meta.get("sliced_from_library_file_id")
-        if meta.get("used_embedded_settings") and pid in project_ids:
+        if meta.get("used_embedded_settings") and pid in project_ids and "extracted_from_library_file_id" not in meta:
             plate = meta.get("sliced_plate")
             found.setdefault(pid, {})[plate_key(plate)] = plate
     return {pid: list(plates.values()) for pid, plates in found.items()}

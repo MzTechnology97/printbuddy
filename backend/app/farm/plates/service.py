@@ -126,6 +126,8 @@ async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | 
     by_plate: dict[int, LibraryFile] = {}
     for out in rows:
         meta = out.file_metadata or {}
+        if "extracted_from_library_file_id" in meta:
+            continue  # a Klipper .gcode taken out of an output, not an output itself
         if meta.get("sliced_from_library_file_id") == lib_file.id and meta.get("sliced_from_sha256") == sha256:
             plate = 1 if meta.get("sliced_plate") is None else meta["sliced_plate"]
             if plate:

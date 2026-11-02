@@ -170,3 +170,45 @@ async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_
     assert await service.dispatch_once(db_session) == 1
     files = (await db_session.execute(select(PrintQueueItem.library_file_id))).scalars().all()
     assert files == [gcode.id, gcode.id]
+
+
+async def test_klipper_gcode_follows_a_new_slice_of_the_output(db_session, tmp_path, monkeypatch):
+    """An output sliced again keeps its row: the extracted G-code is refreshed in its own row too."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from backend.app.api.routes import library as lib
+    from backend.app.farm.plates.service import _latest_slices
+
+    monkeypatch.setattr(lib, "get_library_files_dir", lambda: tmp_path)
+    src = tmp_path / "part.gcode.3mf"
+
+    def slice_to(text: str) -> str:
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("Metadata/plate_1.gcode", text)
+        return hashlib.sha256(src.read_bytes()).hexdigest()
+
+    meta = {"sliced_from_library_file_id": 99, "sliced_from_sha256": "v1", "sliced_plate": None}
+    sliced = LibraryFile(
+        filename="part.gcode.3mf",
+        file_path=str(src),
+        file_type="gcode",
+        file_size=1,
+        source_type="sliced",
+        file_hash=slice_to("; first"),
+        file_metadata={**meta, "used_embedded_settings": True},
+    )
+    db_session.add(sliced)
+    await db_session.commit()
+
+    first = await service.gcode_for_klipper(db_session, sliced, src, 1)
+    assert lib.to_absolute_path(first.file_path).read_text() == "; first"
+    assert await service.gcode_for_klipper(db_session, sliced, src, 1) is first  # same bytes: reused
+
+    sliced.file_hash = slice_to("; second")  # the output was sliced again in place
+    second = await service.gcode_for_klipper(db_session, sliced, src, 1)
+    assert second.id == first.id  # queued Klipper prints keep pointing at it
+    assert lib.to_absolute_path(second.file_path).read_text() == "; second"
+
+    # The extracted G-code carries the output's metadata but is not an output of the project.
+    assert (await _latest_slices(db_session, SimpleNamespace(id=99), "v1")) == {1: sliced}

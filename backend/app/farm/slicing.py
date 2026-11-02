@@ -102,6 +102,7 @@ async def previous_output(db: AsyncSession, project_id: int, plate: int | None) 
         meta = out.file_metadata or {}
         if (
             meta.get("used_embedded_settings")
+            and "extracted_from_library_file_id" not in meta  # Klipper .gcode taken out of an output
             and meta.get("sliced_from_library_file_id") == project_id
             and plate_key(meta.get("sliced_plate")) == key
         ):
