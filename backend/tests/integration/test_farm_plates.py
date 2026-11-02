@@ -133,8 +133,20 @@ class TestPlates:
         first = plates[0]
         assert first["status"] == "proposed"
         assert first["yields"] == [
-            {"object_name": "Hook", "quantity": 4, "component_code": None},
-            {"object_name": "Base", "quantity": 1, "component_code": None},
+            {
+                "object_name": "Hook",
+                "quantity": 4,
+                "shape_id": None,
+                "suggested_shape_id": None,
+                "component_code": None,
+            },
+            {
+                "object_name": "Base",
+                "quantity": 1,
+                "shape_id": None,
+                "suggested_shape_id": None,
+                "component_code": None,
+            },
         ]
         assert (first["printer_model"], first["target_model"], first["target_model_source"]) == ("P1S", "P1S", "auto")
         assert (first["materials"], first["nozzle_diameter"]) == (["PETG", "PLA"], 0.4)
@@ -160,7 +172,13 @@ class TestPlates:
         await scan(async_client, farm["folder"])
         first, second = await get_plates(async_client, farm["hook.3mf"])
         assert first["status"] == "proposed"
-        assert first["yields"][0] == {"object_name": "Hook", "quantity": 6, "component_code": "C-HOOK"}
+        assert first["yields"][0] == {
+            "object_name": "Hook",
+            "quantity": 6,
+            "shape_id": None,
+            "suggested_shape_id": None,
+            "component_code": "C-HOOK",
+        }
         assert second["status"] == "confirmed"
 
         by_code = (await async_client.get("/api/v1/farm/plates?component_code=c-lid")).json()

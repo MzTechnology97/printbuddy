@@ -39,6 +39,14 @@ const en = {
     components: 'Components',
     componentsHint: 'Codes are assigned here and never reused. Seller Hub keeps the stock by code.',
     saved: 'Saved',
+    shape: 'Shape',
+    noShape: '— no shape —',
+    color: 'Colour',
+    shapes: 'Shapes (printed geometry; one plate serves every colour)',
+    newShape: 'New shape name',
+    createShape: 'Create shape',
+    retire: 'Retire',
+    restore: 'Restore',
   },
 };
 
@@ -79,6 +87,14 @@ const it: typeof en = {
     components: 'Componenti',
     componentsHint: 'I codici li assegna Printbuddy e non si riusano mai. Le giacenze per codice restano in Seller Hub.',
     saved: 'Salvato',
+    shape: 'Forma',
+    noShape: '— nessuna forma —',
+    color: 'Colore',
+    shapes: 'Forme (geometria stampata; un piatto vale per tutti i colori)',
+    newShape: 'Nome della nuova forma',
+    createShape: 'Crea forma',
+    retire: 'Ritira',
+    restore: 'Ripristina',
   },
 };
 

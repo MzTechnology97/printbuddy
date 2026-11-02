@@ -1,4 +1,4 @@
-"""Plate tables. Yields name components by code ("C-0042"), with no FK to the products module."""
+"""Plate tables. Yields name shapes (``farm_shapes``); a confirmed plate serves every colour of a shape."""
 
 from datetime import datetime
 
@@ -6,6 +6,8 @@ from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Uniqu
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
+from backend.app.farm.columns import add_columns
+from backend.app.farm.products.models import FarmShape
 
 
 class FarmPrinterModelMap(Base):
@@ -52,7 +54,7 @@ class FarmPlate(Base):
 
 
 class FarmPlateYield(Base):
-    """Pieces one plate produces: 3MF object name x quantity, linked to a component code."""
+    """Pieces one plate produces: 3MF object name x quantity, linked to a shape."""
 
     __tablename__ = "farm_plate_yields"
 
@@ -60,7 +62,12 @@ class FarmPlateYield(Base):
     plate_id: Mapped[int] = mapped_column(ForeignKey("farm_plates.id", ondelete="CASCADE"), index=True)
     object_name: Mapped[str] = mapped_column(String(255))
     quantity: Mapped[int] = mapped_column(Integer)
-    # Component code (C-…), set when confirming; NULL until linked.
+    # Shape, set when confirming; NULL until linked. Several object names can share one shape.
+    shape_id: Mapped[int | None] = mapped_column(ForeignKey(FarmShape.id), nullable=True, index=True)
+    # Before shapes, yields named a component code (C-…); still honoured for those plates.
     component_code: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     plate: Mapped[FarmPlate] = relationship(back_populates="yields")
+
+
+add_columns("farm_plate_yields", {"shape_id": "INTEGER"})

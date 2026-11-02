@@ -6,13 +6,25 @@ from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstr
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
+from backend.app.farm.columns import add_columns
 from backend.app.models.project import Project
 
 
-class FarmComponent(Base):
-    """A printed part with a stable code (``C-0042``): the key Seller Hub stock and plate yields use.
+class FarmShape(Base):
+    """A geometric piece ("Tartufo sopra"): plates yield shapes, the same plate for every colour."""
 
-    Codes are never reused, so components are never deleted (only renamed).
+    __tablename__ = "farm_shapes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class FarmComponent(Base):
+    """A printed part with a stable code (``C-0042``): the key Seller Hub stock uses.
+
+    Normally a shape in a colour ("Tartufo sopra – Nero"). Codes are never reused, so
+    components are never deleted: one that is no longer made is retired.
     """
 
     __tablename__ = "farm_components"
@@ -20,8 +32,14 @@ class FarmComponent(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     code: Mapped[str] = mapped_column(String(12), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
+    shape_id: Mapped[int | None] = mapped_column(ForeignKey("farm_shapes.id"), nullable=True, index=True)
+    color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+add_columns("farm_components", {"shape_id": "INTEGER", "color": "VARCHAR(50)", "retired_at": "DATETIME"})
 
 
 class FarmProduct(Base):

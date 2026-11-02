@@ -22,6 +22,7 @@ from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
+from backend.app.farm.products.models import FarmShape
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
@@ -133,8 +134,8 @@ async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | 
 async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLibraryFile) -> list[FarmPlate]:
     """Bring the stored plates in line with the current file version.
 
-    A plate whose pieces changed goes back to ``proposed``; component codes typed
-    for an object name are kept.
+    A plate whose pieces changed goes back to ``proposed``; shapes (and old component
+    codes) set for an object name are kept.
     """
     plates = {
         p.plate_index: p
@@ -160,9 +161,14 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
             plate.filament_grams = pp.filament_grams
             plate.sliced_file_id = None
             if {y.object_name: y.quantity for y in plate.yields} != pp.objects:
-                codes = {y.object_name: y.component_code for y in plate.yields}
+                links = {y.object_name: (y.shape_id, y.component_code) for y in plate.yields}
                 plate.yields = [
-                    FarmPlateYield(object_name=name, quantity=qty, component_code=codes.get(name))
+                    FarmPlateYield(
+                        object_name=name,
+                        quantity=qty,
+                        shape_id=links.get(name, (None, None))[0],
+                        component_code=links.get(name, (None, None))[1],
+                    )
                     for name, qty in pp.objects.items()
                 ]
                 plate.status = "proposed"
@@ -195,6 +201,7 @@ def confirm(plate: FarmPlate, yields: list[dict] | None) -> None:
             FarmPlateYield(
                 object_name=y["object_name"],
                 quantity=y["quantity"],
+                shape_id=y.get("shape_id"),
                 component_code=(y.get("component_code") or "").strip().upper() or None,
             )
             for y in yields
@@ -220,33 +227,34 @@ async def folder_hint_warning(
     return f"3MF prepared for {plate_model}, but the path names {', '.join(sorted(named))}"
 
 
-async def plates_by_component(db: AsyncSession, codes: list[str]) -> dict[str, list[dict]]:
-    """Confirmed plates producing each component code, for the products module.
+async def _confirmed_plates_by(db: AsyncSession, attr: str, wanted: set) -> dict:
+    """Confirmed plates producing each wanted value of a yield column (``shape_id`` or ``component_code``).
 
     Each entry is the contract shared with Seller Hub (``parts[].plates``): ``yield``
-    is the pieces of *that* component on the plate; ``printer_model`` is the
+    is the pieces of *that* shape/component on the plate; ``printer_model`` is the
     Printbuddy model (the queue's ``target_model``), or the 3MF one when unmapped.
     """
-    wanted = {c.strip().upper() for c in codes if c and c.strip()}
-    result: dict[str, list[dict]] = {code: [] for code in wanted}
+    result: dict = {key: [] for key in wanted}
     if not wanted:
         return result
+    column = getattr(FarmPlateYield, attr)
     plates = (
         await db.execute(
             select(FarmPlate)
-            .where(FarmPlate.status == "confirmed", FarmPlate.yields.any(FarmPlateYield.component_code.in_(wanted)))
+            .where(FarmPlate.status == "confirmed", FarmPlate.yields.any(column.in_(wanted)))
             .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
         )
     ).scalars()
     resolver = await PrinterModelResolver.load(db)
     for plate in plates:
-        pieces: dict[str, int] = {}
+        pieces: dict = {}
         for y in plate.yields:
-            if y.component_code in wanted:
-                pieces[y.component_code] = pieces.get(y.component_code, 0) + y.quantity
+            key = getattr(y, attr)
+            if key in wanted:
+                pieces[key] = pieces.get(key, 0) + y.quantity
         model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
-        for code, qty in pieces.items():
-            result[code].append(
+        for key, qty in pieces.items():
+            result[key].append(
                 {
                     "library_file_id": plate.library_file_id,
                     "plate": plate.plate_index,
@@ -256,3 +264,69 @@ async def plates_by_component(db: AsyncSession, codes: list[str]) -> dict[str, l
                 }
             )
     return result
+
+
+async def plates_by_shape(db: AsyncSession, shape_ids: list[int]) -> dict[int, list[dict]]:
+    """Confirmed plates producing each shape: one plate serves every colour of the shape."""
+    return await _confirmed_plates_by(db, "shape_id", set(shape_ids))
+
+
+async def plates_by_component(db: AsyncSession, codes: list[str]) -> dict[str, list[dict]]:
+    """Confirmed plates whose yields name a component code (plates confirmed before shapes)."""
+    return await _confirmed_plates_by(db, "component_code", {c.strip().upper() for c in codes if c and c.strip()})
+
+
+# ---------------------------------------------------------------- shape suggestions
+
+# Slicer copies: "Hook (1) (1)", "Perno -1 -1"; a trailing " 2" is a different piece, so it stays.
+_COPY_SUFFIX = re.compile(r"\s*(\(\d+\)|-\s*\d+)$")
+
+
+def object_key(name: str) -> str:
+    """Object name without copy suffixes, file extension, case and separators."""
+    key = re.sub(r"\.(stl|3mf|obj|step)$", "", name.strip().casefold())
+    while (stripped := _COPY_SUFFIX.sub("", key)) != key:
+        key = stripped
+    return " ".join(re.sub(r"[_\-]+", " ", key).split())
+
+
+async def suggest_shapes(db: AsyncSession, names: list[str]) -> dict[str, int]:
+    """Shape to propose for each object name, from names already confirmed elsewhere and shape names.
+
+    Same name after :func:`object_key`, or one name's words contained in the other's
+    ("trurffle sopra k2" ⊇ "trurffle sopra"), sharing at least two words and not
+    differing by a number ("portiera grande 2" is not "portiera grande"). Ambiguous
+    names get no proposal.
+    """
+    known: dict[str, set[int]] = {}
+    confirmed = await db.execute(
+        select(FarmPlateYield.object_name, FarmPlateYield.shape_id)
+        .join(FarmPlate)
+        .where(FarmPlate.status == "confirmed", FarmPlateYield.shape_id.isnot(None))
+    )
+    for obj, shape_id in confirmed.all():
+        known.setdefault(object_key(obj), set()).add(shape_id)
+    for shape in (await db.execute(select(FarmShape))).scalars():
+        known.setdefault(object_key(shape.name), set()).add(shape.id)
+
+    proposals: dict[str, int] = {}
+    for name in names:
+        key = object_key(name)
+        if len(known.get(key, ())) == 1:
+            proposals[name] = next(iter(known[key]))
+            continue
+        words, best, ids = set(key.split()), 0, set()
+        for other, shape_ids in known.items():
+            other_words = set(other.split())
+            common = len(words & other_words)
+            if common < 2 or not (other_words <= words or words <= other_words):
+                continue
+            if any(w.isdigit() for w in words ^ other_words):
+                continue
+            if common > best:
+                best, ids = common, set(shape_ids)
+            elif common == best:
+                ids |= shape_ids
+        if len(ids) == 1:
+            proposals[name] = ids.pop()
+    return proposals

@@ -28,6 +28,15 @@ export interface FarmProduct {
 export interface FarmComponent {
   code: string;
   name: string;
+  shape_id: number | null;
+  shape: string | null;
+  color: string | null;
+  retired: boolean;
+}
+
+export interface FarmShape {
+  id: number;
+  name: string;
 }
 
 export interface FarmProductOverview {
@@ -70,8 +79,10 @@ export const farmApi = {
   updateProduct: (id: number, data: FarmProductInput) =>
     farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   unmarkProduct: (id: number) => farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'DELETE' }),
-  createComponent: (name: string) =>
-    farmRequest<FarmComponent>('/components', { method: 'POST', body: JSON.stringify({ name }) }),
-  renameComponent: (code: string, name: string) =>
-    farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  createComponent: (data: { name?: string; shape_id?: number; color?: string }) =>
+    farmRequest<FarmComponent>('/components', { method: 'POST', body: JSON.stringify(data) }),
+  updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
+    farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  createShape: (name: string) => farmRequest<FarmShape>('/shapes', { method: 'POST', body: JSON.stringify({ name }) }),
 };
