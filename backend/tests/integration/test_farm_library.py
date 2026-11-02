@@ -148,6 +148,37 @@ class TestWatchedFolderSync:
         assert files["box.3mf"]["slicer"] == "bambu_studio"
         assert (await scan(async_client, watched))["added"] == 0  # idempotent
 
+    async def test_scan_proposes_plates_and_drops_photos(self, async_client, db_session, watched, nas):
+        from backend.app.farm.plates.models import FarmPlate
+        from backend.tests.integration.test_farm_plates import TWO_PLATES, make_project
+
+        library_sync._plates_checked.clear()
+        project = make_project(nas / "Hook" / "project.3mf", TWO_PLATES)
+        photo = nas / "Hook" / "photo.jpg"
+        photo.write_bytes(b"not a print file")
+        # A photo row left by an earlier version, when watched folders took images too.
+        db_session.add(
+            LibraryFile(
+                folder_id=watched["id"],
+                is_external=True,
+                filename=photo.name,
+                file_path=str(photo),
+                file_type="jpg",
+                file_size=16,
+            )
+        )
+        await db_session.commit()
+
+        result = await scan(async_client, watched)
+        assert (result["added"], result["removed"]) == (3, 1)
+        paths = (await db_session.execute(select(LibraryFile.file_path))).scalars().all()
+        assert str(photo) not in paths and photo.exists()  # row dropped, file untouched
+        project_id = (await files_by_name(async_client))[project.name]["library_file_id"]
+        plates = (
+            await db_session.execute(select(FarmPlate.plate_index).where(FarmPlate.library_file_id == project_id))
+        ).scalars()
+        assert sorted(plates) == [1, 2]  # proposed by the scan, before anyone opens the file
+
     async def test_modified_file_keeps_id(self, async_client, db_session, watched, nas):
         await scan(async_client, watched)
         before = (await files_by_name(async_client))["box.3mf"]

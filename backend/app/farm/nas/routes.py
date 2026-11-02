@@ -13,7 +13,7 @@ from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.library_sync import _file_type, get_watch, sync_external_folder
-from backend.app.farm.nas import service
+from backend.app.farm.nas import cache, service
 from backend.app.farm.nas.remote import HOST_RE, NasPathError, list_dirs, split_path
 from backend.app.models.library import LibraryFolder
 
@@ -34,6 +34,7 @@ class Connection(BaseModel):
 class NasSettingsIn(Connection):
     path: str = Field(min_length=1, max_length=500)
     scan_interval_seconds: int = Field(default=300, ge=0, le=86400)
+    cache_mb: int = Field(default=service.DEFAULT_CACHE_MB, ge=256, le=1024 * 1024)
 
 
 class BrowseIn(Connection):
@@ -53,6 +54,8 @@ async def _view(db: AsyncSession) -> dict:
         "folder_id": cfg.folder_id,
         "last_scan_at": watch.last_scan_at if watch else None,
         "last_result": cfg.last_result,
+        "cache_mb": cfg.cache_mb,
+        "cache_used_bytes": await asyncio.to_thread(cache.usage, service.cache_dir()),
     }
 
 
@@ -112,6 +115,7 @@ async def save_nas_settings(body: NasSettingsIn, db: AsyncSession = Depends(get_
             username=body.username,
             password=body.password,
             interval=body.scan_interval_seconds,
+            cache_mb=body.cache_mb,
         )
     except ValueError as exc:  # includes NasPathError
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -150,7 +154,7 @@ async def browse_nas(body: BrowseIn, db: AsyncSession = Depends(get_db), _=_writ
 
 @router.post("/sync")
 async def sync_nas_now(db: AsyncSession = Depends(get_db), _=_write):
-    """Copy changes from the NAS and update the library now."""
+    """Rescan the NAS folder now (listing and 3MF headers only: nothing is downloaded)."""
     cfg = await service.load(db)
     folder = await db.get(LibraryFolder, cfg.folder_id) if cfg.folder_id else None
     if not cfg.configured or folder is None:

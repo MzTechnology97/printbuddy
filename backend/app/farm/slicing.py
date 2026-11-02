@@ -21,6 +21,8 @@ from backend.app.api.routes.settings import get_setting
 from backend.app.core.config import settings as app_settings
 from backend.app.farm.detect import SLICEABLE, SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.nas import library as nas_library
+from backend.app.farm.nas.cache import ensure_local
 from backend.app.models.library import LibraryFile
 from backend.app.schemas.slicer import SliceResponse
 from backend.app.services.slicer_api import (
@@ -61,10 +63,11 @@ async def slice_embedded(
 ) -> SliceResponse:
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source."""
     slicer = resolve_slicer(state)
+    await ensure_local(db, lib_file)  # NAS projects are fetched into the cache now, on use
     src = Path(lib_file.file_path)
     raw = await asyncio.to_thread(src.read_bytes)
-    # Same hash as FarmLibraryFile.sha256: tells later whether the output is stale.
-    source_sha = hashlib.sha256(raw).hexdigest()
+    # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
+    source_sha = state.sha256
     model_bytes = lib._sanitize_project_settings_sentinels(raw)
 
     progress_request_id = on_progress = None
@@ -94,8 +97,16 @@ async def slice_embedded(
         await service.close()
 
     base_name = lib_file.filename.removesuffix(".3mf")
-    out_path = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
-    out_path.write_bytes(result.content)
+    # NAS project: the output goes on the NAS next to it, the local file is only its cache copy.
+    try:
+        saved = await nas_library.save_sliced(db, lib_file, f"{base_name}.gcode.3mf", result.content)
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot save the sliced file on the NAS: {exc}"[:500]) from exc
+    if saved is not None:
+        out_path = saved.path
+    else:
+        out_path = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
+        out_path.write_bytes(result.content)
 
     thumbnail = None
     parsed: dict = {}
@@ -126,9 +137,10 @@ async def slice_embedded(
         }
     )
     new_file = LibraryFile(
-        folder_id=lib_file.folder_id,
-        filename=f"{base_name}.gcode.3mf",
-        file_path=lib.to_relative_path(out_path),
+        folder_id=saved.folder_id if saved else lib_file.folder_id,
+        is_external=saved is not None,
+        filename=saved.filename if saved else f"{base_name}.gcode.3mf",
+        file_path=str(out_path) if saved else lib.to_relative_path(out_path),
         file_type="gcode",
         file_size=len(result.content),
         file_hash=hashlib.sha256(result.content).hexdigest(),
@@ -137,6 +149,9 @@ async def slice_embedded(
         source_type="sliced",
     )
     db.add(new_file)
+    if saved is not None:
+        await db.flush()
+        await nas_library.track_sliced(db, new_file, saved, result.content)
     await db.commit()
     return SliceResponse(
         library_file_id=new_file.id,

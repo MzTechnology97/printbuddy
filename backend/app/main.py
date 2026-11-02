@@ -76,6 +76,7 @@ from backend.app.core.database import async_session, engine, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.farm import routes as farm_routes  # fork: printfarm
 from backend.app.farm.library_sync import farm_library_scheduler  # fork: printfarm
+from backend.app.farm.nas.cache import NasCacheMiddleware  # fork: printfarm
 from backend.app.models.smart_plug import SmartPlug
 from backend.app.services.archive import ArchiveService, peek_plate_index_in_3mf, swap_plate_suffix
 from backend.app.services.archive_purge import archive_purge_service
@@ -6570,6 +6571,7 @@ app.include_router(open_filament_database.router, prefix=app_settings.api_prefix
 app.include_router(metrics.router, prefix=app_settings.api_prefix)
 app.include_router(virtual_printers.router, prefix=app_settings.api_prefix)
 app.include_router(farm_routes.router, prefix=app_settings.api_prefix)  # fork: printfarm
+app.add_middleware(NasCacheMiddleware)  # fork: NAS files are fetched into the cache on use
 
 
 # Serve static files (React build)

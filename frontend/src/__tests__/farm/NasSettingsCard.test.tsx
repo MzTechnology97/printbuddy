@@ -20,6 +20,8 @@ const STORED = {
   folder_id: 7,
   last_scan_at: null,
   last_result: null,
+  cache_mb: 2048,
+  cache_used_bytes: 300 * 1024 * 1024,
 };
 
 describe('NasSettingsCard', () => {
@@ -41,6 +43,7 @@ describe('NasSettingsCard', () => {
     const password = await screen.findByPlaceholderText(/set: leave empty/i);
     expect(password).toHaveValue('');
     await waitFor(() => expect(screen.getByDisplayValue('Prints')).toBeInTheDocument());
+    expect(screen.getByText('Cache: 300 MB used of 2048 MB')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /save/i }));
 
     await waitFor(() => expect(saved).not.toBeNull());
@@ -50,6 +53,7 @@ describe('NasSettingsCard', () => {
       path: 'Prints',
       username: 'farm',
       scan_interval_seconds: 300,
+      cache_mb: 2048,
     });
   });
 

@@ -11,6 +11,8 @@ export interface NasSettings {
   folder_id: number | null;
   last_scan_at: string | null;
   last_result: Record<string, number | string> | null;
+  cache_mb: number;
+  cache_used_bytes: number;
 }
 
 export interface NasConnection {
@@ -24,6 +26,7 @@ export interface NasConnection {
 export interface NasSettingsUpdate extends NasConnection {
   path: string;
   scan_interval_seconds: number;
+  cache_mb: number;
 }
 
 export const farmNasApi = {

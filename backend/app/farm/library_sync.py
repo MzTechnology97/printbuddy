@@ -8,6 +8,8 @@ folder also:
 - keeps vanished files as ``missing`` instead of deleting their row;
 - ignores files modified in the last minute (save in progress);
 - marks broken 3MF files ``corrupt`` instead of importing them;
+- takes print files only (photos next to the projects are skipped);
+- proposes the plates of 3MF projects as soon as they are scanned;
 - runs periodically (``FarmWatchedFolder.scan_interval_seconds``).
 
 Folders that aren't watched keep the upstream behaviour unchanged.
@@ -21,18 +23,21 @@ import logging
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from stat import S_ISLNK
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes import library as lib
 from backend.app.core import database
 from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+from backend.app.farm.plates.service import PlateReadError, refresh_plates
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 logger = logging.getLogger(__name__)
@@ -63,8 +68,10 @@ class _Analysis:
 
 
 def _file_type(filepath: Path) -> str | None:
-    """Same extension rules as the upstream scan."""
+    """Upstream scan extension rules, print files only (photos in project folders are skipped)."""
     ext = filepath.suffix.lower()
+    if ext in lib.IMAGE_EXTENSIONS or ext == ".svg":
+        return None
     if ext not in lib._SCANNABLE_EXTENSIONS:
         compound = "".join(filepath.suffixes[-2:]).lower() if len(filepath.suffixes) >= 2 else ""
         if compound not in lib._SCANNABLE_EXTENSIONS:
@@ -141,17 +148,13 @@ def _analyze(entry: _DiskEntry) -> _Analysis:
             thumb_full = thumbs_dir / f"{os.urandom(16).hex()}.png"
             thumb_full.write_bytes(thumb)
             result.thumbnail_path = lib.to_relative_path(thumb_full)
-    elif path.suffix.lower() in lib.IMAGE_EXTENSIONS:
-        created = lib.create_image_thumbnail(path, thumbs_dir)
-        if created:
-            result.thumbnail_path = lib.to_relative_path(Path(created))
     return result
 
 
-async def _try_analyze(entry: _DiskEntry) -> _Analysis | None:
+async def _try_analyze(entry: _DiskEntry, analyze: Callable[[_DiskEntry], _Analysis] | None) -> _Analysis | None:
     """None when the share fails to read the file (EIO on SMB): retried next scan, never marked corrupt."""
     try:
-        return await asyncio.to_thread(_analyze, entry)
+        return await asyncio.to_thread(analyze or _analyze, entry)
     except OSError as exc:
         logger.warning("Farm sync: cannot read %s, retrying next scan: %s", entry.path, exc)
         return None
@@ -193,22 +196,28 @@ async def sync_if_watched(db: AsyncSession, folder: LibraryFolder) -> dict | Non
 
 
 async def sync_external_folder(db: AsyncSession, folder: LibraryFolder) -> dict:
-    from backend.app.farm.nas.service import refresh_mirror_if_nas  # nas imports this module
+    from backend.app.farm.nas import library as nas_library  # nas imports this module
+    from backend.app.farm.nas.service import nas_folder_id
 
     async with _folder_locks[folder.id]:
-        nas = await refresh_mirror_if_nas(db, folder)
-        result = await _sync(db, folder)
-        if nas is not None:
-            result["nas"] = nas
-        return result
+        if folder.id == await nas_folder_id(db):
+            return await nas_library.sync(db, folder)
+        return await _sync(db, folder)
 
 
-async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
+async def _sync(
+    db: AsyncSession,
+    folder: LibraryFolder,
+    walk: Callable[[], tuple[list[_DiskEntry], set[str]]] | None = None,
+    analyze: Callable[[_DiskEntry], _Analysis] | None = None,
+) -> dict:
+    """``walk``/``analyze`` default to the folder on disk; the NAS passes SMB ones (paths stay under ``root``)."""
     root = Path(folder.external_path or "")
     if not folder.is_external or not root.is_dir():
         raise FileNotFoundError(f"External path is not accessible: {folder.external_path}")
     now = time.time()
-    entries, seen_dirs = await asyncio.to_thread(_walk, root, folder.external_show_hidden)
+    on_disk = walk is None
+    entries, seen_dirs = await asyncio.to_thread(walk or partial(_walk, root, folder.external_show_hidden))
 
     # Subfolder tree of this external folder: relative dir -> folder id.
     ext_folders = (await db.execute(select(LibraryFolder).where(LibraryFolder.is_external.is_(True)))).scalars().all()
@@ -260,6 +269,17 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         .scalars()
         .all()
     )
+    kept: list[LibraryFile] = []
+    removed = 0
+    for f in files:
+        if _file_type(Path(f.file_path)) is None:
+            # Not a print file (photos imported by earlier versions): drop the row like the upstream scan.
+            _drop_thumbnail(f.thumbnail_path)
+            await db.delete(f)
+            removed += 1
+        else:
+            kept.append(f)
+    files = kept
     by_path = {f.file_path: f for f in files}
     file_ids = {f.id for f in files}
     states = (
@@ -281,6 +301,7 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         return st
 
     counts = dict.fromkeys(("added", "updated", "relinked", "missing", "corrupt", "pending", "unreadable"), 0)
+    counts["removed"] = removed
     disk_paths = {e.path for e in entries}
     fresh: list[_DiskEntry] = []
     touched = False
@@ -307,7 +328,7 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         if not settled:
             counts["pending"] += 1
             continue
-        analysis = await _try_analyze(entry)
+        analysis = await _try_analyze(entry, analyze)
         if analysis is None:
             counts["unreadable"] += 1
             continue
@@ -331,7 +352,7 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
     # Analyse new paths first: their hashes decide which missing files were moved.
     candidates: defaultdict[str, list[tuple[_DiskEntry, _Analysis]]] = defaultdict(list)
     for entry in fresh:
-        analysis = await _try_analyze(entry)
+        analysis = await _try_analyze(entry, analyze)
         if analysis is None:
             counts["unreadable"] += 1
         elif analysis.corrupt:
@@ -398,13 +419,50 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         watch.last_result = counts
     await db.commit()
 
-    if touched:
+    if touched and on_disk:  # STL renders need the whole file: not for NAS files that were never used
         asyncio.create_task(
             lib._backfill_external_stl_thumbnails(list(set(folder_cache.values()))),
             name=f"stl-backfill-folder-{folder.id}",
         )
-    # "removed" keeps the upstream response shape; watched folders never delete rows.
-    return {"status": "success", "removed": 0, **counts}
+    await _propose_plates(db, folder.id)
+    # "removed" keeps the upstream response shape: only non-print rows are ever deleted.
+    return {"status": "success", **counts}
+
+
+# (library_file_id, sha256) already proposed: each project version is parsed once.
+# shortcut: in memory, so a restart re-checks every project once (cheap when its plates are stored).
+_plates_checked: set[tuple[int, str]] = set()
+
+
+async def _propose_plates(db: AsyncSession, folder_id: int) -> None:
+    """Propose the plates of new or changed 3MF projects, so they exist before anyone opens the file."""
+    rows = (
+        await db.execute(
+            select(LibraryFile, FarmLibraryFile)
+            .join(FarmLibraryFile, FarmLibraryFile.library_file_id == LibraryFile.id)
+            .where(
+                FarmLibraryFile.watch_folder_id == folder_id,
+                FarmLibraryFile.status == "ok",
+                LibraryFile.file_type == "3mf",
+                LibraryFile.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    for lib_file, state in rows:
+        key = (lib_file.id, state.sha256)
+        if key in _plates_checked:
+            continue
+        _plates_checked.add(key)
+        try:
+            await refresh_plates(db, lib_file, state)
+        except PlateReadError as exc:
+            logger.info("Farm sync: no plates for %s: %s", lib_file.filename, exc)
+        except Exception:
+            # Skipped from now on, so one odd project can't block the others; the rest go next scan
+            # (rollback expires the loaded rows).
+            logger.exception("Farm sync: plate proposal failed for %s", lib_file.filename)
+            await db.rollback()
+            break
 
 
 async def _remove_vanished_subfolders(
@@ -427,6 +485,17 @@ async def _remove_vanished_subfolders(
                 await db.flush()
 
 
+async def cleanup_orphans(db: AsyncSession) -> None:
+    """Drop watch rows of deleted library folders, and file states left without a watched folder."""
+    folder_ids = select(LibraryFolder.id)
+    await db.execute(delete(FarmWatchedFolder).where(FarmWatchedFolder.folder_id.not_in(folder_ids)))
+    watched = select(FarmWatchedFolder.folder_id)
+    result = await db.execute(delete(FarmLibraryFile).where(FarmLibraryFile.watch_folder_id.not_in(watched)))
+    await db.commit()
+    if result.rowcount:
+        logger.info("Farm library: removed %d file states of deleted folders", result.rowcount)
+
+
 class FarmLibraryScheduler:
     """Periodic sync of watched folders. inotify is unreliable on SMB/NFS, so we poll."""
 
@@ -443,6 +512,14 @@ class FarmLibraryScheduler:
             self._task = None
 
     async def _loop(self) -> None:
+        from backend.app.farm.nas.service import refresh_access
+
+        try:
+            async with database.async_session() as db:
+                await cleanup_orphans(db)
+                await refresh_access(db)  # NAS reads (plates) work before the first scan
+        except Exception:  # pragma: no cover - defensive, the loop still runs
+            logger.exception("Farm library startup failed")
         while True:
             try:
                 await asyncio.sleep(SCHEDULER_TICK_SECONDS)
