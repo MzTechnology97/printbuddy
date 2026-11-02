@@ -1,0 +1,143 @@
+"""Printfarm (fork): Accoda jobs with alternative plates, placed on the first free printer that fits.
+
+No printer is contacted: the live printer snapshot, slicing and file reads are stubbed. Data is made up.
+"""
+
+import json
+import zipfile
+
+import pytest
+from sqlalchemy import select
+
+from backend.app.farm.jobs import service
+from backend.app.farm.jobs.models import FarmPrintJob
+from backend.app.farm.plan import service as plan
+from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+from backend.app.models.library import LibraryFile
+from backend.app.models.print_queue import PrintQueueItem
+
+API = "/api/v1/farm"
+
+
+@pytest.fixture
+async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path):
+    """Black 'Sopra' with plates on A1 (sliced, 15 pcs) and P1S (not sliced, 20 pcs); printers stubbed."""
+    shape = (await async_client.post(f"{API}/shapes", json={"name": "Sopra"})).json()
+    black = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Nero"})).json()
+    plates = {}
+    for model, pieces in (("A1", 15), ("P1S", 20)):
+        plate = FarmPlate(library_file_id=len(plates) + 50, plate_index=2, printer_model=model, materials=["PLA"])
+        plate.status = "confirmed"
+        plate.yields = [FarmPlateYield(object_name="sopra", quantity=pieces, shape_id=shape["id"])]
+        db_session.add(plate)
+        plates[model] = plate
+    a1_one = await printer_factory(name="A1 uno", model="A1")
+    a1_two = await printer_factory(name="A1 due", model="A1")
+    p1s = await printer_factory(name="P1S", model="P1S")
+    sliced = LibraryFile(
+        filename="sopra_plate2.gcode.3mf", file_path="/x/sopra.gcode.3mf", file_type="3mf", file_size=1
+    )
+    db_session.add(sliced)
+    await db_session.commit()
+
+    sliced_path = tmp_path / "sopra.gcode.3mf"
+    with zipfile.ZipFile(sliced_path, "w") as zf:
+        zf.writestr("Metadata/plate_2.gcode", "G28")
+    snapshot = [
+        {
+            "id": a1_one.id,
+            "name": "A1 uno",
+            "model": "A1",
+            "idle": True,
+            "loaded": [{"type": "PLA", "color": "161616"}],
+        },
+        {
+            "id": a1_two.id,
+            "name": "A1 due",
+            "model": "A1",
+            "idle": True,
+            "loaded": [{"type": "PLA", "color": "161616"}],
+        },
+        {"id": p1s.id, "name": "P1S", "model": "P1S", "idle": True, "loaded": [{"type": "PLA", "color": "ffffff"}]},
+    ]
+    slicing_asked = []
+
+    async def fake_sliced(db, plate):
+        return sliced if plate.printer_model == "A1" else None
+
+    async def fake_ask(db, plate):
+        slicing_asked.append(plate.printer_model)
+
+    async def fake_local(db, lib_file):
+        return sliced_path
+
+    monkeypatch.setattr(service, "sliced_file", fake_sliced)
+    monkeypatch.setattr(service, "ask_slicing", fake_ask)
+    monkeypatch.setattr(service, "_local_path", fake_local)
+    monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 1, "type": "PLA"}])
+    monkeypatch.setattr(plan, "printer_snapshot", lambda printers: snapshot)
+    return {
+        "code": black["code"],
+        "plates": [plates["A1"].id, plates["P1S"].id],
+        "snapshot": snapshot,
+        "slicing": slicing_asked,
+        "printers": (a1_one.id, a1_two.id, p1s.id),
+    }
+
+
+async def accoda(client, code, plate_ids):
+    r = await client.post(f"{API}/jobs", json={"jobs": [{"component_code": code, "plate_ids": plate_ids}]})
+    assert r.status_code == 200, r.text
+    return r.json()[0]
+
+
+@pytest.mark.asyncio
+async def test_job_waits_then_goes_to_the_free_printer_with_the_colour(async_client, db_session, farm):
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    assert (job["state"], job["pieces"]) == ("waiting", 15)
+    assert farm["slicing"] == ["P1S"]  # the plate without a sliced file is sliced right away
+    assert await service.queued_pieces(db_session) == {farm["code"]: 15}
+
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    a1_one = farm["printers"][0]
+    assert (item.printer_id, item.plate_id, item.status) == (a1_one, 2, "pending")
+    assert json.loads(item.filament_overrides) == [
+        {"slot_id": 1, "type": "PLA", "color": "#161616", "force_color_match": True}
+    ]
+    assert json.loads(item.required_filament_types) == ["PLA"]
+
+    jobs = (await async_client.get(f"{API}/jobs")).json()
+    assert [(j["state"], j["printer"], j["pieces"]) for j in jobs] == [("pending", "A1 uno", 15)]
+    # Nothing is placed twice, and a second job takes the other free A1.
+    assert await service.dispatch_once(db_session) == 0
+    await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 1
+    printers = sorted((await db_session.execute(select(PrintQueueItem.printer_id))).scalars())
+    assert printers == sorted(farm["printers"][:2])
+    assert await service.queued_pieces(db_session) == {farm["code"]: 30}
+
+
+@pytest.mark.asyncio
+async def test_job_explains_why_it_waits(async_client, db_session, farm):
+    for printer in farm["snapshot"][:2]:
+        printer["loaded"] = [{"type": "PETG", "color": "161616"}]  # black, but the wrong material
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 0
+    note = (await db_session.get(FarmPrintJob, job["id"])).note
+    assert "A1 uno: no Nero PLA loaded" in note
+    assert "being sliced" in note  # the P1S plate
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_validation(async_client, db_session, farm):
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    await service.dispatch_once(db_session)
+    assert (await async_client.delete(f"{API}/jobs/{job['id']}")).json()["state"] == "cancelled"
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    await db_session.refresh(item)
+    assert item.status == "cancelled"
+    assert await service.queued_pieces(db_session) == {}
+
+    bad = await async_client.post(f"{API}/jobs", json={"jobs": [{"component_code": farm["code"], "plate_ids": [999]}]})
+    assert bad.status_code == 422

@@ -106,6 +106,21 @@ export interface FarmPlanComponent {
   plates: FarmPlanPlate[];
 }
 
+export interface FarmJob {
+  id: number;
+  component_code: string;
+  color: string | null;
+  state: 'waiting' | 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled' | 'skipped' | 'removed';
+  note: string | null;
+  plate_ids: number[];
+  plate_id: number | null;
+  printer_id: number | null;
+  printer: string | null;
+  queue_item_id: number | null;
+  pieces: number;
+  created_at: string;
+}
+
 export interface FarmPlanSettings {
   url: string;
   tolerance: number;
@@ -166,6 +181,10 @@ export const farmApi = {
     farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
       '/plan',
     ),
+  getJobs: () => farmRequest<FarmJob[]>('/jobs'),
+  createJobs: (jobs: { component_code: string; plate_ids: number[] }[]) =>
+    farmRequest<FarmJob[]>('/jobs', { method: 'POST', body: JSON.stringify({ jobs }) }),
+  cancelJob: (id: number) => farmRequest<{ id: number; state: string }>(`/jobs/${id}`, { method: 'DELETE' }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
   savePlanSettings: (data: FarmPlanSettings) =>
     farmRequest<FarmPlanSettings>('/plan/settings', { method: 'PUT', body: JSON.stringify(data) }),
