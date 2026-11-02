@@ -84,5 +84,12 @@ export const farmApi = {
   updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
     farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  getFolderProjects: (folderId: number) =>
+    farmRequest<{ folder_id: number; project_ids: number[] }>(`/folders/${folderId}/projects`),
+  setFolderProjects: (folderId: number, projectIds: number[]) =>
+    farmRequest<{ folder_id: number; project_ids: number[] }>(`/folders/${folderId}/projects`, {
+      method: 'PUT',
+      body: JSON.stringify({ project_ids: projectIds }),
+    }),
   createShape: (name: string) => farmRequest<FarmShape>('/shapes', { method: 'POST', body: JSON.stringify({ name }) }),
 };

@@ -4,6 +4,18 @@ import i18n from '../i18n';
 
 const en = {
   nav: { products: 'Products' },
+  folders: {
+    description: 'Link "{{name}}" to one or more projects and products. Several products (e.g. colour variants) can share the folder.',
+    projects: 'Projects and products',
+    search: 'Search…',
+    product: 'Product',
+    subfolders: 'Subfolders (Orca, Bambu, …) are included.',
+    selected_one: '{{count}} selected',
+    selected_other: '{{count}} selected',
+    linked_one: 'Folder linked to {{count}} project',
+    linked_other: 'Folder linked to {{count}} projects',
+    unlinked: 'Folder unlinked',
+  },
   products: {
     title: 'Products',
     intro: 'A product is what you sell: Amazon SKUs and the printed parts of one unit. It is reprinted forever, so it has no completion, due date or budget.',
@@ -52,6 +64,18 @@ const en = {
 
 const it: typeof en = {
   nav: { products: 'Prodotti' },
+  folders: {
+    description: 'Collega "{{name}}" a uno o più progetti e prodotti. Più prodotti (per esempio varianti di colore) possono usare la stessa cartella.',
+    projects: 'Progetti e prodotti',
+    search: 'Cerca…',
+    product: 'Prodotto',
+    subfolders: 'Sono incluse anche le sottocartelle (Orca, Bambu, …).',
+    selected_one: '{{count}} selezionato',
+    selected_other: '{{count}} selezionati',
+    linked_one: 'Cartella collegata a {{count}} progetto',
+    linked_other: 'Cartella collegata a {{count}} progetti',
+    unlinked: 'Cartella scollegata',
+  },
   products: {
     title: 'Prodotti',
     intro: "Un prodotto è quello che vendi: SKU Amazon e pezzi stampati di un'unità. Si ristampa sempre, quindi non ha completamento, scadenza né budget.",

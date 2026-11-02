@@ -54,6 +54,7 @@ import type {
   Permission,
 } from '../api/client';
 import { Button } from '../components/Button';
+import { FarmLinkFolderModal } from '../farm/LinkFolderModal'; // fork: printfarm
 import { ConfirmModal } from '../components/ConfirmModal';
 import { PrintModal } from '../components/PrintModal';
 import { ModelViewerModal } from '../components/ModelViewerModal';
@@ -363,7 +364,8 @@ interface LinkFolderModalProps {
   t: TFunction;
 }
 
-function LinkFolderModal({ folder, onClose, onLink, isLoading, t }: LinkFolderModalProps) {
+// fork: replaced by farm/LinkFolderModal (several projects, search); exported only to stay unused-safe.
+export function LinkFolderModal({ folder, onClose, onLink, isLoading, t }: LinkFolderModalProps) {
   const [linkType, setLinkType] = useState<'project' | 'archive'>('project');
   const [selectedId, setSelectedId] = useState<number | null>(
     folder.project_id || folder.archive_id || null
@@ -2343,12 +2345,11 @@ export function FileManagerPage() {
       )}
 
       {linkFolder && (
-        <LinkFolderModal
+        <FarmLinkFolderModal
           folder={linkFolder}
           onClose={() => setLinkFolder(null)}
           onLink={(data) => updateFolderMutation.mutate({ id: linkFolder.id, data })}
           isLoading={updateFolderMutation.isPending}
-          t={t}
         />
       )}
 
