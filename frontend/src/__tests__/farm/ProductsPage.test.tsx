@@ -1,0 +1,86 @@
+/**
+ * Tests for the printfarm (fork) Products page. All data is made up.
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import { render } from '../utils';
+import { server } from '../mocks/server';
+import { ProductsPage } from '../../farm/ProductsPage';
+
+const products = [
+  {
+    project_id: 7,
+    name: 'Portaoggetti X',
+    skus: ['PX-01', 'PX-02'],
+    asins: ['B0TEST0001'],
+    updated_at: '2026-01-01T00:00:00Z',
+    parts: [
+      { component_code: 'C-0001', name: 'Base X', quantity: 1, plates: [] },
+      { component_code: 'C-0002', name: 'Gancio', quantity: 2, plates: [] },
+    ],
+  },
+];
+const components = [
+  { code: 'C-0001', name: 'Base X' },
+  { code: 'C-0002', name: 'Gancio' },
+];
+
+describe('ProductsPage', () => {
+  let saved: unknown;
+
+  beforeEach(() => {
+    saved = undefined;
+    server.use(
+      http.get('/api/v1/farm/products', () => HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products })),
+      http.get('/api/v1/farm/products/overview', () =>
+        HttpResponse.json([{ project_id: 7, has_cover: false, queued: 3, printing: 1, printed_recent: 12 }]),
+      ),
+      http.get('/api/v1/farm/components', () => HttpResponse.json(components)),
+      http.get('/api/v1/projects/', () => HttpResponse.json([])),
+      http.put('/api/v1/farm/products/:id', async ({ request }) => {
+        saved = await request.json();
+        return HttpResponse.json({ project_id: 7 });
+      }),
+    );
+  });
+
+  it('shows products with SKUs, parts and print activity', async () => {
+    render(<ProductsPage />);
+    expect(await screen.findByText('Portaoggetti X')).toBeInTheDocument();
+    expect(screen.getByText(/PX-01 · PX-02/)).toBeInTheDocument();
+    expect(screen.getByText(/Queued 3/)).toBeInTheDocument();
+    expect(screen.getByText(/Printed in 7 days 12/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Prints and queue' })).toHaveAttribute('href', '/projects/7');
+    // Components are listed with their stable codes.
+    expect(screen.getByLabelText('Name C-0002')).toHaveValue('Gancio');
+  });
+
+  it('saves edited SKUs and part quantities', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const skus = screen.getByLabelText('Amazon SKUs');
+    await user.clear(skus);
+    await user.type(skus, 'PX-01, PX-03');
+    const qty = screen.getAllByLabelText('Quantity')[1];
+    await user.clear(qty);
+    await user.type(qty, '4');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(saved).toEqual({
+        name: 'Portaoggetti X',
+        skus: ['PX-01', 'PX-03'],
+        asins: ['B0TEST0001'],
+        parts: [
+          { component_code: 'C-0001', quantity: 1 },
+          { component_code: 'C-0002', quantity: 4 },
+        ],
+      }),
+    );
+  });
+});

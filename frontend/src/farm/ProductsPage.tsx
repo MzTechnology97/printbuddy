@@ -1,0 +1,316 @@
+// Printfarm (fork) products: projects with Amazon SKUs and printed parts, read by Seller Hub.
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
+import { Package, Plus, Trash2, Loader2 } from 'lucide-react';
+import { api } from '../api/client';
+import { Button } from '../components/Button';
+import { useToast } from '../contexts/ToastContext';
+import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput } from './api';
+import './i18n';
+
+const INPUT =
+  'w-full bg-bambu-dark border border-bambu-dark-tertiary rounded px-3 py-2 text-white placeholder-bambu-gray focus:outline-none focus:border-bambu-green';
+const LABEL = 'block text-sm font-medium text-white mb-1';
+
+interface Draft {
+  id?: number;
+  projectId?: number;
+  name: string;
+  skus: string;
+  asins: string;
+  parts: { code: string; quantity: number }[];
+}
+
+const splitList = (value: string) => value.split(',').map((s) => s.trim()).filter(Boolean);
+
+function draftOf(p: FarmProduct): Draft {
+  return {
+    id: p.project_id,
+    name: p.name,
+    skus: p.skus.join(', '),
+    asins: p.asins.join(', '),
+    parts: p.parts.map((x) => ({ code: x.component_code, quantity: x.quantity })),
+  };
+}
+
+function ProductForm({
+  draft,
+  components,
+  onDone,
+}: {
+  draft: Draft;
+  components: FarmComponent[];
+  onDone: () => void;
+}) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [d, setD] = useState(draft);
+  const [newComponent, setNewComponent] = useState('');
+  const { data: projects } = useQuery({ queryKey: ['projects', 'farm-picker'], queryFn: () => api.getProjects(), enabled: !d.id });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
+
+  const save = useMutation({
+    mutationFn: () => {
+      const body: FarmProductInput = {
+        name: d.name || undefined,
+        skus: splitList(d.skus),
+        asins: splitList(d.asins),
+        parts: d.parts.filter((p) => p.code).map((p) => ({ component_code: p.code, quantity: p.quantity })),
+      };
+      if (d.id) return farmApi.updateProduct(d.id, { ...body, name: d.name });
+      return farmApi.createProduct({ ...body, project_id: d.projectId });
+    },
+    onSuccess: () => {
+      refresh();
+      showToast(t('farm.products.saved'), 'success');
+      onDone();
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+
+  const unmark = useMutation({
+    mutationFn: () => farmApi.unmarkProduct(d.id!),
+    onSuccess: () => {
+      refresh();
+      onDone();
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+
+  const addComponent = useMutation({
+    mutationFn: () => farmApi.createComponent(newComponent),
+    onSuccess: (c) => {
+      refresh();
+      setNewComponent('');
+      setD({ ...d, parts: [...d.parts, { code: c.code, quantity: 1 }] });
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+
+  const uploadCover = async (file: File | undefined) => {
+    if (!file || !d.id) return;
+    try {
+      await api.uploadProjectCoverImage(d.id, file);
+      refresh();
+    } catch (e) {
+      showToast((e as Error).message, 'error');
+    }
+  };
+
+  const setPart = (i: number, patch: Partial<Draft['parts'][number]>) =>
+    setD({ ...d, parts: d.parts.map((p, j) => (j === i ? { ...p, ...patch } : p)) });
+
+  return (
+    <form
+      className="space-y-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      {!d.id && (
+        <div>
+          <label className={LABEL} htmlFor="farm-from-project">{t('farm.products.fromProject')}</label>
+          <select
+            id="farm-from-project"
+            className={INPUT}
+            value={d.projectId ?? ''}
+            onChange={(e) => setD({ ...d, projectId: e.target.value ? Number(e.target.value) : undefined })}
+          >
+            <option value="">{t('farm.products.newProject')}</option>
+            {(projects || []).map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      <div>
+        <label className={LABEL} htmlFor="farm-name">{t('farm.products.name')}</label>
+        <input id="farm-name" className={INPUT} value={d.name} required={!d.projectId} maxLength={255}
+          onChange={(e) => setD({ ...d, name: e.target.value })} />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className={LABEL} htmlFor="farm-skus">{t('farm.products.skus')}</label>
+          <input id="farm-skus" className={INPUT} value={d.skus} placeholder={t('farm.products.listHint')}
+            onChange={(e) => setD({ ...d, skus: e.target.value })} />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="farm-asins">{t('farm.products.asins')}</label>
+          <input id="farm-asins" className={INPUT} value={d.asins} placeholder={t('farm.products.listHint')}
+            onChange={(e) => setD({ ...d, asins: e.target.value })} />
+        </div>
+      </div>
+      <div>
+        <span className={LABEL}>{t('farm.products.parts')}</span>
+        <div className="space-y-2">
+          {d.parts.map((p, i) => (
+            <div key={i} className="flex gap-2 items-center">
+              <select aria-label={t('farm.products.pickComponent')} className={INPUT} value={p.code}
+                onChange={(e) => setPart(i, { code: e.target.value })}>
+                <option value="">{t('farm.products.pickComponent')}</option>
+                {components.map((c) => (
+                  <option key={c.code} value={c.code}>{c.code} · {c.name}</option>
+                ))}
+              </select>
+              <input aria-label={t('farm.products.quantity')} type="number" min={1} max={1000} className={`${INPUT} w-24`}
+                value={p.quantity} onChange={(e) => setPart(i, { quantity: Number(e.target.value) })} />
+              <Button type="button" variant="ghost" size="sm" aria-label={t('farm.products.remove')}
+                onClick={() => setD({ ...d, parts: d.parts.filter((_, j) => j !== i) })}>
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            </div>
+          ))}
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" size="sm"
+              onClick={() => setD({ ...d, parts: [...d.parts, { code: '', quantity: 1 }] })}>
+              <Plus className="w-4 h-4" /> {t('farm.products.addPart')}
+            </Button>
+            <input aria-label={t('farm.products.newComponent')} className={`${INPUT} md:w-64`} value={newComponent}
+              placeholder={t('farm.products.newComponent')} maxLength={200} onChange={(e) => setNewComponent(e.target.value)} />
+            <Button type="button" variant="secondary" size="sm" disabled={!newComponent.trim() || addComponent.isPending}
+              onClick={() => addComponent.mutate()}>
+              {t('farm.products.createComponent')}
+            </Button>
+          </div>
+        </div>
+      </div>
+      {d.id && (
+        <div>
+          <label className={LABEL} htmlFor="farm-cover">{t('farm.products.cover')}</label>
+          <input id="farm-cover" type="file" accept="image/*" className="text-sm text-bambu-gray"
+            onChange={(e) => uploadCover(e.target.files?.[0])} />
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2 justify-end">
+        {d.id && (
+          <Button type="button" variant="danger" className="mr-auto"
+            onClick={() => window.confirm(t('farm.products.removeConfirm', { name: d.name })) && unmark.mutate()}>
+            {t('farm.products.remove')}
+          </Button>
+        )}
+        <Button type="button" variant="secondary" onClick={onDone}>{t('farm.products.cancel')}</Button>
+        <Button type="submit" disabled={save.isPending}>{t('farm.products.save')}</Button>
+      </div>
+    </form>
+  );
+}
+
+function ComponentRow({ component }: { component: FarmComponent }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const rename = useMutation({
+    mutationFn: (name: string) => farmApi.renameComponent(component.code, name),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  return (
+    <li className="flex items-center gap-3">
+      <span className="font-mono text-bambu-green w-20 shrink-0">{component.code}</span>
+      <input aria-label={`${t('farm.products.name')} ${component.code}`} className={INPUT} defaultValue={component.name}
+        maxLength={200} onBlur={(e) => {
+          const name = e.target.value.trim();
+          if (name && name !== component.name) rename.mutate(name);
+        }} />
+    </li>
+  );
+}
+
+export function ProductsPage() {
+  const { t } = useTranslation();
+  const [editing, setEditing] = useState<Draft | null>(null);
+  const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
+  const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
+  const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
+  const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
+
+  return (
+    <div className="p-4 md:p-8 space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold text-white flex items-center gap-3">
+          <Package className="w-7 h-7 text-bambu-green" /> {t('farm.products.title')}
+        </h1>
+        {!editing && (
+          <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [] })}>
+            <Plus className="w-4 h-4" /> {t('farm.products.new')}
+          </Button>
+        )}
+      </div>
+      <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.products.intro')}</p>
+
+      {editing && (
+        <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} onDone={() => setEditing(null)} />
+      )}
+
+      {products.isLoading ? (
+        <Loader2 className="w-8 h-8 animate-spin text-bambu-green" />
+      ) : products.error ? (
+        <p className="text-red-400">{(products.error as Error).message}</p>
+      ) : products.data?.products.length === 0 ? (
+        <p className="text-bambu-gray">{t('farm.products.empty')}</p>
+      ) : (
+        <ul className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {products.data?.products.map((p) => {
+            const s = stats.get(p.project_id);
+            return (
+              <li key={p.project_id} className="flex gap-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4">
+                <div className="w-20 h-20 shrink-0 rounded bg-bambu-dark overflow-hidden flex items-center justify-center">
+                  {s?.has_cover ? (
+                    <img alt="" className="w-full h-full object-cover"
+                      src={`${api.getProjectCoverImageUrl(p.project_id)}${api.getProjectCoverImageUrl(p.project_id).includes('?') ? '&' : '?'}v=${encodeURIComponent(p.updated_at)}`} />
+                  ) : (
+                    <Package className="w-8 h-8 text-bambu-gray/50" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <h2 className="text-white font-semibold truncate">{p.name}</h2>
+                    <Button variant="ghost" size="sm" onClick={() => setEditing(draftOf(p))}>{t('farm.products.edit')}</Button>
+                  </div>
+                  {(p.skus.length > 0 || p.asins.length > 0) && (
+                    <p className="text-xs text-bambu-gray break-words">
+                      {p.skus.join(' · ')}{p.asins.length > 0 && ` — ASIN ${p.asins.join(' · ')}`}
+                    </p>
+                  )}
+                  <ul className="text-sm text-bambu-gray-light">
+                    {p.parts.length === 0 && <li className="text-bambu-gray">{t('farm.products.noParts')}</li>}
+                    {p.parts.map((part) => (
+                      <li key={part.component_code}>
+                        {part.quantity}× <span className="font-mono">{part.component_code}</span> {part.name}
+                        <span className="text-xs text-bambu-gray">
+                          {' · '}
+                          {part.plates.length ? t('farm.products.plates', { count: part.plates.length }) : t('farm.products.noPlates')}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {s && (
+                    <p className="text-xs text-bambu-gray">
+                      {t('farm.products.queued', { count: s.queued })} · {t('farm.products.printing', { count: s.printing })} ·{' '}
+                      {t('farm.products.printedRecent', { count: s.printed_recent })} ·{' '}
+                      <Link to={`/projects/${p.project_id}`} className="text-bambu-green hover:underline">{t('farm.products.prints')}</Link>
+                    </p>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <section className="space-y-2">
+        <h2 className="text-lg font-semibold text-white">{t('farm.products.components')}</h2>
+        <p className="text-bambu-gray text-sm">{t('farm.products.componentsHint')}</p>
+        <ul className="space-y-2 max-w-xl">
+          {(components.data || []).map((c) => (
+            <ComponentRow key={`${c.code}-${c.name}`} component={c} />
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}

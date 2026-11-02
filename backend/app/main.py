@@ -271,6 +271,7 @@ root_logger.setLevel(log_level)
 # ContextVar the filter reads.
 from backend.app.core.logging_filters import CredentialRedactionFilter
 from backend.app.core.trace import TraceIDFilter
+from backend.app.farm.products import routes as farm_products_routes  # fork: printfarm products
 
 _trace_id_filter = TraceIDFilter()
 _credential_redaction_filter = CredentialRedactionFilter()
@@ -6542,6 +6543,7 @@ app.include_router(maintenance.router, prefix=app_settings.api_prefix)
 app.include_router(camera.router, prefix=app_settings.api_prefix)
 app.include_router(external_links.router, prefix=app_settings.api_prefix)
 app.include_router(projects.router, prefix=app_settings.api_prefix)
+app.include_router(farm_products_routes.router, prefix=app_settings.api_prefix)  # fork: printfarm products
 app.include_router(library.router, prefix=app_settings.api_prefix)
 app.include_router(library_trash.router, prefix=app_settings.api_prefix)
 app.include_router(slice_jobs.router, prefix=app_settings.api_prefix)

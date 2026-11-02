@@ -1,0 +1,263 @@
+"""Printfarm (fork) products: components with stable codes, products on projects, Seller Hub contract.
+
+All SKUs, ASINs and names are made up.
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+
+from backend.app.core.auth import generate_api_key
+from backend.app.farm.products.models import FarmProduct, FarmProductPart
+from backend.app.models.api_key import APIKey
+from backend.app.models.print_queue import PrintQueueItem
+from backend.app.models.project import Project
+
+API = "/api/v1/farm"
+
+
+async def component(client: AsyncClient, name: str) -> str:
+    r = await client.post(f"{API}/components", json={"name": name})
+    assert r.status_code == 200, r.text
+    return r.json()["code"]
+
+
+async def product(client: AsyncClient, **body) -> int:
+    r = await client.post(f"{API}/products", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()["project_id"]
+
+
+async def products(client: AsyncClient) -> list[dict]:
+    r = await client.get(f"{API}/products")
+    assert r.status_code == 200, r.text
+    return r.json()["products"]
+
+
+class TestComponents:
+    @pytest.mark.asyncio
+    async def test_codes_are_sequential_and_renamable(self, async_client):
+        assert await component(async_client, "Base") == "C-0001"
+        assert await component(async_client, "  Gancio\n ") == "C-0002"
+        r = await async_client.patch(f"{API}/components/C-0001", json={"name": "Base X"})
+        assert r.json() == {"code": "C-0001", "name": "Base X"}
+        r = await async_client.get(f"{API}/components")
+        assert r.json() == [{"code": "C-0001", "name": "Base X"}, {"code": "C-0002", "name": "Gancio"}]
+
+    @pytest.mark.asyncio
+    async def test_rename_unknown_is_404(self, async_client):
+        r = await async_client.patch(f"{API}/components/C-0999", json={"name": "x"})
+        assert r.status_code == 404
+
+
+class TestProducts:
+    @pytest.mark.asyncio
+    async def test_contract_shape(self, async_client):
+        base, hook = await component(async_client, "Base X"), await component(async_client, "Gancio")
+        pid = await product(
+            async_client,
+            name="Portaoggetti X",
+            skus=["PX-01", " PX-02 ", "PX-01"],
+            asins=["B0TEST0001"],
+            parts=[{"component_code": base, "quantity": 1}, {"component_code": hook, "quantity": 2}],
+        )
+        r = await async_client.get(f"{API}/products")
+        body = r.json()
+        assert body["generated_at"].endswith("Z")
+        [p] = body["products"]
+        assert p["project_id"] == pid
+        assert p["name"] == "Portaoggetti X"
+        assert p["skus"] == ["PX-01", "PX-02"]
+        assert p["asins"] == ["B0TEST0001"]
+        assert p["updated_at"].endswith("Z")
+        assert p["parts"] == [
+            {"component_code": "C-0001", "name": "Base X", "quantity": 1, "plates": []},
+            {"component_code": "C-0002", "name": "Gancio", "quantity": 2, "plates": []},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_component_shared_by_two_products(self, async_client):
+        hook = await component(async_client, "Gancio")
+        await product(async_client, name="X", skus=["X-1"], parts=[{"component_code": hook, "quantity": 2}])
+        await product(async_client, name="Y", skus=["Y-1"], parts=[{"component_code": hook, "quantity": 1}])
+        assert [p["parts"][0]["component_code"] for p in await products(async_client)] == [hook, hook]
+
+    @pytest.mark.asyncio
+    async def test_update_replaces_skus_and_parts(self, async_client):
+        a, b = await component(async_client, "A"), await component(async_client, "B")
+        pid = await product(async_client, name="X", skus=["X-1"], parts=[{"component_code": a}])
+        r = await async_client.put(
+            f"{API}/products/{pid}",
+            json={"name": "X nuovo", "skus": ["X-2"], "parts": [{"component_code": b, "quantity": 3}]},
+        )
+        assert r.status_code == 200, r.text
+        [p] = await products(async_client)
+        assert (p["name"], p["skus"], p["parts"][0]["component_code"], p["parts"][0]["quantity"]) == (
+            "X nuovo",
+            ["X-2"],
+            b,
+            3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sku_belongs_to_one_product(self, async_client):
+        await product(async_client, name="X", skus=["SAME"])
+        r = await async_client.post(f"{API}/products", json={"name": "Y", "skus": ["SAME"]})
+        assert r.status_code == 409
+        assert len(await products(async_client)) == 1  # the failed create left nothing behind
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "parts",
+        [
+            [{"component_code": "C-0404"}],  # unknown
+            [{"component_code": "C-0001"}, {"component_code": "C-0001"}],  # twice
+            [{"component_code": "C-0001", "quantity": 0}],
+            [{"component_code": "gancio"}],
+        ],
+    )
+    async def test_bad_parts_rejected(self, async_client, parts):
+        await component(async_client, "A")
+        r = await async_client.post(f"{API}/products", json={"name": "X", "parts": parts})
+        assert r.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_existing_project_becomes_product_and_back(self, async_client, db_session):
+        project = Project(name="Lavoro esistente")
+        db_session.add(project)
+        await db_session.commit()
+        pid = project.id
+        assert await products(async_client) == []
+        assert await product(async_client, project_id=pid, skus=["E-1"]) == pid
+        r = await async_client.post(f"{API}/products", json={"project_id": pid})
+        assert r.status_code == 409
+        assert [p["name"] for p in await products(async_client)] == ["Lavoro esistente"]
+
+        r = await async_client.delete(f"{API}/products/{pid}")
+        assert r.status_code == 200
+        assert await products(async_client) == []
+        assert await db_session.get(Project, pid) is not None
+
+    @pytest.mark.asyncio
+    async def test_deleting_project_drops_product_rows(self, async_client, db_session):
+        a = await component(async_client, "A")
+        pid = await product(async_client, name="X", parts=[{"component_code": a}])
+        await db_session.delete(await db_session.get(Project, pid))
+        await db_session.commit()
+        assert (await db_session.execute(select(FarmProduct))).scalars().all() == []
+        assert (await db_session.execute(select(FarmProductPart))).scalars().all() == []
+
+    @pytest.mark.asyncio
+    async def test_overview_counts_queue_and_recent_prints(
+        self, async_client, db_session, printer_factory, archive_factory
+    ):
+        pid = await product(async_client, name="X")
+        other = await product(async_client, name="Y")
+        printer = await printer_factory()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        db_session.add_all(
+            [
+                PrintQueueItem(printer_id=printer.id, project_id=pid, status="pending"),
+                PrintQueueItem(printer_id=printer.id, project_id=pid, status="pending"),
+                PrintQueueItem(printer_id=printer.id, project_id=pid, status="printing"),
+                PrintQueueItem(printer_id=printer.id, project_id=pid, status="completed"),
+            ]
+        )
+        await db_session.commit()
+        await archive_factory(printer.id, project_id=pid, quantity=4, completed_at=now - timedelta(days=1))
+        await archive_factory(printer.id, project_id=pid, quantity=9, completed_at=now - timedelta(days=30))
+        await archive_factory(printer.id, project_id=pid, quantity=5, status="failed", completed_at=now)
+
+        r = await async_client.get(f"{API}/products/overview")
+        rows = {row["project_id"]: row for row in r.json()}
+        assert rows[pid] == {"project_id": pid, "has_cover": False, "queued": 2, "printing": 1, "printed_recent": 4}
+        assert rows[other]["queued"] == rows[other]["printed_recent"] == 0
+
+
+class TestApiKey:
+    async def _key(self, db_session, can_read_status: bool) -> str:
+        full, key_hash, prefix = generate_api_key()
+        db_session.add(APIKey(name="seller hub", key_hash=key_hash, key_prefix=prefix, can_read_status=can_read_status))
+        await db_session.commit()
+        return full
+
+    @pytest.mark.asyncio
+    async def test_key_needs_read_status(self, async_client, db_session):
+        ok, denied = await self._key(db_session, True), await self._key(db_session, False)
+        for path in ("/products", "/components"):
+            assert (await async_client.get(API + path, headers={"X-API-Key": ok})).status_code == 200
+            assert (await async_client.get(API + path, headers={"X-API-Key": denied})).status_code == 403
+            assert (await async_client.get(API + path, headers={"X-API-Key": "bb_wrong"})).status_code == 401
+
+
+def plan() -> dict:
+    """Shape of Seller Hub's GET /api/print-plan (only the fields the import reads)."""
+    return {
+        "parts": [
+            {
+                "key": "asin:B0TEST0001",
+                "name": "Portaoggetti X",
+                "skus": [{"sku": "PX-01", "asin": "B0TEST0001"}, {"sku": "PX-02", "asin": "B0TEST0001"}],
+            },
+            {"key": "parte:lampada", "name": "Lampada", "skus": [{"sku": "LA-01", "asin": "B0TEST0002"}]},
+        ],
+        "components": [
+            {
+                "code": "C-0003",
+                "name": "Gancio",
+                "stock": 10,
+                "products": [
+                    {"key": "asin:B0TEST0001", "name": "Portaoggetti X", "qty": 2},
+                    {"key": "parte:lampada", "name": "Lampada", "qty": 1},
+                ],
+            },
+            {
+                "code": "C-0007",
+                "name": "Base X",
+                "stock": 0,
+                "products": [{"key": "asin:B0TEST0001", "name": "Portaoggetti X", "qty": 1}],
+            },
+            {"code": "C-0012", "name": "Senza prodotti", "products": []},
+            {"code": "bad", "name": "ignored", "products": []},
+        ],
+    }
+
+
+class TestSellerHubImport:
+    @pytest.mark.asyncio
+    async def test_import_keeps_codes_and_is_idempotent(self, async_client):
+        r = await async_client.post(f"{API}/import/sellerhub", json=plan())
+        assert r.json() == {
+            "components_created": 3,
+            "components_existing": 0,
+            "products_created": 2,
+            "products_skipped": 0,
+        }
+        r = await async_client.post(f"{API}/import/sellerhub", json=plan())
+        assert r.json() == {
+            "components_created": 0,
+            "components_existing": 3,
+            "products_created": 0,
+            "products_skipped": 2,
+        }
+
+        comps = (await async_client.get(f"{API}/components")).json()
+        assert [c["code"] for c in comps] == ["C-0003", "C-0007", "C-0012"]
+        by_name = {p["name"]: p for p in await products(async_client)}
+        x = by_name["Portaoggetti X"]
+        assert (x["skus"], x["asins"]) == (["PX-01", "PX-02"], ["B0TEST0001"])
+        assert [(p["component_code"], p["quantity"]) for p in x["parts"]] == [("C-0003", 2), ("C-0007", 1)]
+        assert [(p["component_code"], p["quantity"]) for p in by_name["Lampada"]["parts"]] == [("C-0003", 1)]
+        # New components continue after the highest imported code, never reusing one.
+        assert await component(async_client, "Nuovo") == "C-0013"
+
+    @pytest.mark.asyncio
+    async def test_import_skips_products_already_defined(self, async_client, db_session):
+        await product(async_client, name="Fatto a mano", skus=["LA-01"])
+        r = await async_client.post(f"{API}/import/sellerhub", json=plan())
+        assert r.json()["products_created"] == 1
+        assert r.json()["products_skipped"] == 1
+        names = (await db_session.execute(select(Project.name))).scalars().all()
+        assert sorted(names) == ["Fatto a mano", "Portaoggetti X"]
