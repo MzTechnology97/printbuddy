@@ -234,6 +234,30 @@ class TestNasLibrary:
         (share / SUB / "Archive" / "box-v2.3mf").unlink()
         assert (await sync(async_client))["missing"] == 1
 
+    async def test_paths_made_relative_at_startup_still_work(
+        self, async_client, db_session, share, tmp_path, monkeypatch
+    ):
+        """Upstream strips the data dir from library paths at every startup: NAS rows must keep working."""
+        from backend.app.core.config import settings as app_settings
+
+        monkeypatch.setattr(app_settings, "base_dir", tmp_path / "data")  # the cache lives under the data dir
+        await configure(async_client)
+        await sync(async_client)
+        box_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
+        prefix = f"{tmp_path / 'data'}/"
+        for lib_file in (await db_session.execute(select(LibraryFile))).scalars():
+            lib_file.file_path = lib_file.file_path.removeprefix(prefix)  # what the migration does
+        await db_session.commit()
+
+        result = await sync(async_client)
+        assert (result["added"], result["relinked"], result["updated"], result["missing"]) == (0, 0, 0, 0)
+        resp = await async_client.get(f"/api/v1/farm/library/files/{box_id}/project")
+        assert resp.status_code == 200, resp.text
+        lib_file = await db_session.get(LibraryFile, box_id)
+        assert not lib_file.file_path.startswith("/")
+        assert await cache.ensure_local(db_session, lib_file)
+        assert (tmp_path / "data" / lib_file.file_path).read_bytes() == (share / SUB / "Box" / "box.3mf").read_bytes()
+
     async def test_unreachable_nas_changes_nothing(self, async_client, share):
         await configure(async_client)
         await sync(async_client)

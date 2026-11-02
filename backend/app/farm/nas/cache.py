@@ -105,7 +105,7 @@ async def ensure_local(db: AsyncSession, lib_file: LibraryFile) -> bool:
         state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == lib_file.id))
         if state is None or state.status != "ok":
             return False  # gone from the NAS or corrupt
-        path = Path(lib_file.file_path)
+        path = access.library_path(lib_file.file_path)
         async with _locks[str(path)]:
             if not await asyncio.to_thread(_fresh, path, state.size, state.mtime):
                 await asyncio.to_thread(_download, active, parts, path, state.mtime)

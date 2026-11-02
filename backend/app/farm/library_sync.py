@@ -37,6 +37,7 @@ from backend.app.api.routes import library as lib
 from backend.app.core import database
 from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+from backend.app.farm.nas.access import library_path
 from backend.app.farm.plates.service import PlateReadError, refresh_plates
 from backend.app.models.library import LibraryFile, LibraryFolder
 
@@ -280,7 +281,8 @@ async def _sync(
         else:
             kept.append(f)
     files = kept
-    by_path = {f.file_path: f for f in files}
+    # Paths under the data dir come back relative after a restart (upstream migration): compare absolute ones.
+    by_path = {str(library_path(f.file_path)): f for f in files}
     file_ids = {f.id for f in files}
     states = (
         (await db.execute(select(FarmLibraryFile).where(FarmLibraryFile.watch_folder_id == folder.id))).scalars().all()
@@ -364,7 +366,7 @@ async def _sync(
             candidates[analysis.sha256].append((entry, analysis))
 
     for lib_file in files:
-        if lib_file.file_path in disk_paths:
+        if str(library_path(lib_file.file_path)) in disk_paths:
             continue
         st = state_by_file.get(lib_file.id)
         matches = candidates.get(st.sha256) if st and st.sha256 else None
@@ -380,7 +382,12 @@ async def _sync(
             counts["relinked"] += 1
             continue
         if st is None:
-            st = new_state(library_file_id=lib_file.id, path=lib_file.file_path, mtime=0, size=lib_file.file_size)
+            st = new_state(
+                library_file_id=lib_file.id,
+                path=str(library_path(lib_file.file_path)),
+                mtime=0,
+                size=lib_file.file_size,
+            )
         st.status = "missing"
         st.status_detail = None
         counts["missing"] += 1
