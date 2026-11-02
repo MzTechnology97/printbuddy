@@ -65,6 +65,72 @@ class TestShapesAndComponents:
         assert [(c["code"], c["retired"]) for c in listed] == [(old["code"], True)]
         assert (await post(async_client, "/components", {"name": "Nuovo"}))["code"] == "C-0002"
 
+    @pytest.mark.asyncio
+    async def test_component_made_before_shapes_takes_a_shape_and_keeps_its_code(self, async_client, db_session):
+        case = await post(async_client, "/shapes", {"name": "Case 18650"})
+        old = await post(async_client, "/components", {"name": "Contenitore doppio 18650"})
+        await post(async_client, "/products", {"name": "Contenitore", "parts": [{"component_code": old["code"]}]})
+        await confirmed_plate(db_session, 1, [("Case.stl", 8, case["id"])])
+
+        r = await async_client.patch(f"{API}/components/{old['code']}", json={"shape_id": case["id"]})
+        assert r.status_code == 200, r.text
+        assert (r.json()["code"], r.json()["name"], r.json()["shape"], r.json()["color"]) == (
+            old["code"],
+            "Contenitore doppio 18650",
+            "Case 18650",
+            None,
+        )
+        part = (await async_client.get(f"{API}/products")).json()["products"][0]["parts"][0]
+        assert [(x["plate"], x["yield"]) for x in part["plates"]] == [(1, 8)]
+
+        # Same rules as a new component: shape must exist, one active component per shape and colour.
+        other = await post(async_client, "/components", {"name": "Tappo"})
+        assert (await async_client.patch(f"{API}/components/{other['code']}", json={"shape_id": 999})).status_code == 422
+        r = await async_client.patch(f"{API}/components/{other['code']}", json={"shape_id": case["id"]})
+        assert r.status_code == 409
+        r = await async_client.patch(f"{API}/components/{other['code']}", json={"shape_id": case["id"], "color": "Nero"})
+        assert r.json()["color"] == "Nero"
+        # Renaming alone leaves the shape; null unlinks it.
+        r = await async_client.patch(f"{API}/components/{old['code']}", json={"name": "Contenitore"})
+        assert r.json()["shape_id"] == case["id"]
+        r = await async_client.patch(f"{API}/components/{old['code']}", json={"shape_id": None})
+        assert r.json()["shape_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_merge_one_piece_under_two_codes(self, async_client, db_session):
+        single = await post(async_client, "/components", {"name": "Contenitore"})
+        double = await post(async_client, "/components", {"name": "Contenitore (2)"})
+        cap = await post(async_client, "/components", {"name": "Tappo"})
+        await post(async_client, "/products", {"name": "Da 1", "parts": [
+            {"component_code": single["code"]}, {"component_code": cap["code"], "quantity": 2}]})
+        await post(async_client, "/products", {"name": "Da 2", "parts": [
+            {"component_code": double["code"], "quantity": 2}, {"component_code": cap["code"], "quantity": 4}]})
+        await post(async_client, "/products", {"name": "Misto", "parts": [
+            {"component_code": single["code"]}, {"component_code": double["code"], "quantity": 3}]})
+        plate = FarmPlate(library_file_id=7, plate_index=1, printer_model="A1", materials=["PLA"], status="confirmed")
+        plate.yields = [FarmPlateYield(object_name="Case", quantity=8, component_code=double["code"])]
+        db_session.add(plate)
+        await db_session.commit()
+
+        r = await async_client.post(f"{API}/components/{double['code']}/merge", json={"into": single["code"]})
+        # products: those now using the kept code
+        assert r.json() == {"merged": double["code"], "into": single["code"], "products": 3}
+        products = {p["name"]: p for p in (await async_client.get(f"{API}/products")).json()["products"]}
+        lines = {name: [(x["component_code"], x["quantity"]) for x in p["parts"]] for name, p in products.items()}
+        assert lines["Da 2"] == [(single["code"], 2), (cap["code"], 4)]
+        assert lines["Misto"] == [(single["code"], 4)]
+        assert [(x["plate"], x["yield"]) for x in products["Da 2"]["parts"][0]["plates"]] == [(1, 8)]
+        listed = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+        assert listed[double["code"]] is True
+
+        # Into itself or into a retired code: refused; unknown code: 404.
+        bad = [(single["code"], single["code"]), (cap["code"], double["code"])]
+        for code, into in bad:
+            r = await async_client.post(f"{API}/components/{code}/merge", json={"into": into})
+            assert r.status_code == 422
+        r = await async_client.post(f"{API}/components/C-9999/merge", json={"into": single["code"]})
+        assert r.status_code == 404
+
 
 @pytest.mark.asyncio
 async def test_plates_summary_per_file(async_client, db_session):

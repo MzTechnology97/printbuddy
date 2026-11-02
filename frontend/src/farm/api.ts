@@ -204,8 +204,15 @@ export const farmApi = {
   unmarkProduct: (id: number) => farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'DELETE' }),
   createComponent: (data: { name?: string; shape_id?: number; color?: string }) =>
     farmRequest<FarmComponent>('/components', { method: 'POST', body: JSON.stringify(data) }),
-  updateComponent: (code: string, data: { name?: string; retired?: boolean }) =>
-    farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  updateComponent: (
+    code: string,
+    data: { name?: string; retired?: boolean; shape_id?: number | null; color?: string | null },
+  ) => farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  mergeComponent: (code: string, into: string) =>
+    farmRequest<{ merged: string; into: string; products: number }>(`/components/${code}/merge`, {
+      method: 'POST',
+      body: JSON.stringify({ into }),
+    }),
   getShapes: () => farmRequest<FarmShape[]>('/shapes'),
   getPlan: () =>
     farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
