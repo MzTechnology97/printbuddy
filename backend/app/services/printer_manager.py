@@ -208,6 +208,8 @@ class PrinterManager:
         self._on_bed_temp_update: Callable[[int, float], None] | None = None
         self._on_drying_complete: Callable[[int, int], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # In-flight background status polls of HTTP provider printers, by printer id.
+        self._provider_polls: dict[int, asyncio.Task] = {}
         # Track who started the current print (Issue #206)
         self._current_print_user: dict[int, dict] = {}  # {printer_id: {"user_id": int, "username": str}}
         # Track printers awaiting plate-clear acknowledgment after a finished/failed print.
@@ -463,7 +465,11 @@ class PrinterManager:
                 on_print_running_observed=on_print_running_observed,
             )
 
-        client.connect()
+        if provider == "bambu":
+            client.connect()
+        else:
+            # HTTP providers connect with blocking requests; keep them off the event loop.
+            await asyncio.to_thread(client.connect)
         self._clients[printer_id] = client
         self._models[printer_id] = printer.model  # Cache model for feature detection
         self._printer_info[printer_id] = PrinterInfo(printer.name, printer.serial_number, provider)
@@ -490,7 +496,7 @@ class PrinterManager:
         if printer_id in self._clients:
             client = self._clients[printer_id]
             # Check staleness and update connected state if needed
-            client.check_staleness()
+            self._check_staleness(printer_id, client)
             return client.state
         return None
 
@@ -503,7 +509,7 @@ class PrinterManager:
         result = {}
         for printer_id, client in self._clients.items():
             # Check staleness and update connected state if needed
-            client.check_staleness()
+            self._check_staleness(printer_id, client)
             result[printer_id] = client.state
         return result
 
@@ -512,8 +518,26 @@ class PrinterManager:
         if printer_id in self._clients:
             client = self._clients[printer_id]
             # Check staleness and update connected state if needed
-            return client.check_staleness()
+            return self._check_staleness(printer_id, client)
         return False
+
+    def _check_staleness(self, printer_id: int, client) -> bool:
+        """Bambu checks MQTT state in memory. HTTP providers poll over the network,
+        so on the event loop that poll runs in a thread and the cached state is returned."""
+        info = self._printer_info.get(printer_id)
+        if info is None or info.provider == "bambu":
+            return client.check_staleness()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return client.check_staleness()  # not on the loop: blocking is fine here
+        if printer_id not in self._provider_polls:
+            task = asyncio.create_task(asyncio.to_thread(client.check_staleness))
+            self._provider_polls[printer_id] = task
+            task.add_done_callback(
+                lambda t: self._provider_polls.pop(printer_id) if self._provider_polls.get(printer_id) is t else None
+            )
+        return client.state.connected
 
     def get_client(self, printer_id: int) -> BambuMQTTClient | None:
         """Get the MQTT client for a printer."""
