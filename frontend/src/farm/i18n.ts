@@ -99,6 +99,8 @@ const en = {
     saveAgain: 'Save',
     confirmed: 'Plate {{index}} confirmed',
     more: 'Show more ({{count}})',
+    open3d: 'Open in the 3D viewer',
+    view3d: '3D view'
   },
   components: {
     search: 'Search shape, colour, code or product…',
@@ -271,6 +273,8 @@ const it: typeof en = {
     saveAgain: 'Salva',
     confirmed: 'Piatto {{index}} confermato',
     more: 'Mostra altri ({{count}})',
+    open3d: 'Apri nel visualizzatore 3D',
+    view3d: 'Vista 3D'
   },
   components: {
     search: 'Cerca forma, colore, codice o prodotto…',

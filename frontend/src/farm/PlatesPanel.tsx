@@ -4,7 +4,9 @@ import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, ChevronDown, ChevronRight, FileBox, Loader2, Search } from 'lucide-react';
+import { api } from '../api/client';
 import { Button } from '../components/Button';
+import { ModelViewerModal } from '../components/ModelViewerModal';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmLibraryFileState, type FarmPlateDetail, type FarmShape } from './api';
 import './i18n';
@@ -20,8 +22,42 @@ type Show = 'todo' | 'confirmed' | 'all';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 
-function PlateCard({ plate, shapes, onShapeCreated }: {
+/** The plate's preview from the 3MF (``Metadata/plate_N.png``); a click opens the 3MF in the 3D viewer. */
+function PlateThumb({ plate, fileName }: { plate: FarmPlateDetail; fileName: string }) {
+  const { t } = useTranslation();
+  const [failed, setFailed] = useState(false);
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        title={t('farm.plates.open3d')}
+        aria-label={`${t('farm.plates.open3d')} ${t('farm.plates.plate', { index: plate.plate_index })}`}
+        onClick={() => setOpen(true)}
+        className="w-full sm:w-32 h-32 rounded bg-bambu-dark-secondary shrink-0 flex items-center justify-center text-sm text-bambu-gray hover:ring-2 hover:ring-bambu-green"
+      >
+        {failed ? (
+          t('farm.plates.view3d')
+        ) : (
+          <img
+            src={api.getLibraryFilePlateThumbnail(plate.library_file_id, plate.plate_index)}
+            alt=""
+            loading="lazy"
+            className="w-full h-full object-contain rounded"
+            onError={() => setFailed(true)}
+          />
+        )}
+      </button>
+      {open && (
+        <ModelViewerModal libraryFileId={plate.library_file_id} title={fileName} fileType="3mf" onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
   plate: FarmPlateDetail;
+  fileName: string;
   shapes: FarmShape[];
   onShapeCreated: () => void;
 }) {
@@ -73,7 +109,9 @@ function PlateCard({ plate, shapes, onShapeCreated }: {
   ].filter(Boolean);
 
   return (
-    <li className="bg-bambu-dark rounded-lg p-3 space-y-2">
+    <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
+      <PlateThumb plate={plate} fileName={fileName} />
+      <div className="flex-1 min-w-0 space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-white">
           {t('farm.plates.plate', { index: plate.plate_index })}
@@ -124,6 +162,7 @@ function PlateCard({ plate, shapes, onShapeCreated }: {
           )}
         </Button>
       </div>
+      </div>
     </li>
   );
 }
@@ -144,7 +183,8 @@ function FilePlates({ file, shapes, onShapeCreated }: {
   return (
     <ul className="space-y-2 p-3 pt-0">
       {plates.data.map((p) => (
-        <PlateCard key={`${p.id}-${p.status}`} plate={p} shapes={shapes} onShapeCreated={onShapeCreated} />
+        <PlateCard key={`${p.id}-${p.status}`} plate={p} fileName={file.path.split(/[\\/]/).pop() || file.path}
+          shapes={shapes} onShapeCreated={onShapeCreated} />
       ))}
     </ul>
   );
