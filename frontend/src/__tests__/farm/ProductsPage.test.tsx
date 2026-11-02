@@ -23,17 +23,26 @@ const products = [
     ],
   },
 ];
+const component = { shape_id: null, shape: null, color: null, retired: false };
 const components = [
-  { code: 'C-0001', name: 'Base X' },
-  { code: 'C-0002', name: 'Gancio' },
+  { ...component, code: 'C-0001', name: 'Base X' },
+  { ...component, code: 'C-0002', name: 'Gancio' },
+  { ...component, code: 'C-0003', name: 'Set intero', retired: true },
 ];
 
 describe('ProductsPage', () => {
   let saved: unknown;
+  let created: unknown;
 
   beforeEach(() => {
     saved = undefined;
+    created = undefined;
     server.use(
+      http.get('/api/v1/farm/shapes', () => HttpResponse.json([{ id: 5, name: 'Tartufo sopra' }])),
+      http.post('/api/v1/farm/components', async ({ request }) => {
+        created = await request.json();
+        return HttpResponse.json({ ...component, code: 'C-0004', name: 'Tartufo sopra – Nero', shape_id: 5 });
+      }),
       http.get('/api/v1/farm/products', () => HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products })),
       http.get('/api/v1/farm/products/overview', () =>
         HttpResponse.json([{ project_id: 7, has_cover: false, queued: 3, printing: 1, printed_recent: 12 }]),
@@ -45,6 +54,21 @@ describe('ProductsPage', () => {
         return HttpResponse.json({ project_id: 7 });
       }),
     );
+  });
+
+  it('creates a shape + colour component and hides retired ones from the parts', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    const picker = screen.getAllByLabelText('Choose component…')[0];
+    const offered = Array.from(picker.querySelectorAll('option')).map((o) => o.value);
+    expect(offered).toEqual(['', 'C-0001', 'C-0002']);
+
+    await user.selectOptions(screen.getByLabelText('Shape'), 'Tartufo sopra');
+    await user.type(screen.getByLabelText('Colour'), 'Nero');
+    await user.click(screen.getByRole('button', { name: 'Create component' }));
+    await waitFor(() => expect(created).toEqual({ shape_id: 5, color: 'Nero' }));
   });
 
   it('shows products with SKUs, parts and print activity', async () => {

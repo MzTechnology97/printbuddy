@@ -13,7 +13,14 @@ from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield, FarmPrinterModelMap
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model
-from backend.app.farm.plates.service import PlateReadError, confirm, folder_hint_warning, refresh_plates
+from backend.app.farm.plates.service import (
+    PlateReadError,
+    confirm,
+    folder_hint_warning,
+    refresh_plates,
+    suggest_shapes,
+)
+from backend.app.farm.products.models import FarmShape
 from backend.app.models.library import LibraryFile
 
 router = APIRouter(tags=["farm"])  # mounted under /farm by farm.routes
@@ -32,6 +39,7 @@ async def _file_state(db: AsyncSession, library_file_id: int) -> FarmLibraryFile
 class YieldIn(BaseModel):
     object_name: str = Field(min_length=1, max_length=255)
     quantity: int = Field(ge=1, le=10000)
+    shape_id: int | None = None
     component_code: str | None = Field(default=None, max_length=32)
 
 
@@ -45,7 +53,17 @@ class PrinterModelMapIn(BaseModel):
     target_model: str = Field(min_length=1, max_length=50)
 
 
-def _plate_dict(plate: FarmPlate, resolver: PrinterModelResolver, warning: str | None = None) -> dict:
+async def _proposals(db: AsyncSession, plates: list[FarmPlate]) -> dict[str, int]:
+    """Shape proposed for the object names still without one."""
+    return await suggest_shapes(db, sorted({y.object_name for p in plates for y in p.yields if y.shape_id is None}))
+
+
+def _plate_dict(
+    plate: FarmPlate,
+    resolver: PrinterModelResolver,
+    warning: str | None = None,
+    proposals: dict[str, int] | None = None,
+) -> dict:
     target = resolver.resolve(plate.printer_model)
     return {
         "id": plate.id,
@@ -63,7 +81,13 @@ def _plate_dict(plate: FarmPlate, resolver: PrinterModelResolver, warning: str |
         "status": plate.status,
         "confirmed_at": plate.confirmed_at,
         "yields": [
-            {"object_name": y.object_name, "quantity": y.quantity, "component_code": y.component_code}
+            {
+                "object_name": y.object_name,
+                "quantity": y.quantity,
+                "shape_id": y.shape_id,
+                "suggested_shape_id": None if y.shape_id else (proposals or {}).get(y.object_name),
+                "component_code": y.component_code,
+            }
             for y in plate.yields
         ],
         "warning": warning,
@@ -85,12 +109,17 @@ async def get_file_plates(library_file_id: int, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     resolver = await PrinterModelResolver.load(db)
     warning = await folder_hint_warning(db, state, state.printer_model, resolver)
-    return [_plate_dict(p, resolver, warning) for p in plates]
+    proposals = await _proposals(db, plates)
+    return [_plate_dict(p, resolver, warning, proposals) for p in plates]
 
 
 @router.get("/plates")
 async def list_plates(
-    status: str | None = None, component_code: str | None = None, db: AsyncSession = Depends(get_db), _=_read
+    status: str | None = None,
+    component_code: str | None = None,
+    shape_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _=_read,
 ):
     """Stored plates (only files whose plates were opened at least once)."""
     query = select(FarmPlate).order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
@@ -98,16 +127,24 @@ async def list_plates(
         query = query.where(FarmPlate.status == status)
     if component_code is not None:
         query = query.where(FarmPlate.yields.any(FarmPlateYield.component_code == component_code.strip().upper()))
+    if shape_id is not None:
+        query = query.where(FarmPlate.yields.any(FarmPlateYield.shape_id == shape_id))
     resolver = await PrinterModelResolver.load(db)
-    return [_plate_dict(p, resolver) for p in (await db.execute(query)).scalars()]
+    plates = list((await db.execute(query)).scalars())
+    proposals = await _proposals(db, plates)
+    return [_plate_dict(p, resolver, None, proposals) for p in plates]
 
 
 @router.put("/plates/{plate_id}")
 async def confirm_plate(plate_id: int, body: PlateUpdate, db: AsyncSession = Depends(get_db), _=_write):
-    """Confirm a proposed plate, optionally correcting yields and component codes."""
+    """Confirm a proposed plate, optionally correcting yields and their shapes."""
     plate = await db.get(FarmPlate, plate_id)
     if plate is None:
         raise HTTPException(status_code=404, detail="Plate not found")
+    wanted = {y.shape_id for y in body.yields or [] if y.shape_id is not None}
+    found = set((await db.execute(select(FarmShape.id).where(FarmShape.id.in_(wanted)))).scalars())
+    if missing := wanted - found:
+        raise HTTPException(status_code=422, detail=f"Unknown shapes: {sorted(missing)}")
     confirm(plate, [y.model_dump() for y in body.yields] if body.yields is not None else None)
     await db.commit()
     await db.refresh(plate, ["yields"])

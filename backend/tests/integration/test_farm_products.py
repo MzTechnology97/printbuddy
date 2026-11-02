@@ -44,9 +44,9 @@ class TestComponents:
         assert await component(async_client, "Base") == "C-0001"
         assert await component(async_client, "  Gancio\n ") == "C-0002"
         r = await async_client.patch(f"{API}/components/C-0001", json={"name": "Base X"})
-        assert r.json() == {"code": "C-0001", "name": "Base X"}
+        assert (r.json()["code"], r.json()["name"]) == ("C-0001", "Base X")
         r = await async_client.get(f"{API}/components")
-        assert r.json() == [{"code": "C-0001", "name": "Base X"}, {"code": "C-0002", "name": "Gancio"}]
+        assert [(c["code"], c["name"]) for c in r.json()] == [("C-0001", "Base X"), ("C-0002", "Gancio")]
 
     @pytest.mark.asyncio
     async def test_rename_unknown_is_404(self, async_client):

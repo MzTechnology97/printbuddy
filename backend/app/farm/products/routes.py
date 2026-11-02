@@ -27,8 +27,8 @@ from backend.app.core.auth import (
 )
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
-from backend.app.farm.plates.service import plates_by_component
-from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
+from backend.app.farm.plates.service import plates_by_component, plates_by_shape
+from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.archive import PrintArchive
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.project import Project
@@ -102,6 +102,19 @@ class ProductCreate(ProductIn):
 
 
 class ComponentIn(BaseModel):
+    # Without a name, a component with shape and colour is called "<shape> – <colour>".
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    shape_id: int | None = None
+    color: str | None = Field(default=None, min_length=1, max_length=50)
+
+
+class ComponentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    # Retired: no longer made; its code stays reserved and it can't go in new parts.
+    retired: bool | None = None
+
+
+class ShapeIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
@@ -123,7 +136,12 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
     parts_by_product: dict[int, list[FarmProductPart]] = {}
     for part in (await db.execute(select(FarmProductPart).order_by(FarmProductPart.sort_order))).scalars():
         parts_by_product.setdefault(part.project_id, []).append(part)
-    plates = await plates_by_component(db, [c.code for c in components.values()])
+    # Plates yield shapes, so a component (shape + colour) gets every plate of its shape.
+    by_shape = await plates_by_shape(db, [c.shape_id for c in components.values() if c.shape_id])
+    by_code = await plates_by_component(db, [c.code for c in components.values() if not c.shape_id])
+
+    def plates(c: FarmComponent) -> list[dict]:
+        return by_shape.get(c.shape_id, []) if c.shape_id else by_code.get(c.code, [])
 
     products = []
     for product, project in rows:
@@ -133,7 +151,7 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "name": components[p.component_id].name,
                 "quantity": p.quantity,
                 # Confirmed plates (file × printer model × material) and their yield of this component.
-                "plates": plates.get(components[p.component_id].code, []),
+                "plates": plates(components[p.component_id]),
             }
             for p in parts_by_product.get(product.project_id, [])
         ]
@@ -152,8 +170,26 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/components", dependencies=[_read])
 async def list_components(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    shapes = {s.id: s.name for s in (await db.execute(select(FarmShape))).scalars()}
     rows = (await db.execute(select(FarmComponent).order_by(FarmComponent.code))).scalars()
-    return [{"code": c.code, "name": c.name} for c in rows]
+    return [_component_dict(c, shapes) for c in rows]
+
+
+def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
+    return {
+        "code": c.code,
+        "name": c.name,
+        "shape_id": c.shape_id,
+        "shape": shapes.get(c.shape_id) if c.shape_id else None,
+        "color": c.color,
+        "retired": c.retired_at is not None,
+    }
+
+
+@router.get("/shapes", dependencies=[_read])
+async def list_shapes(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    rows = (await db.execute(select(FarmShape).order_by(FarmShape.name))).scalars()
+    return [{"id": s.id, "name": s.name} for s in rows]
 
 
 @router.get("/products/overview", dependencies=[_read])
@@ -210,6 +246,8 @@ async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data:
     }
     if missing := [c for c in codes if c not in by_code]:
         raise HTTPException(422, f"Unknown components: {', '.join(missing)}")
+    if retired := [c for c in codes if by_code[c].retired_at is not None]:
+        raise HTTPException(422, f"Retired components: {', '.join(retired)}")
 
     product.skus, product.asins, product.updated_at = skus, asins, _now()
     for old in (await db.execute(select(FarmProductPart).where(FarmProductPart.project_id == project.id))).scalars():
@@ -280,25 +318,73 @@ async def _next_code(db: AsyncSession) -> str:
     return f"C-{max(numbers, default=0) + 1:04d}"
 
 
+async def _shape_names(db: AsyncSession) -> dict[int, str]:
+    return {s.id: s.name for s in (await db.execute(select(FarmShape))).scalars()}
+
+
 @router.post("/components", dependencies=[_create])
 async def create_component(data: ComponentIn, db: AsyncSession = Depends(get_db)) -> dict:
-    name = _clean(data.name, 200)
+    shapes = await _shape_names(db)
+    color = _clean(data.color, 50) if data.color else None
+    if data.shape_id is not None:
+        if data.shape_id not in shapes:
+            raise HTTPException(422, "Unknown shape")
+        twin = await db.scalar(
+            select(FarmComponent).where(
+                FarmComponent.shape_id == data.shape_id,
+                func.lower(FarmComponent.color) == (color or "").lower(),
+                FarmComponent.retired_at.is_(None),
+            )
+        )
+        if twin is not None:
+            raise HTTPException(409, f"{twin.code} is already this shape in this colour")
+    default = " – ".join(x for x in (shapes.get(data.shape_id or 0), color) if x)
+    name = _clean(data.name or default, 200)
     if not name:
-        raise HTTPException(422, "Name is required")
-    component = FarmComponent(code=await _next_code(db), name=name)
+        raise HTTPException(422, "Name, or shape and colour, required")
+    component = FarmComponent(code=await _next_code(db), name=name, shape_id=data.shape_id, color=color)
     db.add(component)
     await db.commit()
-    return {"code": component.code, "name": component.name}
+    return _component_dict(component, shapes)
 
 
 @router.patch("/components/{code}", dependencies=[_update])
-async def rename_component(code: str, data: ComponentIn, db: AsyncSession = Depends(get_db)) -> dict:
+async def update_component(code: str, data: ComponentUpdate, db: AsyncSession = Depends(get_db)) -> dict:
     component = (await db.execute(select(FarmComponent).where(FarmComponent.code == code))).scalar_one_or_none()
     if component is None:
         raise HTTPException(404, "Component not found")
-    component.name = _clean(data.name, 200) or component.name
+    if data.name is not None:
+        component.name = _clean(data.name, 200) or component.name
+    if data.retired is not None:
+        component.retired_at = (component.retired_at or _now()) if data.retired else None
     await db.commit()
-    return {"code": component.code, "name": component.name}
+    return _component_dict(component, await _shape_names(db))
+
+
+@router.post("/shapes", dependencies=[_create])
+async def create_shape(data: ShapeIn, db: AsyncSession = Depends(get_db)) -> dict:
+    name = _clean(data.name, 200)
+    if not name:
+        raise HTTPException(422, "Name is required")
+    if await db.scalar(select(FarmShape).where(func.lower(FarmShape.name) == name.lower())):
+        raise HTTPException(409, "A shape with this name already exists")
+    shape = FarmShape(name=name)
+    db.add(shape)
+    await db.commit()
+    return {"id": shape.id, "name": shape.name}
+
+
+@router.patch("/shapes/{shape_id}", dependencies=[_update])
+async def rename_shape(shape_id: int, data: ShapeIn, db: AsyncSession = Depends(get_db)) -> dict:
+    shape = await db.get(FarmShape, shape_id)
+    if shape is None:
+        raise HTTPException(404, "Shape not found")
+    name = _clean(data.name, 200) or shape.name
+    if await db.scalar(select(FarmShape).where(func.lower(FarmShape.name) == name.lower(), FarmShape.id != shape_id)):
+        raise HTTPException(409, "A shape with this name already exists")
+    shape.name = name
+    await db.commit()
+    return {"id": shape.id, "name": shape.name}
 
 
 # ---------------------------------------------------------------- one-off import from Seller Hub

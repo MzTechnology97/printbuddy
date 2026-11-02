@@ -7,7 +7,7 @@ import { Package, Plus, Trash2, Loader2, Search } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput } from './api';
+import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
 import './i18n';
 
 const INPUT =
@@ -46,17 +46,19 @@ function draftOf(p: FarmProduct): Draft {
 function ProductForm({
   draft,
   components,
+  shapes,
   onDone,
 }: {
   draft: Draft;
   components: FarmComponent[];
+  shapes: FarmShape[];
   onDone: () => void;
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [d, setD] = useState(draft);
-  const [newComponent, setNewComponent] = useState('');
+  const [newComponent, setNewComponent] = useState({ name: '', shapeId: '', color: '' });
   const { data: projects } = useQuery({ queryKey: ['projects', 'farm-picker'], queryFn: () => api.getProjects(), enabled: !d.id });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
 
@@ -89,10 +91,15 @@ function ProductForm({
   });
 
   const addComponent = useMutation({
-    mutationFn: () => farmApi.createComponent(newComponent),
+    mutationFn: () =>
+      farmApi.createComponent({
+        name: newComponent.name.trim() || undefined,
+        shape_id: newComponent.shapeId ? Number(newComponent.shapeId) : undefined,
+        color: newComponent.color.trim() || undefined,
+      }),
     onSuccess: (c) => {
       refresh();
-      setNewComponent('');
+      setNewComponent({ name: '', shapeId: '', color: '' });
       setD({ ...d, parts: [...d.parts, { code: c.code, quantity: 1 }] });
     },
     onError: (e: Error) => showToast(e.message, 'error'),
@@ -160,7 +167,7 @@ function ProductForm({
               <select aria-label={t('farm.products.pickComponent')} className={INPUT} value={p.code}
                 onChange={(e) => setPart(i, { code: e.target.value })}>
                 <option value="">{t('farm.products.pickComponent')}</option>
-                {components.map((c) => (
+                {components.filter((c) => !c.retired || c.code === p.code).map((c) => (
                   <option key={c.code} value={c.code}>{c.code} · {c.name}</option>
                 ))}
               </select>
@@ -177,9 +184,23 @@ function ProductForm({
               onClick={() => setD({ ...d, parts: [...d.parts, { code: '', quantity: 1 }] })}>
               <Plus className="w-4 h-4" /> {t('farm.products.addPart')}
             </Button>
-            <input aria-label={t('farm.products.newComponent')} className={`${INPUT} md:w-64`} value={newComponent}
-              placeholder={t('farm.products.newComponent')} maxLength={200} onChange={(e) => setNewComponent(e.target.value)} />
-            <Button type="button" variant="secondary" size="sm" disabled={!newComponent.trim() || addComponent.isPending}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <select aria-label={t('farm.products.shape')} className={`${INPUT} md:w-56`} value={newComponent.shapeId}
+              onChange={(e) => setNewComponent({ ...newComponent, shapeId: e.target.value })}>
+              <option value="">{t('farm.products.noShape')}</option>
+              {shapes.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            <input aria-label={t('farm.products.color')} className={`${INPUT} md:w-32`} value={newComponent.color}
+              placeholder={t('farm.products.color')} maxLength={50}
+              onChange={(e) => setNewComponent({ ...newComponent, color: e.target.value })} />
+            <input aria-label={t('farm.products.newComponent')} className={`${INPUT} md:w-64`} value={newComponent.name}
+              placeholder={t('farm.products.newComponent')} maxLength={200}
+              onChange={(e) => setNewComponent({ ...newComponent, name: e.target.value })} />
+            <Button type="button" variant="secondary" size="sm"
+              disabled={!(newComponent.name.trim() || (newComponent.shapeId && newComponent.color.trim())) || addComponent.isPending}
               onClick={() => addComponent.mutate()}>
               {t('farm.products.createComponent')}
             </Button>
@@ -211,20 +232,55 @@ function ComponentRow({ component }: { component: FarmComponent }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
-  const rename = useMutation({
-    mutationFn: (name: string) => farmApi.renameComponent(component.code, name),
+  const update = useMutation({
+    mutationFn: (data: { name?: string; retired?: boolean }) => farmApi.updateComponent(component.code, data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
     onError: (e: Error) => showToast(e.message, 'error'),
   });
   return (
-    <li className="flex items-center gap-3">
+    <li className={`flex flex-wrap items-center gap-3 ${component.retired ? 'opacity-50' : ''}`}>
       <span className="font-mono text-bambu-green w-20 shrink-0">{component.code}</span>
-      <input aria-label={`${t('farm.products.name')} ${component.code}`} className={INPUT} defaultValue={component.name}
-        maxLength={200} onBlur={(e) => {
+      <input aria-label={`${t('farm.products.name')} ${component.code}`} className={`${INPUT} flex-1 min-w-[12rem]`}
+        defaultValue={component.name} maxLength={200} onBlur={(e) => {
           const name = e.target.value.trim();
-          if (name && name !== component.name) rename.mutate(name);
+          if (name && name !== component.name) update.mutate({ name });
         }} />
+      {component.shape && (
+        <span className="text-xs text-bambu-gray">{component.shape} · {component.color || '—'}</span>
+      )}
+      <Button type="button" variant="ghost" size="sm" onClick={() => update.mutate({ retired: !component.retired })}>
+        {component.retired ? t('farm.products.restore') : t('farm.products.retire')}
+      </Button>
     </li>
+  );
+}
+
+function ShapesEditor({ shapes }: { shapes: FarmShape[] }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [name, setName] = useState('');
+  const create = useMutation({
+    mutationFn: () => farmApi.createShape(name.trim()),
+    onSuccess: () => {
+      setName('');
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  return (
+    <div className="space-y-2 max-w-3xl">
+      <p className="text-sm text-white">{t('farm.products.shapes')}</p>
+      <p className="text-xs text-bambu-gray">{shapes.map((s) => s.name).join(' · ') || '—'}</p>
+      <div className="flex gap-2">
+        <input aria-label={t('farm.products.newShape')} className={`${INPUT} md:w-64`} value={name} maxLength={200}
+          placeholder={t('farm.products.newShape')} onChange={(e) => setName(e.target.value)} />
+        <Button type="button" variant="secondary" size="sm" disabled={!name.trim() || create.isPending}
+          onClick={() => create.mutate()}>
+          {t('farm.products.createShape')}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -235,6 +291,7 @@ export function ProductsPage() {
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
+  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
   const shown = (products.data?.products || []).filter((p) => matches(p, query.trim()));
 
@@ -264,7 +321,7 @@ export function ProductsPage() {
       </div>
 
       {editing && (
-        <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} onDone={() => setEditing(null)} />
+        <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} shapes={shapes.data || []} onDone={() => setEditing(null)} />
       )}
 
       {products.isLoading ? (
@@ -326,7 +383,8 @@ export function ProductsPage() {
       <section className="space-y-2">
         <h2 className="text-lg font-semibold text-white">{t('farm.products.components')}</h2>
         <p className="text-bambu-gray text-sm">{t('farm.products.componentsHint')}</p>
-        <ul className="space-y-2 max-w-xl">
+        <ShapesEditor shapes={shapes.data || []} />
+        <ul className="space-y-2 max-w-3xl">
           {(components.data || []).map((c) => (
             <ComponentRow key={`${c.code}-${c.name}`} component={c} />
           ))}
