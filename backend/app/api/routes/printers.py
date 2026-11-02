@@ -253,7 +253,9 @@ async def _wait_for_provider_file(
     provider_client, remote_path: str, expected_size: int = 0, *, storage: str | None = None
 ) -> bool:
     for attempt in range(PROVIDER_UPLOAD_RECONCILE_ATTEMPTS):
-        if _provider_file_upload_verified(provider_client, remote_path, expected_size, storage=storage):
+        if await asyncio.to_thread(
+            _provider_file_upload_verified, provider_client, remote_path, expected_size, storage=storage
+        ):
             return True
         if attempt < PROVIDER_UPLOAD_RECONCILE_ATTEMPTS - 1:
             await asyncio.sleep(PROVIDER_UPLOAD_RECONCILE_INTERVAL_SECONDS)
@@ -1628,7 +1630,10 @@ async def list_printer_files(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        files = [_normalize_provider_file_entry(f) for f in provider_client.list_files(path, storage=storage)]
+        files = [
+            _normalize_provider_file_entry(f)
+            for f in await asyncio.to_thread(provider_client.list_files, path, storage=storage)
+        ]
     else:
         files = await list_files_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
         # Add full path to each file
@@ -1675,8 +1680,10 @@ async def upload_printer_file(
             original_remote_path = remote_path
             renamed = False
             replaced = False
-            if _provider_file_exists(provider_client, remote_path, storage=storage):
-                if _provider_file_is_zero_placeholder(provider_client, remote_path, storage=storage):
+            if await asyncio.to_thread(_provider_file_exists, provider_client, remote_path, storage=storage):
+                if await asyncio.to_thread(
+                    _provider_file_is_zero_placeholder, provider_client, remote_path, storage=storage
+                ):
                     raise HTTPException(
                         409,
                         (
@@ -1685,10 +1692,14 @@ async def upload_printer_file(
                         ),
                     )
                 if conflict_strategy == "rename":
-                    remote_path = _provider_renamed_upload_path(provider_client, remote_path, storage=storage)
+                    remote_path = await asyncio.to_thread(
+                        _provider_renamed_upload_path, provider_client, remote_path, storage=storage
+                    )
                     renamed = True
                 elif conflict_strategy == "delete_replace":
-                    _delete_existing_provider_file(provider_client, remote_path, storage=storage)
+                    await asyncio.to_thread(
+                        _delete_existing_provider_file, provider_client, remote_path, storage=storage
+                    )
                     replaced = True
                 else:
                     raise HTTPException(
@@ -1699,13 +1710,15 @@ async def upload_printer_file(
                         ),
                     )
             try:
-                success = provider_client.upload_file(tmp_path, remote_path, overwrite=overwrite, storage=storage)
+                success = await asyncio.to_thread(
+                    provider_client.upload_file, tmp_path, remote_path, overwrite=overwrite, storage=storage
+                )
                 if success:
                     success = await _wait_for_provider_file(
                         provider_client, remote_path, expected_size, storage=storage
                     )
-                    if not success and _provider_file_is_zero_placeholder(
-                        provider_client, remote_path, storage=storage
+                    if not success and await asyncio.to_thread(
+                        _provider_file_is_zero_placeholder, provider_client, remote_path, storage=storage
                     ):
                         raise HTTPException(
                             502,
@@ -1722,7 +1735,9 @@ async def upload_printer_file(
                 )
                 success = await _wait_for_provider_file(provider_client, remote_path, expected_size, storage=storage)
                 reconciled = success
-                if not success and _provider_file_is_zero_placeholder(provider_client, remote_path, storage=storage):
+                if not success and await asyncio.to_thread(
+                    _provider_file_is_zero_placeholder, provider_client, remote_path, storage=storage
+                ):
                     raise HTTPException(
                         502,
                         (
@@ -1732,8 +1747,8 @@ async def upload_printer_file(
                     ) from exc
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
-                if status_code == 409 and _provider_file_is_zero_placeholder(
-                    provider_client, remote_path, storage=storage
+                if status_code == 409 and await asyncio.to_thread(
+                    _provider_file_is_zero_placeholder, provider_client, remote_path, storage=storage
                 ):
                     raise HTTPException(
                         409,
@@ -1816,21 +1831,27 @@ async def upload_prusalink_firmware_file(
         renamed = False
         replaced = False
         expected_size = tmp_path.stat().st_size
-        if _provider_file_exists(provider_client, remote_path, storage=storage):
-            if _provider_file_is_zero_placeholder(provider_client, remote_path, storage=storage):
+        if await asyncio.to_thread(_provider_file_exists, provider_client, remote_path, storage=storage):
+            if await asyncio.to_thread(
+                _provider_file_is_zero_placeholder, provider_client, remote_path, storage=storage
+            ):
                 raise HTTPException(409, f"Printer already has a 0-byte placeholder for {remote_path}.")
             if conflict_strategy == "rename":
-                remote_path = _provider_renamed_upload_path(provider_client, remote_path, storage=storage)
+                remote_path = await asyncio.to_thread(
+                    _provider_renamed_upload_path, provider_client, remote_path, storage=storage
+                )
                 renamed = True
             elif conflict_strategy == "delete_replace":
-                _delete_existing_provider_file(provider_client, remote_path, storage=storage)
+                await asyncio.to_thread(_delete_existing_provider_file, provider_client, remote_path, storage=storage)
                 replaced = True
             else:
                 raise HTTPException(409, f"File already exists on the printer: {remote_path}.")
 
         reconciled = False
         try:
-            success = provider_client.upload_file(tmp_path, remote_path, overwrite=overwrite, storage=storage)
+            success = await asyncio.to_thread(
+                provider_client.upload_file, tmp_path, remote_path, overwrite=overwrite, storage=storage
+            )
             if success:
                 success = await _wait_for_provider_file(provider_client, remote_path, expected_size, storage=storage)
         except (httpx.TimeoutException, TimeoutError) as exc:
@@ -1904,7 +1925,7 @@ async def start_printer_file(
             start_options["storage"] = storage
         if ams_mapping is not None:
             start_options["ams_mapping"] = ams_mapping
-        success = provider_client.start_print(path, **start_options)
+        success = await asyncio.to_thread(provider_client.start_print, path, **start_options)
     else:
         success = printer_manager.start_print(printer_id, path)
 
@@ -1938,7 +1959,7 @@ async def download_printer_file(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        data = provider_client.download_file(path)
+        data = await asyncio.to_thread(provider_client.download_file, path)
     else:
         data = await download_file_bytes_async(
             printer.ip_address, printer.access_code, path, printer_model=printer.model
@@ -1988,7 +2009,7 @@ async def get_printer_file_gcode(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        data = provider_client.download_file(path)
+        data = await asyncio.to_thread(provider_client.download_file, path)
     else:
         data = await download_file_bytes_async(
             printer.ip_address, printer.access_code, path, printer_model=printer.model
@@ -2046,7 +2067,7 @@ async def get_printer_file_plates(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        data = provider_client.download_file(path)
+        data = await asyncio.to_thread(provider_client.download_file, path)
     else:
         data = await download_file_bytes_async(
             printer.ip_address, printer.access_code, path, printer_model=printer.model
@@ -2283,7 +2304,7 @@ async def get_printer_file_plate_thumbnail(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        data = provider_client.download_file(path)
+        data = await asyncio.to_thread(provider_client.download_file, path)
     else:
         data = await download_file_bytes_async(
             printer.ip_address, printer.access_code, path, printer_model=printer.model
@@ -2386,7 +2407,7 @@ async def delete_printer_file(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        success = provider_client.delete_file(path, storage=storage)
+        success = await asyncio.to_thread(provider_client.delete_file, path, storage=storage)
     else:
         success = await delete_file_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if not success:
