@@ -26,6 +26,7 @@ import { SpoolmanSettings } from '../components/SpoolmanSettings';
 import { SpoolCatalogSettings } from '../components/SpoolCatalogSettings';
 import { ColorCatalogSettings } from '../components/ColorCatalogSettings';
 import { ExternalLinksSettings } from '../components/ExternalLinksSettings';
+import { NasSettingsCard } from '../farm/NasSettingsCard'; // fork: printfarm
 import { VirtualPrinterList } from '../components/VirtualPrinterList';
 import { GitHubBackupSettings } from '../components/GitHubBackupSettings';
 import { FailureDetectionSettings } from '../components/FailureDetectionSettings';
@@ -2383,6 +2384,7 @@ export function SettingsPage() {
               )}
             </CardContent>
           </Card>
+          <NasSettingsCard /> {/* fork: printfarm NAS library */}
         </div>
 
         {/* Third Column - Sidebar Links & Updates */}
