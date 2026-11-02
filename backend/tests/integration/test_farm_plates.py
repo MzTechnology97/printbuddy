@@ -12,8 +12,8 @@ from sqlalchemy import select
 
 from backend.app.api.routes import library
 from backend.app.farm.models import FarmLibraryFile
-from backend.app.farm.plates import parse_plates
-from backend.app.farm.printer_map import PrinterModelResolver, models_in_path
+from backend.app.farm.plates.printer_map import PrinterModelResolver, models_in_path
+from backend.app.farm.plates.service import parse_plates, plates_by_component
 from backend.app.models.library import LibraryFile
 from backend.tests.integration.test_farm_library import BAMBU, add_external, age, scan
 
@@ -145,7 +145,9 @@ class TestPlates:
         lid = await get_plates(async_client, farm["P2S-PETG-lid.3mf"])
         assert lid[0]["warning"] is None  # "P2S" in the name, P2S stored as N7
 
-    async def test_confirm_then_file_change_reproposes_only_changed_plate(self, async_client, farm, tmp_path):
+    async def test_confirm_then_file_change_reproposes_only_changed_plate(
+        self, async_client, db_session, farm, tmp_path
+    ):
         plates = await get_plates(async_client, farm["hook.3mf"])
         for plate in plates:
             body = {"yields": [{**y, "component_code": f"c-{y['object_name'].lower()}"} for y in plate["yields"]]}
@@ -163,6 +165,22 @@ class TestPlates:
 
         by_code = (await async_client.get("/api/v1/farm/plates?component_code=c-lid")).json()
         assert [p["id"] for p in by_code] == [second["id"]]
+
+        # Contract used by the products module (and Seller Hub): confirmed plates only.
+        found = await plates_by_component(db_session, ["C-HOOK", "c-lid", "C-NONE"])
+        assert found == {
+            "C-HOOK": [],  # plate 1 is back to proposed
+            "C-LID": [
+                {
+                    "library_file_id": farm["hook.3mf"],
+                    "plate": 2,
+                    "printer_model": "P1S",
+                    "material": "PETG",
+                    "yield": 2,
+                }
+            ],
+            "C-NONE": [],
+        }
 
     async def test_time_and_grams_from_slice_of_same_version(self, async_client, db_session, farm):
         file_id = farm["P2S-PETG-lid.3mf"]

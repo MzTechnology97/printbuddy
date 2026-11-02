@@ -19,8 +19,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
-from backend.app.farm.models import FarmLibraryFile, FarmPlate, FarmPlateYield
-from backend.app.farm.printer_map import PrinterModelResolver, canonical_model, models_in_path
+from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
@@ -217,3 +218,41 @@ async def folder_hint_warning(
     if not named or named & {canonical_model(plate_model), canonical_model(target)}:
         return None
     return f"3MF prepared for {plate_model}, but the path names {', '.join(sorted(named))}"
+
+
+async def plates_by_component(db: AsyncSession, codes: list[str]) -> dict[str, list[dict]]:
+    """Confirmed plates producing each component code, for the products module.
+
+    Each entry is the contract shared with Seller Hub (``parts[].plates``): ``yield``
+    is the pieces of *that* component on the plate; ``printer_model`` is the
+    Printbuddy model (the queue's ``target_model``), or the 3MF one when unmapped.
+    """
+    wanted = {c.strip().upper() for c in codes if c and c.strip()}
+    result: dict[str, list[dict]] = {code: [] for code in wanted}
+    if not wanted:
+        return result
+    plates = (
+        await db.execute(
+            select(FarmPlate)
+            .where(FarmPlate.status == "confirmed", FarmPlate.yields.any(FarmPlateYield.component_code.in_(wanted)))
+            .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
+        )
+    ).scalars()
+    resolver = await PrinterModelResolver.load(db)
+    for plate in plates:
+        pieces: dict[str, int] = {}
+        for y in plate.yields:
+            if y.component_code in wanted:
+                pieces[y.component_code] = pieces.get(y.component_code, 0) + y.quantity
+        model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
+        for code, qty in pieces.items():
+            result[code].append(
+                {
+                    "library_file_id": plate.library_file_id,
+                    "plate": plate.plate_index,
+                    "printer_model": model,
+                    "material": "+".join(plate.materials or []),
+                    "yield": qty,
+                }
+            )
+    return result

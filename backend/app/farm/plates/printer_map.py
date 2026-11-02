@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.farm.models import FarmPrinterModelMap
+from backend.app.farm.plates.models import FarmPrinterModelMap
 from backend.app.models.printer import Printer
 from backend.app.utils.printer_models import PRINTER_MODEL_MAP, normalize_printer_model, normalize_printer_model_id
 
