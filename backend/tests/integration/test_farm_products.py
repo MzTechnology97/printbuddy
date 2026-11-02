@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from backend.app.core.auth import generate_api_key
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+from backend.app.farm.products import routes as product_routes
 from backend.app.farm.products.models import FarmProduct, FarmProductPart
 from backend.app.models.api_key import APIKey
 from backend.app.models.print_queue import PrintQueueItem
@@ -259,6 +260,7 @@ class TestSellerHubImport:
             "components_existing": 0,
             "products_created": 2,
             "products_skipped": 0,
+            "covers_added": 0,
         }
         r = await async_client.post(f"{API}/import/sellerhub", json=plan())
         assert r.json() == {
@@ -266,6 +268,7 @@ class TestSellerHubImport:
             "components_existing": 3,
             "products_created": 0,
             "products_skipped": 2,
+            "covers_added": 0,
         }
 
         comps = (await async_client.get(f"{API}/components")).json()
@@ -277,6 +280,51 @@ class TestSellerHubImport:
         assert [(p["component_code"], p["quantity"]) for p in by_name["Lampada"]["parts"]] == [("C-0003", 1)]
         # New components continue after the highest imported code, never reusing one.
         assert await component(async_client, "Nuovo") == "C-0013"
+
+    @pytest.mark.asyncio
+    async def test_import_keeps_listings_with_the_same_title(self, async_client):
+        data = plan()
+        # Two Amazon listings, same title, different ASIN and component.
+        data["parts"].append(
+            {"key": "asin:B0TEST0003", "name": "Lampada", "skus": [{"sku": "LA-02", "asin": "B0TEST0003"}]}
+        )
+        data["components"][2]["products"] = [{"key": "asin:B0TEST0003", "name": "Lampada", "qty": 1}]
+        r = await async_client.post(f"{API}/import/sellerhub", json=data)
+        assert r.json()["products_created"] == 3
+        lamps = [p for p in await products(async_client) if p["name"] == "Lampada"]
+        assert sorted(p["asins"][0] for p in lamps) == ["B0TEST0002", "B0TEST0003"]
+
+    @pytest.mark.asyncio
+    async def test_import_adds_amazon_image_as_cover(self, async_client, db_session, monkeypatch, tmp_path):
+        fetched: list[str] = []
+
+        async def fake_fetch(url: str) -> bytes:
+            fetched.append(url)
+            return b"jpeg bytes"
+
+        monkeypatch.setattr(product_routes, "_fetch_image", fake_fetch)
+        monkeypatch.setattr(product_routes, "get_project_attachments_dir", lambda pid: tmp_path / str(pid))
+        existing = await product(async_client, name="Fatto a mano", skus=["LA-01"])
+        data = plan()
+        data["parts"][0]["image_url"] = "https://m.media-amazon.com/images/I/31TEST+x.jpg"
+        data["parts"][1]["image_url"] = "https://example.com/images/I/evil.jpg"  # not Amazon's CDN: ignored
+
+        r = await async_client.post(f"{API}/import/sellerhub", json=data)
+        assert r.json()["covers_added"] == 1
+        assert fetched == ["https://m.media-amazon.com/images/I/31TEST+x.jpg"]
+        x = (await db_session.execute(select(Project).where(Project.name == "Portaoggetti X"))).scalar_one()
+        assert (tmp_path / str(x.id) / x.cover_image_filename).read_bytes() == b"jpeg bytes"
+        assert x.cover_image_filename.endswith(".jpg")
+
+        # Existing products get the image too, and a cover is never replaced.
+        data["parts"][1]["image_url"] = "https://m.media-amazon.com/images/I/41LAMP.png"
+        r = await async_client.post(f"{API}/import/sellerhub", json=data)
+        assert r.json()["covers_added"] == 1
+        assert fetched[-1].endswith("41LAMP.png")
+        assert (await db_session.get(Project, existing)).cover_image_filename is not None
+        r = await async_client.post(f"{API}/import/sellerhub", json=data)
+        assert r.json()["covers_added"] == 0
+        assert len(fetched) == 2
 
     @pytest.mark.asyncio
     async def test_import_skips_products_already_defined(self, async_client, db_session):

@@ -6,15 +6,19 @@ with Seller Hub, which caches them and keeps sales and component stock.
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.routes.projects import get_project_attachments_dir
 from backend.app.core.auth import (
     caller_is_api_key,
     check_permission,
@@ -35,6 +39,9 @@ router = APIRouter(prefix="/farm", tags=["farm"])
 CODE_RE = re.compile(r"^C-\d{4,6}$")
 QTY_MAX = 1000  # same bound as Seller Hub's bills of materials
 RECENT_DAYS = 7
+# Only Amazon's image CDN: the import must not turn Printbuddy into a fetcher of arbitrary URLs.
+AMAZON_IMAGE_RE = re.compile(r"^https://m\.media-amazon\.com/images/I/[\w.+%-]+\.(jpg|jpeg|png)$")
+IMAGE_MAX_BYTES = 5_000_000
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 _create = Depends(require_permission_if_auth_enabled(Permission.PROJECTS_CREATE))
@@ -297,16 +304,48 @@ async def rename_component(code: str, data: ComponentIn, db: AsyncSession = Depe
 # ---------------------------------------------------------------- one-off import from Seller Hub
 
 
+async def _fetch_image(url: str) -> bytes | None:
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            r = await client.get(url)
+    except httpx.HTTPError:
+        return None
+    ok = r.status_code == 200 and r.headers.get("content-type", "").startswith("image/")
+    return r.content if ok and len(r.content) <= IMAGE_MAX_BYTES else None
+
+
+async def _set_amazon_cover(project: Project, url: object) -> bool:
+    """Save the Amazon listing image as the project cover, unless it already has one."""
+    if project.cover_image_filename or not isinstance(url, str) or not AMAZON_IMAGE_RE.match(url):
+        return False
+    content = await _fetch_image(url)
+    if content is None:
+        return False
+    folder = get_project_attachments_dir(project.id)
+    folder.mkdir(parents=True, exist_ok=True)
+    filename = f"cover_{uuid.uuid4().hex}{os.path.splitext(url)[1].lower()}"
+    (folder / filename).write_bytes(content)
+    project.cover_image_filename = filename
+    return True
+
+
 @router.post("/import/sellerhub", dependencies=[_create])
 async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> dict:
     """Import components and bills of materials from Seller Hub's ``GET /api/print-plan`` body.
 
     Keeps Seller Hub's ``C-…`` codes (its stock is keyed by them). Idempotent: existing
-    components keep their name, and a product whose SKU, ASIN or name already exists is skipped.
+    components keep their name, and a product whose SKU or ASIN already exists (or, without
+    either, whose name does) is skipped. Products without a photo get the Amazon image.
     """
     parts_by_key = {p["key"]: p for p in plan.get("parts") or [] if isinstance(p, dict) and p.get("key")}
     existing = {c.code: c for c in (await db.execute(select(FarmComponent))).scalars()}
-    result = {"components_created": 0, "components_existing": 0, "products_created": 0, "products_skipped": 0}
+    result = {
+        "components_created": 0,
+        "components_existing": 0,
+        "products_created": 0,
+        "products_skipped": 0,
+        "covers_added": 0,
+    }
 
     boms: dict[str, list[tuple[str, int]]] = {}
     names: dict[str, str] = {}
@@ -331,17 +370,12 @@ async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> di
                 names.setdefault(use["key"], str(use.get("name") or ""))
     await db.flush()
 
-    taken_skus: set[str] = set()
-    taken_asins: set[str] = set()
-    for p in (await db.execute(select(FarmProduct))).scalars():
-        taken_skus.update(p.skus or [])
-        taken_asins.update(p.asins or [])
-    taken_names = {
-        n.casefold()
-        for n in (
-            await db.execute(select(Project.name).join(FarmProduct, FarmProduct.project_id == Project.id))
-        ).scalars()
-    }
+    # SKU / ASIN / name (casefolded) → project_id of the product that owns it.
+    owners: dict[str, int] = {}
+    for p, name in (await db.execute(select(FarmProduct, Project.name).join(Project))).all():
+        owners.update({f"sku:{s}": p.project_id for s in p.skus or []})
+        owners.update({f"asin:{a}": p.project_id for a in p.asins or []})
+        owners.setdefault(f"name:{name.casefold()}", p.project_id)
 
     for key, lines in boms.items():
         part = parts_by_key.get(key, {})
@@ -351,20 +385,26 @@ async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> di
             [str(s.get("asin") or "") for s in rows] or ([key[5:]] if key.startswith("asin:") else []), "ASIN"
         )
         name = _clean(str(part.get("name") or names[key] or key), 255)
-        if taken_skus & set(skus) or taken_asins & set(asins) or name.casefold() in taken_names:
+        # Amazon has distinct listings with the same title: the name only identifies products without SKU/ASIN.
+        ids = [f"sku:{s}" for s in skus] + [f"asin:{a}" for a in asins] or [f"name:{name.casefold()}"]
+        owner = next((owners[i] for i in ids if i in owners), None)
+        if owner is not None:
+            project = await db.get(Project, owner)
             result["products_skipped"] += 1
-            continue
-        project = Project(name=name)
-        db.add(project)
-        await db.flush()
-        db.add(FarmProduct(project_id=project.id, skus=skus, asins=asins))
-        await db.flush()
-        for i, (code, qty) in enumerate(lines):
-            db.add(FarmProductPart(project_id=project.id, component_id=existing[code].id, quantity=qty, sort_order=i))
-        taken_skus.update(skus)
-        taken_asins.update(asins)
-        taken_names.add(name.casefold())
-        result["products_created"] += 1
+        else:
+            project = Project(name=name)
+            db.add(project)
+            await db.flush()
+            db.add(FarmProduct(project_id=project.id, skus=skus, asins=asins))
+            await db.flush()
+            for i, (code, qty) in enumerate(lines):
+                db.add(
+                    FarmProductPart(project_id=project.id, component_id=existing[code].id, quantity=qty, sort_order=i)
+                )
+            owners.update(dict.fromkeys(ids, project.id))
+            result["products_created"] += 1
+        if await _set_amazon_cover(project, part.get("image_url")):
+            result["covers_added"] += 1
 
     await db.commit()
     return result

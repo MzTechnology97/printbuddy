@@ -58,6 +58,42 @@ describe('ProductsPage', () => {
     expect(screen.getByLabelText('Name C-0002')).toHaveValue('Gancio');
   });
 
+  it('filters products by name, SKU, ASIN or component', async () => {
+    const lamp = {
+      ...products[0],
+      project_id: 8,
+      name: 'Lampada',
+      skus: ['LA-01'],
+      asins: ['B0TEST0002'],
+      parts: [{ component_code: 'C-0003', name: 'Paralume', quantity: 1, plates: [] }],
+    };
+    server.use(
+      http.get('/api/v1/farm/products', () =>
+        HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products: [...products, lamp] }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    await screen.findByText('Lampada');
+    const search = screen.getByRole('searchbox', { name: 'Search name, SKU, ASIN or component' });
+
+    for (const [query, visible] of [
+      ['lampada', 'Lampada'],
+      ['px-02', 'Portaoggetti X'],
+      ['b0test0002', 'Lampada'],
+      ['gancio', 'Portaoggetti X'],
+      ['c-0003', 'Lampada'],
+    ]) {
+      await user.clear(search);
+      await user.type(search, query);
+      expect(screen.getByRole('heading', { name: visible })).toBeInTheDocument();
+      expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([visible, 'Components']);
+    }
+    await user.clear(search);
+    await user.type(search, 'nessuno');
+    expect(screen.getByText('No product matches the search.')).toBeInTheDocument();
+  });
+
   it('saves edited SKUs and part quantities', async () => {
     const user = userEvent.setup();
     render(<ProductsPage />);
