@@ -3,12 +3,13 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2, Search, Layers } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search, Layers, Grid3x3 } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
 import { ComponentsPanel } from './ComponentsPanel';
+import { PlatesPanel } from './PlatesPanel';
 import './i18n';
 
 const INPUT =
@@ -234,7 +235,7 @@ export function ProductsPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [query, setQuery] = useState('');
   const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') === 'components' ? 'components' : 'products';
+  const tab = (['components', 'plates'] as const).find((id) => id === params.get('tab')) ?? 'products';
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
@@ -255,7 +256,7 @@ export function ProductsPage() {
         )}
       </div>
       <div role="tablist" className="flex gap-2 border-b border-bambu-dark-tertiary">
-        {(['products', 'components'] as const).map((id) => (
+        {(['products', 'components', 'plates'] as const).map((id) => (
           <button
             key={id}
             role="tab"
@@ -265,13 +266,15 @@ export function ProductsPage() {
               tab === id ? 'border-bambu-green text-white' : 'border-transparent text-bambu-gray hover:text-white'
             }`}
           >
-            {id === 'products' ? <Package className="w-4 h-4" /> : <Layers className="w-4 h-4" />}
-            {t(id === 'products' ? 'farm.products.title' : 'farm.products.components')}
+            {{ products: <Package className="w-4 h-4" />, components: <Layers className="w-4 h-4" />, plates: <Grid3x3 className="w-4 h-4" /> }[id]}
+            {t({ products: 'farm.products.title', components: 'farm.products.components', plates: 'farm.plates.title' }[id])}
           </button>
         ))}
       </div>
       {tab === 'components' ? (
         <ComponentsPanel />
+      ) : tab === 'plates' ? (
+        <PlatesPanel />
       ) : (
         <>
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.products.intro')}</p>
