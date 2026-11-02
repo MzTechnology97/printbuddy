@@ -1,5 +1,5 @@
 // Printfarm (fork) products API: see backend/app/farm/products/routes.py.
-import { getAuthToken } from '../api/client';
+import { getAuthToken, withStreamToken } from '../api/client';
 
 export interface FarmPlate {
   library_file_id: number;
@@ -191,6 +191,38 @@ export interface FarmPiece {
   sample: { library_file_id: number; plate_index: number };
 }
 
+export interface FarmProductPiece {
+  yield_ids: number[];
+  image_yield_id: number;
+  names: string[];
+  plates: number;
+  files: string[];
+  file_count: number;
+  printer_models: string[];
+  hand: number;
+  shape_id: number | null;
+  shape: string | null;
+  mixed: boolean;
+  suggested_shape_id: number | null;
+  quantity: number | null;
+  component: { code: string; name: string; color: string | null; color_hex: string | null } | null;
+}
+
+export interface FarmProductPieces {
+  default_color: string | null;
+  unshaped_parts: { code: string; name: string; quantity: number }[];
+  pieces: FarmProductPiece[];
+}
+
+export interface FarmProductPieceInput {
+  yield_ids: number[];
+  quantity: number;
+  shape_id?: number;
+  shape_name?: string;
+  component_code?: string;
+  color?: string;
+}
+
 export interface FarmProductOverview {
   project_id: number;
   has_cover: boolean;
@@ -276,6 +308,14 @@ export const farmApi = {
     }),
   createShape: (name: string) => farmRequest<FarmShape>('/shapes', { method: 'POST', body: JSON.stringify({ name }) }),
   getPieces: () => farmRequest<FarmPiece[]>('/pieces'),
+  getProductPieces: (projectId: number) => farmRequest<FarmProductPieces>(`/products/${projectId}/pieces`),
+  setProductPiece: (projectId: number, data: FarmProductPieceInput) =>
+    farmRequest<{ shape_id: number | null; component_code: string | null; quantity: number; plates_confirmed: number }>(
+      `/products/${projectId}/pieces`,
+      { method: 'PUT', body: JSON.stringify(data) },
+    ),
+  pieceImageUrl: (yieldId: number, colorHex?: string | null) =>
+    withStreamToken(`/api/v1/farm/pieces/${yieldId}/image${colorHex ? `?color=${colorHex}` : ''}`),
   linkPiece: (yieldIds: number[], shapeId: number | null) =>
     farmRequest<{ linked: number; plates_confirmed: number }>('/pieces', {
       method: 'PUT',

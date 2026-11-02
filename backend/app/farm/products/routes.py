@@ -692,6 +692,10 @@ from backend.app.farm.jobs.routes import router as jobs_router  # noqa: E402
 
 router.include_router(jobs_router)
 
+from backend.app.farm.products.pieces import router as pieces_router  # noqa: E402  (pieces uses this module)
+
+router.include_router(pieces_router)
+
 
 # ---------------------------------------------------------------- one-off import from Seller Hub
 

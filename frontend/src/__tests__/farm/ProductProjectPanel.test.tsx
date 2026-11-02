@@ -3,8 +3,9 @@
  * All data is made up.
  */
 
-import { describe, it, expect } from 'vitest';
-import { screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
@@ -60,6 +61,24 @@ const view = {
   ],
 };
 
+const piece = (over: object) => ({
+  yield_ids: [1, 2],
+  image_yield_id: 1,
+  names: ['Tappo porte (1)'],
+  plates: 2,
+  files: ['P1S-Caps-PETG.3mf'],
+  file_count: 1,
+  printer_models: ['P1S'],
+  hand: 0,
+  shape_id: null,
+  shape: null,
+  mixed: false,
+  suggested_shape_id: null,
+  quantity: null,
+  component: null,
+  ...over,
+});
+
 function Page({ id }: { id: number }) {
   return (
     <>
@@ -74,6 +93,57 @@ function Page({ id }: { id: number }) {
 }
 
 describe('FarmProductGate', () => {
+  let savedPiece: unknown;
+
+  beforeEach(() => {
+    savedPiece = undefined;
+    server.use(
+      http.get('/api/v1/farm/products/65/pieces', () =>
+        HttpResponse.json({
+          default_color: 'Nero',
+          unshaped_parts: [{ code: 'C-0025', name: 'Case intero', quantity: 1 }],
+          pieces: [
+            piece({}),
+            piece({
+              yield_ids: [3],
+              image_yield_id: 3,
+              names: ['kapi'],
+              shape_id: 2,
+              shape: 'Tappo kapi kolu',
+              quantity: 2,
+              component: { code: 'C-0119', name: 'Tappo kapi kolu – Nero', color: 'Nero', color_hex: '111111' },
+            }),
+          ],
+        }),
+      ),
+      http.get('/api/v1/farm/shapes', () => HttpResponse.json([])),
+      http.get('/api/v1/farm/plan/settings', () =>
+        HttpResponse.json({ url: '', tolerance: 80, colors: { nero: '111111', bianco: 'ffffff' } }),
+      ),
+      http.put('/api/v1/farm/products/65/pieces', async ({ request }) => {
+        savedPiece = await request.json();
+        return HttpResponse.json({ shape_id: 9, component_code: 'C-0200', quantity: 2, plates_confirmed: 1 });
+      }),
+    );
+  });
+
+  it('maps a piece of the product in one save, with its picture in the colour', async () => {
+    const user = userEvent.setup();
+    server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
+    render(<Page id={65} />);
+    const name = await screen.findByLabelText('Piece name Tappo porte (1)');
+    expect(name).toHaveValue('Tappo porte'); // the slicer's copy number is dropped
+    expect(screen.getByText('1 to decide · 1 in the product')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Tappo kapi kolu' }).getAttribute('src')).toContain(
+      '/farm/pieces/3/image?color=111111',
+    );
+    await user.type(screen.getByLabelText('Per product Tappo porte'), '2');
+    await user.click(screen.getAllByRole('button', { name: 'Save' })[0]);
+    await waitFor(() =>
+      expect(savedPiece).toEqual({ yield_ids: [1, 2], quantity: 2, shape_name: 'Tappo porte', color: 'Nero' }),
+    );
+  });
+
   it('shows the product parts, plates and files instead of the upstream panels', async () => {
     server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
     render(<Page id={65} />);
