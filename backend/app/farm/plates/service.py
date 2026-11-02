@@ -7,6 +7,7 @@ from the 3MF; time and grams from the slice of that plate (phase 1), when presen
 from __future__ import annotations
 
 import json
+import logging
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
+from backend.app.farm.plates.geometry import object_fingerprints, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.models import FarmShape
@@ -27,6 +29,8 @@ from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
 SLICE_INFO_ENTRY = "Metadata/slice_info.config"
+
+logger = logging.getLogger(__name__)
 
 
 class PlateReadError(Exception):
@@ -41,6 +45,7 @@ class ParsedPlate:
     materials: list[str] = field(default_factory=list)
     print_time_seconds: int | None = None
     filament_grams: float | None = None
+    fingerprints: dict[str, list[float]] = field(default_factory=dict)  # object name -> geometry
 
 
 def _meta(elem, key: str) -> str | None:
@@ -110,6 +115,14 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
                     plate.print_time_seconds = _int(_meta(plate_elem, "prediction"))
                     weight = _meta(plate_elem, "weight")
                     plate.filament_grams = float(weight) if weight else None
+
+        try:
+            fingerprints = object_fingerprints(zf, {oid: name for oid, (name, _) in objects.items()})
+        except Exception:  # an odd mesh must not cost the plates; the object just isn't recognised
+            logger.warning("Cannot measure the objects of %s", path.name, exc_info=True)
+            fingerprints = {}
+        for plate in plates.values():
+            plate.fingerprints = {n: fingerprints.get(n, []) for n in plate.objects}
     return sorted(plates.values(), key=lambda p: p.index), nozzle
 
 
@@ -138,23 +151,29 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
     """Bring the stored plates in line with the current file version.
 
     A plate whose pieces changed goes back to ``proposed``; shapes (and old component
-    codes) set for an object name are kept.
+    codes) set for an object name are kept, and so are those of a renamed object with the
+    same geometry. Objects still without a shape get it from the same geometry on other
+    plates, and a plate whose objects all have one is confirmed.
     """
     plates = {
         p.plate_index: p
         for p in (await db.execute(select(FarmPlate).where(FarmPlate.library_file_id == lib_file.id))).scalars()
     }
-    if state.status == "ok" and (not plates or any(p.source_sha256 != state.sha256 for p in plates.values())):
+    stale = not plates or any(p.source_sha256 != state.sha256 for p in plates.values())
+    unmeasured = any(y.fingerprint is None for p in plates.values() for y in p.yields)  # stored before geometry
+    if state.status == "ok" and (stale or unmeasured):
         try:
             parsed, nozzle = await access_run(read_file, lib_file.file_path, parse_plates)
         except (ET.ParseError, zipfile.BadZipFile, KeyError, OSError) as exc:
             # Keep the stored plates: an unreadable version must not wipe confirmed ones.
             raise PlateReadError(f"Cannot read plates from {lib_file.filename}: {exc}") from exc
+        touched = []
         for pp in parsed:
             plate = plates.pop(pp.index, None)
             if plate is None:
                 plate = FarmPlate(library_file_id=lib_file.id, plate_index=pp.index, yields=[])
                 db.add(plate)
+            touched.append(plate)
             plate.name = pp.name
             plate.printer_model = state.printer_model
             plate.materials = pp.materials
@@ -164,21 +183,29 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
             plate.filament_grams = pp.filament_grams
             plate.sliced_file_id = None
             if {y.object_name: y.quantity for y in plate.yields} != pp.objects:
-                links = {y.object_name: (y.shape_id, y.component_code) for y in plate.yields}
-                plate.yields = [
-                    FarmPlateYield(
-                        object_name=name,
-                        quantity=qty,
-                        shape_id=links.get(name, (None, None))[0],
-                        component_code=links.get(name, (None, None))[1],
+                old = list(plate.yields)
+                links = {y.object_name: (y.shape_id, y.component_code) for y in old}
+                yields = []
+                for name, qty in pp.objects.items():
+                    fp = pp.fingerprints.get(name, [])
+                    shape_id, code = links.get(name, (None, None))
+                    if shape_id is None and code is None:  # renamed in the slicer: same geometry, same link
+                        twin = next((y for y in old if same_piece(fp, y.fingerprint)), None)
+                        shape_id, code = (twin.shape_id, twin.component_code) if twin else (None, None)
+                    yields.append(
+                        FarmPlateYield(object_name=name, quantity=qty, shape_id=shape_id, component_code=code,
+                                       fingerprint=fp)
                     )
-                    for name, qty in pp.objects.items()
-                ]
+                plate.yields = yields
                 plate.status = "proposed"
                 plate.confirmed_at = None
+            else:
+                for y in plate.yields:
+                    y.fingerprint = pp.fingerprints.get(y.object_name, [])
         for gone in plates.values():  # plate removed from the project
             await db.delete(gone)
         await db.flush()
+        await link_by_geometry(db, touched)
 
     current = list(
         (
@@ -200,17 +227,46 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
 
 def confirm(plate: FarmPlate, yields: list[dict] | None) -> None:
     if yields is not None:
+        measured = {y.object_name: y.fingerprint for y in plate.yields}
         plate.yields = [
             FarmPlateYield(
                 object_name=y["object_name"],
                 quantity=y["quantity"],
                 shape_id=y.get("shape_id"),
                 component_code=(y.get("component_code") or "").strip().upper() or None,
+                fingerprint=measured.get(y["object_name"], []),
             )
             for y in yields
         ]
     plate.status = "confirmed"
     plate.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def link_by_geometry(db: AsyncSession, plates: list[FarmPlate]) -> int:
+    """Shape for the objects still without one, when the same geometry already has exactly one.
+
+    A proposed plate whose objects all have a shape is confirmed: the quantities come from
+    the 3MF, so nothing is left to check. Returns the plates confirmed.
+    """
+    open_yields = [
+        y for p in plates for y in p.yields if y.shape_id is None and y.component_code is None and y.fingerprint
+    ]
+    if open_yields:
+        known = (
+            await db.execute(
+                select(FarmPlateYield.fingerprint, FarmPlateYield.shape_id).where(FarmPlateYield.shape_id.isnot(None))
+            )
+        ).all()
+        for y in open_yields:
+            shapes = {shape_id for fp, shape_id in known if same_piece(y.fingerprint, fp)}
+            if len(shapes) == 1:
+                y.shape_id = shapes.pop()
+    confirmed = 0
+    for p in plates:
+        if p.status == "proposed" and p.yields and all(y.shape_id or y.component_code for y in p.yields):
+            confirm(p, None)
+            confirmed += 1
+    return confirmed
 
 
 async def folder_hint_warning(
