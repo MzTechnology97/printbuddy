@@ -672,6 +672,50 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_get_moonraker_printer_status_accepts_unknown_tray_remain(
+        self, async_client: AsyncClient, printer_factory
+    ):
+        """A provider tray with remain=None (unknown level) must not turn /status into a 503."""
+        from unittest.mock import MagicMock, patch
+
+        from backend.app.services.printer_providers.moonraker import MoonrakerPrinterState
+
+        printer = await printer_factory(
+            provider="klipper",
+            model="K2",
+            api_url="http://k2.local:7125",
+            serial_number="KLIPPER-K2-LOCAL",
+        )
+        state = MoonrakerPrinterState(
+            connected=True,
+            state="RUNNING",
+            gcode_file="part.gcode",
+            raw_data={
+                "ams": [
+                    {
+                        "id": 0,
+                        "name": "CFS T1",
+                        "tray": [
+                            {"id": 0, "tray_type": "", "tray_color": None, "remain": None, "state": 9},
+                            {"id": 1, "tray_type": "PETG", "tray_color": "#F75403", "remain": 40, "state": 11},
+                        ],
+                    }
+                ],
+                "cfs": {"type": "k2_openhost_cfs", "active_slots": ["T1B"]},
+            },
+        )
+
+        with patch("backend.app.api.routes.printers.printer_manager") as mock_pm:
+            mock_pm.get_status = MagicMock(return_value=state)
+            mock_pm.is_awaiting_plate_clear = MagicMock(return_value=False)
+            response = await async_client.get(f"/api/v1/printers/{printer.id}/status")
+
+        assert response.status_code == 200
+        trays = response.json()["ams"][0]["tray"]
+        assert [tray["remain"] for tray in trays] == [-1, 40]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_printer_status_not_found(self, async_client: AsyncClient):
         """Verify 404 for status of non-existent printer."""
         response = await async_client.get("/api/v1/printers/9999/status")

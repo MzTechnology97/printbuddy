@@ -781,6 +781,8 @@ def test_moonraker_maps_k2_openhost_cfs_slots_to_ams_shape():
     assert trays[2]["tray_color"] == "#B1BEC6"
     assert trays[2]["active"] is False
     assert trays[0]["tray_type"] == "" and trays[0]["tray_color"] is None and trays[0]["state"] == 9
+    # Empty slots have no RFID level; must stay an int for AMSTray (None caused a 503 on /status).
+    assert trays[0]["remain"] == -1 and trays[3]["remain"] == -1
     assert client.state.tray_now == 1
     cfs = client.state.raw_data["cfs"]
     assert cfs["type"] == "k2_openhost_cfs"
