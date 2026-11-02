@@ -250,7 +250,7 @@ async def dispatch_once(db: AsyncSession) -> int:
     printers_by_id = {
         p.id: p for p in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all()
     }
-    snapshot = plan.printer_snapshot(list(printers_by_id.values()))
+    snapshot = await plan.with_spools_set_by_hand(db, plan.printer_snapshot(list(printers_by_id.values())))
     busy = set(
         (
             await db.execute(
@@ -314,9 +314,10 @@ async def dispatch_once(db: AsyncSession) -> int:
                             reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
                             continue
                     slots = await asyncio.to_thread(extract_filament_requirements, path, plate_no)
+                    # A spool set by hand isn't in the printer's status: nothing to force there.
                     overrides = (
                         []
-                        if spool is None
+                        if spool is None or printer.get("by_hand")
                         else [
                             {
                                 "slot_id": s["slot_id"],

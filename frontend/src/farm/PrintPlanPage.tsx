@@ -7,7 +7,14 @@ import { AlertTriangle, ClipboardList, ListPlus, Loader2, RefreshCw, Settings2, 
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmJob, type FarmPlanComponent, type FarmPlanPlate, type FarmPlanSettings } from './api';
+import {
+  farmApi,
+  type FarmJob,
+  type FarmPlanComponent,
+  type FarmPlanPlate,
+  type FarmPlanSettings,
+  type FarmPrinterSpool,
+} from './api';
 import { PlateThumb } from './PlatesPanel';
 import './i18n';
 
@@ -31,6 +38,7 @@ function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
     p.material_ok === false ? t('farm.plan.noMaterial') : null,
     p.color_ok === false ? t('farm.plan.noColor') : null,
     p.color_ok === null ? t('farm.plan.colorUnknown') : null,
+    p.by_hand ? t('farm.spools.byHand') : null,
   ].filter(Boolean);
   return (
     <span className="inline-flex items-center gap-1.5 text-xs bg-bambu-dark rounded px-2 py-1" title={notes.join(' · ')}>
@@ -320,6 +328,66 @@ function AccodaSummary({ components, onClose, onDone }: {
   );
 }
 
+const MATERIALS = ['PLA', 'PETG', 'ASA', 'ABS', 'TPU', 'PA', 'PC'];
+
+function SpoolRow({ s, colors }: { s: FarmPrinterSpool; colors: string[] }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [material, setMaterial] = useState(s.material || '');
+  const [color, setColor] = useState(s.color_name || '');
+  const done = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
+  const save = useMutation({
+    mutationFn: () => farmApi.setPrinterSpool(s.printer_id, { material, color_name: color }),
+    onSuccess: () => { done(); showToast(t('farm.products.saved'), 'success'); },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const clear = useMutation({
+    mutationFn: () => farmApi.clearPrinterSpool(s.printer_id),
+    onSuccess: () => { setMaterial(''); setColor(''); done(); },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  return (
+    <li className="p-3 flex flex-wrap items-center gap-2 text-sm">
+      <span className="text-white w-32 truncate" title={s.model}>{s.name}</span>
+      {s.color && <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60" style={{ background: `#${s.color}` }} />}
+      <input list="farm-materials" aria-label={`${t('farm.spools.material')} ${s.name}`} className={`${INPUT} py-1 w-28`}
+        value={material} placeholder={t('farm.spools.material')} onChange={(e) => setMaterial(e.target.value)} />
+      <select aria-label={`${t('farm.spools.color')} ${s.name}`} className={`${INPUT} py-1`} value={color}
+        onChange={(e) => setColor(e.target.value)}>
+        <option value="">{t('farm.spools.color')}</option>
+        {colors.map((c) => <option key={c} value={c}>{c}</option>)}
+      </select>
+      <Button size="sm" aria-label={`${t('farm.products.save')} ${s.name}`}
+        disabled={!material.trim() || !color || save.isPending} onClick={() => save.mutate()}>
+        {t('farm.products.save')}
+      </Button>
+      {s.material && (
+        <Button size="sm" variant="ghost" onClick={() => clear.mutate()}>{t('farm.spools.empty')}</Button>
+      )}
+    </li>
+  );
+}
+
+/** Klipper printers without CFS can't say what is loaded: the user does, until they change it. */
+function SpoolsCard() {
+  const { t } = useTranslation();
+  const spools = useQuery({ queryKey: ['farm', 'printer-spools'], queryFn: farmApi.getPrinterSpools });
+  const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
+  if (!spools.data?.length) return null;
+  const colors = Object.keys(settings.data?.colors || {}).map((c) => c.charAt(0).toUpperCase() + c.slice(1));
+  return (
+    <section className="space-y-2">
+      <h2 className="text-lg font-semibold text-white">{t('farm.spools.title')}</h2>
+      <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.spools.intro')}</p>
+      <datalist id="farm-materials">{MATERIALS.map((m) => <option key={m} value={m} />)}</datalist>
+      <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
+        {spools.data.map((s) => <SpoolRow key={`${s.printer_id}-${s.updated_at}`} s={s} colors={colors} />)}
+      </ul>
+    </section>
+  );
+}
+
 function JobsList() {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -382,6 +450,7 @@ export function PrintPlanPage() {
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.plan.intro')}</p>
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
       <JobsList />
+      <SpoolsCard />
       {summary && <AccodaSummary components={summary} onClose={() => setSummary(null)} onDone={() => setSelected(new Set())} />}
       {plan.data?.error && (
         <p className="text-sm text-amber-400 flex items-center gap-2">

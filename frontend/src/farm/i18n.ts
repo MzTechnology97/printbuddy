@@ -46,6 +46,14 @@ const en = {
       removed: 'removed from the queue',
     },
   },
+  spools: {
+    title: 'Spools loaded by hand',
+    intro: 'These Klipper printers have no CFS and cannot say which spool is loaded. Set material and colour here: Accoda uses them to pick the 3MF and check the colour, and the print starts by itself after the plate-clear OK. Update it whenever you change spool.',
+    material: 'Material',
+    color: 'Colour',
+    empty: 'Empty',
+    byHand: 'spool set by hand',
+  },
   plan: {
     title: 'What to print',
     productPhoto: 'Photo of',
@@ -226,6 +234,14 @@ const it: typeof en = {
       cancelled: 'annullato',
       removed: 'tolto dalla coda',
     },
+  },
+  spools: {
+    title: 'Bobine montate (indicate a mano)',
+    intro: 'Queste stampanti Klipper non hanno il CFS e non sanno quale bobina è montata. Indica qui materiale e colore: Accoda li usa per scegliere il 3MF e controllare il colore, e la stampa parte da sola dopo la conferma del piatto libero. Aggiornala ogni volta che cambi bobina.',
+    material: 'Materiale',
+    color: 'Colore',
+    empty: 'Vuota',
+    byHand: 'bobina indicata a mano',
   },
   plan: {
     title: 'Cosa stampare',

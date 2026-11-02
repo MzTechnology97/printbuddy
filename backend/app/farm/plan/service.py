@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.products.models import FarmComponent, FarmProductPart, FarmShape
@@ -151,6 +152,17 @@ def printer_snapshot(printers: list[Printer]) -> list[dict]:
     return out
 
 
+async def with_spools_set_by_hand(db: AsyncSession, snapshot: list[dict]) -> list[dict]:
+    """Printers reporting no filament (Klipper without CFS) get the spool the user said is on them."""
+    spools = {s.printer_id: s for s in (await db.execute(select(FarmPrinterSpool))).scalars()}
+    return [
+        {**p, "loaded": [{"type": spools[p["id"]].material, "color": spools[p["id"]].color}], "by_hand": True}
+        if p["id"] in spools and not p["loaded"]
+        else p
+        for p in snapshot
+    ]
+
+
 def printer_fit(printer: dict, materials: list[str], color_hex: str | None, tolerance: int) -> dict:
     """Is the plate's material loaded, and a spool of the component's colour in that material?"""
     wanted = {_canonical_filament_type(m) for m in materials if m}
@@ -174,6 +186,7 @@ def printer_fit(printer: dict, materials: list[str], color_hex: str | None, tole
         "idle": printer["idle"],
         "material_ok": material_ok,
         "color_ok": color_ok,
+        "by_hand": printer.get("by_hand", False),
     }
 
 
@@ -225,7 +238,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
         used_in.setdefault(component_id, []).append({"project_id": project_id, "name": name, "has_cover": bool(cover)})
     resolver = await PrinterModelResolver.load(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
-    printers = printer_snapshot(active)
+    printers = await with_spools_set_by_hand(db, printer_snapshot(active))
     queued = queued or {}
 
     rows = []

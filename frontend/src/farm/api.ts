@@ -115,7 +115,14 @@ export interface FarmPlanPlate {
   filament_grams: number | null;
   sliced: boolean;
   score: number;
-  printers: { id: number; name: string; idle: boolean; material_ok: boolean | null; color_ok: boolean | null }[];
+  printers: {
+    id: number;
+    name: string;
+    idle: boolean;
+    material_ok: boolean | null;
+    color_ok: boolean | null;
+    by_hand?: boolean;
+  }[];
 }
 
 export interface FarmPlanComponent {
@@ -150,6 +157,16 @@ export interface FarmJob {
   queue_item_id: number | null;
   pieces: number;
   created_at: string;
+}
+
+export interface FarmPrinterSpool {
+  printer_id: number;
+  name: string;
+  model: string;
+  material: string | null;
+  color_name: string | null;
+  color: string | null;
+  updated_at: string | null;
 }
 
 export interface FarmPlanSettings {
@@ -213,6 +230,11 @@ export const farmApi = {
       '/plan',
     ),
   getJobs: () => farmRequest<FarmJob[]>('/jobs'),
+  getPrinterSpools: () => farmRequest<FarmPrinterSpool[]>('/printer-spools'),
+  setPrinterSpool: (printerId: number, data: { material: string; color_name: string }) =>
+    farmRequest<FarmPrinterSpool>(`/printer-spools/${printerId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  clearPrinterSpool: (printerId: number) =>
+    farmRequest<{ printer_id: number }>(`/printer-spools/${printerId}`, { method: 'DELETE' }),
   createJobs: (jobs: { component_code: string; plate_ids: number[]; printer_id?: number }[]) =>
     farmRequest<FarmJob[]>('/jobs', { method: 'POST', body: JSON.stringify({ jobs }) }),
   cancelJob: (id: number) => farmRequest<{ id: number; state: string }>(`/jobs/${id}`, { method: 'DELETE' }),

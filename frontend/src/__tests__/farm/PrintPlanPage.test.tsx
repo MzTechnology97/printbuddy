@@ -73,6 +73,7 @@ describe('PrintPlanPage', () => {
   let createdJobs: unknown;
   let cancelled: string | undefined;
   let jobs: object[];
+  let savedSpool: unknown;
 
   beforeEach(() => {
     savedSettings = undefined;
@@ -90,6 +91,15 @@ describe('PrintPlanPage', () => {
         return HttpResponse.json({ id: Number(params.id), state: 'cancelled' });
       }),
       http.get('/api/v1/farm/plan', () => HttpResponse.json(plan)),
+      http.get('/api/v1/farm/printer-spools', () =>
+        HttpResponse.json([
+          { printer_id: 10, name: 'K1', model: 'K1', material: null, color_name: null, color: null, updated_at: null },
+        ]),
+      ),
+      http.put('/api/v1/farm/printer-spools/:id', async ({ params, request }) => {
+        savedSpool = { id: params.id, ...((await request.json()) as object) };
+        return HttpResponse.json({});
+      }),
       http.get('/api/v1/farm/plan/settings', () =>
         HttpResponse.json({ url: 'http://hub.test:8000', tolerance: 80, colors: { nero: '111111' } }),
       ),
@@ -176,6 +186,16 @@ describe('PrintPlanPage', () => {
     expect(screen.getByText('in the queue (confirm the plate is clear)')).toBeInTheDocument();
     await user.click(screen.getAllByRole('button', { name: 'Cancel' })[0]);
     await waitFor(() => expect(cancelled).toBe('7'));
+  });
+
+  it('sets the spool loaded on a Klipper printer without CFS', async () => {
+    const user = userEvent.setup();
+    render(<PrintPlanPage />);
+    await user.type(await screen.findByLabelText('Material K1'), 'PETG');
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Nero' })).toBeInTheDocument());
+    await user.selectOptions(screen.getByLabelText('Colour K1'), 'Nero');
+    await user.click(screen.getByRole('button', { name: 'Save K1' }));
+    await waitFor(() => expect(savedSpool).toEqual({ id: '10', material: 'PETG', color_name: 'Nero' }));
   });
 
   it('saves the Seller Hub address and tolerance', async () => {

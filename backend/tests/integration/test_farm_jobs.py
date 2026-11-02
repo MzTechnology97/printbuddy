@@ -224,6 +224,39 @@ async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client,
 
 
 @pytest.mark.asyncio
+async def test_klipper_without_cfs_uses_the_spool_set_by_hand(async_client, db_session, farm):
+    from backend.app.models.printer import Printer
+
+    a1_one = farm["printers"][0]
+    (await db_session.get(Printer, a1_one)).provider = "klipper"
+    await db_session.commit()
+    farm["snapshot"][0]["loaded"] = []  # single spool: nothing reported
+    farm["snapshot"][1]["idle"] = False
+
+    spools = (await async_client.get(f"{API}/printer-spools")).json()
+    assert [(s["name"], s["material"]) for s in spools] == [("A1 uno", None)]  # Bambu printers aren't listed
+    r = await async_client.put(f"{API}/printer-spools/{a1_one}", json={"material": "pla", "color_name": "Nero"})
+    assert r.json() == {"printer_id": a1_one, "material": "PLA", "color_name": "Nero", "color": "111111"}
+    assert (
+        await async_client.put(f"{API}/printer-spools/{a1_one}", json={"material": "PLA", "color_name": "Viola?"})
+    ).status_code == 422
+    assert (
+        await async_client.put(
+            f"{API}/printer-spools/{farm['printers'][2]}", json={"material": "PLA", "color_name": "Nero"}
+        )
+    ).status_code == 404
+
+    await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    # Black PLA said to be loaded: it starts by itself after the plate-clear OK, nothing forced on the status.
+    assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_one, False, None)
+
+    assert (await async_client.delete(f"{API}/printer-spools/{a1_one}")).status_code == 200
+    assert (await async_client.get(f"{API}/printer-spools")).json()[0]["material"] is None
+
+
+@pytest.mark.asyncio
 async def test_chosen_printer_waits_for_the_slice(async_client, db_session, farm):
     p1s = farm["printers"][2]
     r = await async_client.post(
