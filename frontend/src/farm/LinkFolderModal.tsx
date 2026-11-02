@@ -32,11 +32,7 @@ export function FarmLinkFolderModal({ folder, onClose, onLink, isLoading }: Prop
   const [selected, setSelected] = useState<Set<number> | null>(null);
   const [archiveId, setArchiveId] = useState<number | null>(folder.archive_id);
 
-  const { data: projects } = useQuery({
-    queryKey: ['projects'],
-    queryFn: () => api.getProjects(),
-    select: (rows) => [...rows].sort((a, b) => a.name.localeCompare(b.name)),
-  });
+  const { data: projects } = useQuery({ queryKey: ['farm', 'project-names'], queryFn: farmApi.getProjectNames });
   const { data: products } = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const { data: linked } = useQuery({
     queryKey: ['farm', 'folder-projects', folder.id],

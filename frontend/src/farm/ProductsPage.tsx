@@ -60,7 +60,7 @@ function ProductForm({
   const queryClient = useQueryClient();
   const [d, setD] = useState(draft);
   const [newComponent, setNewComponent] = useState({ name: '', shapeId: '', color: '' });
-  const { data: projects } = useQuery({ queryKey: ['projects', 'farm-picker'], queryFn: () => api.getProjects(), enabled: !d.id });
+  const { data: projects } = useQuery({ queryKey: ['farm', 'project-names'], queryFn: farmApi.getProjectNames, enabled: !d.id });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
 
   const save = useMutation({

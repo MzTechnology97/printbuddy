@@ -48,7 +48,7 @@ describe('ProductsPage', () => {
         HttpResponse.json([{ project_id: 7, has_cover: false, queued: 3, printing: 1, printed_recent: 12 }]),
       ),
       http.get('/api/v1/farm/components', () => HttpResponse.json(components)),
-      http.get('/api/v1/projects/', () => HttpResponse.json([])),
+      http.get('/api/v1/farm/projects', () => HttpResponse.json([])),
       http.put('/api/v1/farm/products/:id', async ({ request }) => {
         saved = await request.json();
         return HttpResponse.json({ project_id: 7 });
