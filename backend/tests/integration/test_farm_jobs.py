@@ -141,3 +141,32 @@ async def test_cancel_and_validation(async_client, db_session, farm):
 
     bad = await async_client.post(f"{API}/jobs", json={"jobs": [{"component_code": farm["code"], "plate_ids": [999]}]})
     assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_session, farm):
+    from backend.app.models.printer import Printer
+
+    for printer_id in farm["printers"][:2]:
+        (await db_session.get(Printer, printer_id)).provider = "klipper"
+    await db_session.commit()
+    farm["snapshot"][0]["loaded"] = []  # single spool: what is loaded can't be read
+    farm["snapshot"][1]["idle"] = False
+    job = await accoda(async_client, farm["code"], farm["plates"])
+
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    gcode = await db_session.get(LibraryFile, item.library_file_id)
+    assert (gcode.filename, gcode.file_type) == ("sopra_plate2_plate2.gcode", "gcode")
+    # Colour not readable: queued, but it starts only when the user starts it after checking the spool.
+    assert (item.printer_id, item.manual_start, item.filament_overrides) == (farm["printers"][0], True, None)
+    assert "Check the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
+
+    # The extracted G-code is reused for the next job on the same plate.
+    await db_session.get(PrintQueueItem, item.id)
+    item.status = "completed"
+    await db_session.commit()
+    await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 1
+    files = (await db_session.execute(select(PrintQueueItem.library_file_id))).scalars().all()
+    assert files == [gcode.id, gcode.id]
