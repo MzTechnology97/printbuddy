@@ -90,11 +90,21 @@ class PartIn(BaseModel):
     quantity: int = Field(default=1, ge=1, le=QTY_MAX)
 
 
+class VariantIn(BaseModel):
+    """Another listing of the same object: ``pieces`` units per sale, in ``color`` (none: the parts' own)."""
+
+    skus: list[str] = Field(default_factory=list, max_length=100)
+    asins: list[str] = Field(default_factory=list, max_length=100)
+    color: str | None = Field(default=None, max_length=50)
+    pieces: int = Field(default=1, ge=1, le=QTY_MAX)
+
+
 class ProductIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     skus: list[str] = Field(default_factory=list, max_length=100)
     asins: list[str] = Field(default_factory=list, max_length=100)
     parts: list[PartIn] = Field(default_factory=list, max_length=100)
+    variants: list[VariantIn] | None = Field(default=None, max_length=50)  # None keeps the stored ones
 
 
 class ProductCreate(ProductIn):
@@ -149,18 +159,36 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
     def plates(c: FarmComponent) -> list[dict]:
         return by_shape.get(c.shape_id, []) if c.shape_id else by_code.get(c.code, [])
 
+    def line(c: FarmComponent, quantity: int) -> dict:
+        # Confirmed plates (file × printer model × material) and their yield of this component.
+        return {"component_code": c.code, "name": c.name, "quantity": quantity, "plates": plates(c)}
+
+    colored = {
+        (c.shape_id, c.color.casefold()): c
+        for c in components.values()
+        if c.shape_id and c.color and c.retired_at is None
+    }
     products = []
     for product, project in rows:
-        parts = [
-            {
-                "component_code": components[p.component_id].code,
-                "name": components[p.component_id].name,
-                "quantity": p.quantity,
-                # Confirmed plates (file × printer model × material) and their yield of this component.
-                "plates": plates(components[p.component_id]),
-            }
-            for p in parts_by_product.get(product.project_id, [])
-        ]
+        own = [(components[p.component_id], p.quantity) for p in parts_by_product.get(product.project_id, [])]
+        variants = []
+        for i, v in enumerate(product.variants or [], start=1):
+            color = v.get("color")
+            resolved = [colored.get((c.shape_id, color.casefold())) if color and c.shape_id else c for c, _ in own]
+            variants.append(
+                {
+                    "key": f"{project.id}:{i}",
+                    "name": " – ".join(x for x in (project.name, color, f"×{v['pieces']}") if x),
+                    "skus": v.get("skus") or [],
+                    "asins": v.get("asins") or [],
+                    "color": color,
+                    "pieces": v["pieces"],
+                    # Per unit sold. A colour with no component for a shape gives no parts rather than wrong ones.
+                    "parts": []
+                    if None in resolved
+                    else [line(c, min(QTY_MAX, q * v["pieces"])) for c, (_, q) in zip(resolved, own)],
+                }
+            )
         products.append(
             {
                 "project_id": project.id,
@@ -168,7 +196,8 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "skus": product.skus or [],
                 "asins": product.asins or [],
                 "updated_at": serialize_utc_datetime(max(product.updated_at, project.updated_at)),
-                "parts": parts,
+                "parts": [line(c, q) for c, q in own],
+                "variants": variants,
             }
         )
     return {"generated_at": serialize_utc_datetime(_now()), "products": products}
@@ -362,13 +391,38 @@ async def products_overview(db: AsyncSession = Depends(get_db)) -> list[dict]:
 # ---------------------------------------------------------------- edit (UI)
 
 
+def _listings(skus: list | None, asins: list | None, variants: list | None) -> tuple[list[str], list[str]]:
+    """Every SKU and ASIN a product sells under, its variants' included."""
+    variants = variants or []
+    return (
+        [*(skus or []), *(s for v in variants for s in v.get("skus") or [])],
+        [*(asins or []), *(a for v in variants for a in v.get("asins") or [])],
+    )
+
+
 async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data: ProductIn) -> None:
     project.name = _clean(data.name, 255) or project.name
     skus, asins = _codes(data.skus, "SKU"), _codes(data.asins, "ASIN")
+    variants = product.variants or []
+    if data.variants is not None:
+        variants = [
+            {
+                "skus": _codes(v.skus, "SKU"),
+                "asins": _codes(v.asins, "ASIN"),
+                "color": _clean(v.color or "", 50) or None,
+                "pieces": v.pieces,
+            }
+            for v in data.variants
+        ]
+        variants = [v for v in variants if v["skus"] or v["asins"]]  # a variant is a listing
+    my_skus, my_asins = _listings(skus, asins, variants)
+    if dup := sorted({c for c in my_skus if my_skus.count(c) > 1} | {c for c in my_asins if my_asins.count(c) > 1}):
+        raise HTTPException(422, f"{', '.join(dup)} listed twice in this product")
     others = (await db.execute(select(FarmProduct).where(FarmProduct.project_id != project.id))).scalars()
     for other in others:
-        # Seller Hub maps sales to a product by SKU/ASIN: one owner each.
-        clash = set(skus) & set(other.skus or []) or set(asins) & set(other.asins or [])
+        # Seller Hub maps sales to a product by SKU/ASIN: one owner each, variants included.
+        other_skus, other_asins = _listings(other.skus, other.asins, other.variants)
+        clash = set(my_skus) & set(other_skus) or set(my_asins) & set(other_asins)
         if clash:
             raise HTTPException(409, f"{', '.join(sorted(clash))} already belongs to product {other.project_id}")
 
@@ -383,7 +437,7 @@ async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data:
     if retired := [c for c in codes if by_code[c].retired_at is not None]:
         raise HTTPException(422, f"Retired components: {', '.join(retired)}")
 
-    product.skus, product.asins, product.updated_at = skus, asins, _now()
+    product.skus, product.asins, product.variants, product.updated_at = skus, asins, variants, _now()
     for old in (await db.execute(select(FarmProductPart).where(FarmProductPart.project_id == project.id))).scalars():
         await db.delete(old)
     await db.flush()
@@ -393,6 +447,25 @@ async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data:
                 project_id=project.id, component_id=by_code[p.component_code].id, quantity=p.quantity, sort_order=i
             )
         )
+    # A colour variant needs each shaped part in that colour: the missing components are created now,
+    # so their codes exist (and Seller Hub can stock them) before the first sale.
+    shapes = await _shape_names(db)
+    for color in dict.fromkeys(v["color"] for v in variants if v["color"]):
+        for shape_id in dict.fromkeys(by_code[c].shape_id for c in codes if by_code[c].shape_id):
+            if await _colored(db, shape_id, color) is None:
+                db.add(FarmComponent(code=await _next_code(db), name=f"{shapes[shape_id]} – {color}",
+                                     shape_id=shape_id, color=color))
+                await db.flush()
+
+
+async def _colored(db: AsyncSession, shape_id: int, color: str) -> FarmComponent | None:
+    return await db.scalar(
+        select(FarmComponent).where(
+            FarmComponent.shape_id == shape_id,
+            func.lower(FarmComponent.color) == color.lower(),
+            FarmComponent.retired_at.is_(None),
+        )
+    )
 
 
 @router.post("/products", dependencies=[_create])
