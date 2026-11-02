@@ -1321,6 +1321,32 @@ def clear_cover_cache(printer_id: int) -> None:
     _cover_404_cache.pop(printer_id, None)
 
 
+async def _local_3mf_for_cover(db: AsyncSession, printer_id: int, filenames: list[str]) -> Path | None:
+    """A 3MF with the job's name already on this server (archive or library), newest first."""
+    from backend.app.api.routes.library import to_absolute_path
+    from backend.app.models.archive import PrintArchive
+    from backend.app.models.library import LibraryFile
+
+    archives = await db.execute(
+        select(PrintArchive.file_path)
+        .where(PrintArchive.filename.in_(filenames), PrintArchive.deleted_at.is_(None))
+        .order_by((PrintArchive.printer_id == printer_id).desc(), PrintArchive.id.desc())
+        .limit(10)
+    )
+    library = await db.execute(
+        LibraryFile.active().where(LibraryFile.filename.in_(filenames)).order_by(LibraryFile.id.desc()).limit(10)
+    )
+    rel_paths = [*archives.scalars(), *(f.file_path for f in library.scalars())]
+    for rel_path in rel_paths:
+        try:
+            path = to_absolute_path(rel_path)
+            if path and path.is_file() and path.stat().st_size > 0:
+                return path
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 @router.get("/{printer_id}/cover")
 async def get_printer_cover(
     printer_id: int,
@@ -1436,6 +1462,14 @@ async def get_printer_cover(
             break
 
     if not downloaded:
+        local = await _local_3mf_for_cover(db, printer_id, possible_filenames)
+        if local:
+            logger.info("Cover using local 3MF %s (printer not asked)", local)
+            temp_path = local
+            downloaded = True
+            using_cached = True
+
+    if not downloaded:
         logger.info(
             f"Trying to download cover for '{subtask_name}' from {printer.ip_address} (trying {len(remote_paths)} paths)"
         )
@@ -1453,8 +1487,9 @@ async def get_printer_cover(
                     temp_path,
                     printer_model=printer.model,
                 )
-                if downloaded:
-                    break
+                # Retry only on exceptions: a plain miss or failed transfer
+                # would just repeat the same slow fan-out.
+                break
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
