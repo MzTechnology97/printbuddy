@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.core.config import settings
 from backend.app.core.database import async_session, run_with_retry
+from backend.app.farm import printer_files as farm_printer_files  # fork: printfarm
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
@@ -1954,6 +1955,11 @@ class PrintScheduler:
         printer_model: str | None,
         ftp_timeout: float | int,
     ) -> None:
+        # fork: the printer already has this fingerprinted file, so it is neither deleted nor uploaded again.
+        if await farm_printer_files.check_reusable(
+            printer_id, provider, printer_ip, printer_access_code, remote_path, printer_model
+        ):
+            return None
         if provider == "bambu":
             await delete_file_async(
                 printer_ip,
@@ -1992,6 +1998,8 @@ class PrintScheduler:
         ftp_timeout: float | int,
         operation_name: str,
     ) -> bool:
+        if await farm_printer_files.before_upload(printer_id, remote_path):  # fork: file already on the printer
+            return True
         if provider == "bambu":
             if ftp_retry_enabled:
                 return bool(
@@ -2176,6 +2184,7 @@ class PrintScheduler:
         # Use a provider-correct printer-side name. Bambu keeps the historical
         # 3MF rewrite, while Moonraker/K-series must keep .gcode/.3mf intact.
         remote_filename = self._remote_filename_for_provider(filename, provider)
+        remote_filename = await farm_printer_files.fingerprint(remote_filename, file_path)  # fork: reuse on printer
         # Upload to root directory (not /cache/) - the start_print command references
         # files by name only (ftp://{filename}), so they must be in the root
         remote_path = f"/{remote_filename}"

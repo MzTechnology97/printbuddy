@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -36,10 +37,12 @@ from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 from backend.app.services.filament_requirements import extract_filament_requirements
 from backend.app.services.print_scheduler import _canonical_filament_type
+from backend.app.services.printer_providers.factory import normalize_provider
 
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 30
+CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
 RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
@@ -134,6 +137,40 @@ async def queued_pieces(db: AsyncSession) -> dict[str, int]:
     return out
 
 
+async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, plate: int) -> LibraryFile | None:
+    """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once."""
+    from backend.app.api.routes import library as lib
+
+    name = f"{sliced.filename.removesuffix('.gcode.3mf').removesuffix('.3mf')}_plate{plate}.gcode"
+    for candidate in (await db.execute(LibraryFile.active().where(LibraryFile.filename == name))).scalars():
+        meta = candidate.file_metadata or {}
+        if meta.get("extracted_from_library_file_id") == sliced.id and meta.get("plate") == plate:
+            return candidate
+    try:
+        with zipfile.ZipFile(path) as zf:
+            data = zf.read(f"Metadata/plate_{plate}.gcode")
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return None
+    out = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode"
+    await asyncio.to_thread(out.write_bytes, data)
+    gcode = LibraryFile(
+        folder_id=sliced.folder_id,
+        filename=name,
+        file_path=lib.to_relative_path(out),
+        file_type="gcode",
+        file_size=len(data),
+        source_type="sliced",
+        file_metadata={
+            **(sliced.file_metadata or {}),
+            "extracted_from_library_file_id": sliced.id,
+            "plate": plate,
+        },
+    )
+    db.add(gcode)
+    await db.flush()
+    return gcode
+
+
 def _plate_in_file(path: Path, default: int) -> int:
     """The plate number the sliced file carries (``Metadata/plate_N.gcode``)."""
     try:
@@ -212,29 +249,44 @@ async def dispatch_once(db: AsyncSession) -> int:
             for printer in snapshot:
                 if printer["model"].lower() != model or not printer["idle"] or printer["id"] in busy:
                     continue
-                if printers_by_id[printer["id"]].provider != "bambu" and not sliced.filename.endswith(".gcode"):
-                    reasons.append(f"{printer['name']} needs a .gcode file")
-                    continue
-                spool = _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
-                if spool is None:
+                klipper = normalize_provider(printers_by_id[printer["id"]].provider) != "bambu"
+                # Single-spool Klipper printers don't report what is loaded: queued for a manual start.
+                unreadable = klipper and not printer["loaded"]
+                spool = (
+                    None
+                    if unreadable
+                    else _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
+                )
+                if spool is None and not unreadable:
                     reasons.append(f"{printer['name']}: no {job.color} {'+'.join(plate.materials or [])} loaded")
                     continue
                 path = await _local_path(db, sliced)
                 plate_no = _plate_in_file(path, plate.plate_index)
+                send = sliced
+                if klipper and not sliced.filename.endswith(".gcode"):
+                    send = await gcode_for_klipper(db, sliced, path, plate_no)
+                    if send is None:
+                        reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
+                        continue
                 slots = await asyncio.to_thread(extract_filament_requirements, path, plate_no)
-                overrides = [
-                    {
-                        "slot_id": s["slot_id"],
-                        "type": s.get("type") or spool["type"],
-                        "color": f"#{spool['color']}",
-                        "force_color_match": True,
-                    }
-                    for s in slots
-                ]
+                overrides = (
+                    []
+                    if spool is None
+                    else [
+                        {
+                            "slot_id": s["slot_id"],
+                            "type": s.get("type") or spool["type"],
+                            "color": f"#{spool['color']}",
+                            "force_color_match": True,
+                        }
+                        for s in slots
+                    ]
+                )
                 position = (await db.scalar(select(func.max(PrintQueueItem.position)))) or 0
                 item = PrintQueueItem(
                     printer_id=printer["id"],
-                    library_file_id=sliced.id,
+                    library_file_id=send.id,
+                    manual_start=spool is None,
                     plate_id=plate_no,
                     position=position + 1,
                     required_filament_types=json.dumps(sorted({s.get("type") for s in slots if s.get("type")})),
@@ -245,7 +297,8 @@ async def dispatch_once(db: AsyncSession) -> int:
                 db.add(item)
                 await db.flush()
                 job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
-                job.plate_id, job.pieces, job.note = plate.id, _pieces(plate, comp), None
+                job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
+                job.note = None if spool else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
                 busy.add(printer["id"])
                 created += 1
                 placed = True
@@ -289,11 +342,17 @@ class FarmJobDispatcher:
             self._task = None
 
     async def _loop(self) -> None:
+        from backend.app.farm import printer_files
+
+        last_cleanup = 0.0
         while True:
             try:
                 await asyncio.sleep(TICK_SECONDS)
                 async with database.async_session() as db:
                     await dispatch_once(db)
+                    if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
+                        last_cleanup = time.monotonic()
+                        await printer_files.cleanup(db)
             except asyncio.CancelledError:
                 break
             except Exception:  # pragma: no cover - defensive, keep the loop alive
