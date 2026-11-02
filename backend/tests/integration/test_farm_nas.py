@@ -24,6 +24,7 @@ class FakeRemote:
 
     calls: list[tuple[str, ...]] = []
     fail = False
+    drops = 0  # next file reads refused, as by a NAS that just dropped the connection
 
     def __init__(self, root: Path, password: str) -> None:
         self.root, self.password = root, password
@@ -40,6 +41,10 @@ class FakeRemote:
         ]
 
     def copy_to(self, parts, dest):
+        if FakeRemote.drops:
+            FakeRemote.drops -= 1
+            dest.write(b"partial")
+            raise ConnectionError("Connection refused")
         with open(self._path(parts), "rb") as src:
             shutil.copyfileobj(src, dest)
 
@@ -55,10 +60,11 @@ def share(tmp_path, monkeypatch):
     make_3mf(root / "Other" / "outside.3mf", BAMBU)
     make_3mf(root / SUB / "Box" / "box.3mf", BAMBU, "Bambu Lab P1S")
     (root / SUB / "notes.txt").write_text("ignored")
+    (root / SUB / "Box" / "photo.jpg").write_bytes(b"ignored: not a print file")
     fresh = make_3mf(root / SUB / "saving.3mf", BAMBU)
     os.utime(fresh, None)  # being saved right now
 
-    FakeRemote.calls, FakeRemote.fail = [], False
+    FakeRemote.calls, FakeRemote.fail, FakeRemote.drops = [], False, 0
     passwords = []
 
     def fake_remote(host, share_name, username, password):
@@ -197,6 +203,47 @@ def test_mirror_skips_files_saved_moments_ago(tmp_path):
     root = tmp_path / "share"
     make_3mf(root / SUB / "a.3mf", BAMBU)
     os.utime(root / SUB / "a.3mf", (time.time(), time.time()))
-    FakeRemote.fail = False
+    FakeRemote.fail, FakeRemote.drops = False, 0
     result = mirror(FakeRemote(root, ""), (SUB,), tmp_path / "m")
     assert (result["downloaded"], result["pending"]) == (0, 1)
+
+
+def test_smb_refused_connection_is_retryable(monkeypatch):
+    import io
+
+    import smbclient
+
+    from backend.app.farm.nas.remote import NasConnectionError, SmbRemote
+
+    def refused(*_args, **_kwargs):
+        raise ValueError("Failed to connect to 'nas.test:445': [Errno 111] Connection refused")
+
+    monkeypatch.setattr(smbclient, "open_file", refused)
+    with pytest.raises(NasConnectionError, match="refused"):
+        SmbRemote("nas.test", "share", "farm", "x").copy_to((SUB, "a.3mf"), io.BytesIO())
+
+
+def test_mirror_retries_a_dropped_connection_then_gives_up(tmp_path, monkeypatch):
+    from backend.app.farm.nas import mirror as mirror_mod
+
+    monkeypatch.setattr(mirror_mod, "RETRY_DELAYS", (0, 0))
+    root, dest = tmp_path / "share", tmp_path / "m"
+    for name in ("a", "b", "c"):
+        make_3mf(root / SUB / f"{name}.3mf", BAMBU)
+    FakeRemote.fail = False
+
+    # Refused twice, then the NAS accepts again: everything is copied, no partial bytes left.
+    FakeRemote.drops = 2
+    result = mirror_mod.mirror(FakeRemote(root, ""), (SUB,), dest)
+    assert (result["downloaded"], result["unreadable"], "error" in result) == (3, 0, False)
+    assert (dest / "a.3mf").read_bytes() == (root / SUB / "a.3mf").read_bytes()
+
+    # Still refused after every retry: stop (one file tried 3 times, not 3 files) and keep the copies.
+    for name in ("a", "b", "c"):
+        make_3mf(root / SUB / f"{name}.3mf", BAMBU, body="<!-- v2 -->")
+    FakeRemote.drops = 99
+    result = mirror_mod.mirror(FakeRemote(root, ""), (SUB,), dest)
+    assert (result["downloaded"], result["unreadable"], result["deleted"]) == (0, 3, 0)
+    assert "Connection refused" in result["error"] and FakeRemote.drops == 96
+    assert sorted(p.name for p in dest.iterdir()) == ["a.3mf", "b.3mf", "c.3mf"]
+    FakeRemote.drops = 0

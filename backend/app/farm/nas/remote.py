@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
@@ -21,6 +22,10 @@ HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})$")
 
 class NasPathError(ValueError):
     """A path component that could escape the configured folder."""
+
+
+class NasConnectionError(ConnectionError):
+    """The connection to the NAS failed or was dropped (worth retrying), as opposed to a per-file error."""
 
 
 def check_name(name: str) -> str:
@@ -71,21 +76,38 @@ class SmbRemote:
     def _unc(self, parts: tuple[str, ...]) -> str:
         return "\\".join([self._root, *(check_name(p) for p in parts)])
 
+    @staticmethod
+    @contextmanager
+    def _connection_errors():
+        from smbprotocol.exceptions import SMBConnectionClosed, SMBResponseException
+
+        try:
+            yield
+        except (SMBResponseException, NasPathError):
+            raise  # the server answered: a problem with this path, not the connection
+        except (SMBConnectionClosed, ConnectionError, TimeoutError, ValueError) as exc:
+            # smbprotocol reports a refused/failed connect as ValueError("Failed to connect ...").
+            raise NasConnectionError(str(exc)) from exc
+
     def scandir(self, parts: tuple[str, ...]) -> list[RemoteEntry]:
         import smbclient
 
         entries = []
-        for e in smbclient.scandir(self._unc(parts), **self._kwargs):
-            if e.is_symlink():
-                continue  # reparse points could lead outside the folder
-            st = e.stat()
-            entries.append(RemoteEntry(e.name, e.is_dir(), st.st_size, st.st_mtime))
+        with self._connection_errors():
+            for e in smbclient.scandir(self._unc(parts), **self._kwargs):
+                if e.is_symlink():
+                    continue  # reparse points could lead outside the folder
+                st = e.stat()
+                entries.append(RemoteEntry(e.name, e.is_dir(), st.st_size, st.st_mtime))
         return entries
 
     def copy_to(self, parts: tuple[str, ...], dest: BinaryIO) -> None:
         import smbclient
 
-        with smbclient.open_file(self._unc(parts), mode="rb", share_access="rwd", **self._kwargs) as src:
+        with (
+            self._connection_errors(),
+            smbclient.open_file(self._unc(parts), mode="rb", share_access="rwd", **self._kwargs) as src,
+        ):
             shutil.copyfileobj(src, dest, 1024 * 1024)
 
     def close(self) -> None:

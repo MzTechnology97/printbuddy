@@ -22,12 +22,32 @@ class MirrorError(Exception):
     """Listing failed: nothing was deleted locally."""
 
 
+# A NAS that drops the connection (e.g. after an I/O error on one file) may refuse
+# new ones for a few seconds: wait and retry instead of failing every later file.
+RETRY_DELAYS = (2, 5, 15)
+
+
+def _retry(fn, *args):
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            return fn(*args)
+        except ConnectionError as exc:
+            if delay is None:
+                raise
+            logger.info("NAS mirror: connection lost (%s), retrying in %ss", exc, delay)
+            time.sleep(delay)
+
+
+def _fetch(remote: Remote, parts: tuple[str, ...], tmp: Path) -> None:
+    with open(tmp, "wb") as fh:  # reopened on retry: never append to a partial copy
+        remote.copy_to(parts, fh)
+
+
 def mirror(remote: Remote, base: tuple[str, ...], dest: Path) -> dict:
     """Bring ``dest`` in line with ``base`` on the share. Blocking; run in a thread."""
     now = time.time()
     counts = dict.fromkeys(("downloaded", "unchanged", "deleted", "pending", "unreadable"), 0)
     counts["bytes"] = 0
-    wanted: set[Path] = set()
 
     # List everything first: a failed listing must not delete local copies.
     files: list[tuple[tuple[str, ...], int, float]] = []
@@ -35,7 +55,7 @@ def mirror(remote: Remote, base: tuple[str, ...], dest: Path) -> dict:
     while stack:
         rel = stack.pop()
         try:
-            entries = remote.scandir(base + rel)
+            entries = _retry(remote.scandir, base + rel)
         except Exception as exc:
             raise MirrorError(f"Cannot list {'/'.join(base + rel)}: {exc}") from exc
         for e in entries:
@@ -51,9 +71,9 @@ def mirror(remote: Remote, base: tuple[str, ...], dest: Path) -> dict:
                 files.append((parts, e.size, e.mtime))
 
     dest.mkdir(parents=True, exist_ok=True)
-    for parts, size, mtime in files:
+    wanted = {dest.joinpath(*parts) for parts, _size, _mtime in files}
+    for n, (parts, size, mtime) in enumerate(files):
         local = dest.joinpath(*parts)
-        wanted.add(local)
         try:
             st = local.stat()
             if st.st_size == size and abs(st.st_mtime - mtime) < 1:
@@ -67,10 +87,16 @@ def mirror(remote: Remote, base: tuple[str, ...], dest: Path) -> dict:
         local.parent.mkdir(parents=True, exist_ok=True)
         tmp = local.with_name(f".{local.name}.part")
         try:
-            with open(tmp, "wb") as fh:
-                remote.copy_to(base + parts, fh)
+            _retry(_fetch, remote, base + parts, tmp)
             os.utime(tmp, (mtime, mtime))
             os.replace(tmp, local)
+        except ConnectionError as exc:
+            # The NAS stays unreachable: stop here (local copies are kept) and retry next round.
+            tmp.unlink(missing_ok=True)
+            counts["unreadable"] += len(files) - n
+            counts["error"] = f"Connection lost: {exc}"[:500]
+            logger.warning("NAS mirror: connection lost, %d file(s) left for next round: %s", len(files) - n, exc)
+            break
         except Exception as exc:
             tmp.unlink(missing_ok=True)
             counts["unreadable"] += 1

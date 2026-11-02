@@ -8,6 +8,8 @@ folder also:
 - keeps vanished files as ``missing`` instead of deleting their row;
 - ignores files modified in the last minute (save in progress);
 - marks broken 3MF files ``corrupt`` instead of importing them;
+- takes print files only (photos next to the projects are skipped);
+- proposes the plates of 3MF projects as soon as they are scanned;
 - runs periodically (``FarmWatchedFolder.scan_interval_seconds``).
 
 Folders that aren't watched keep the upstream behaviour unchanged.
@@ -33,6 +35,7 @@ from backend.app.api.routes import library as lib
 from backend.app.core import database
 from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+from backend.app.farm.plates.service import PlateReadError, refresh_plates
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 logger = logging.getLogger(__name__)
@@ -63,8 +66,10 @@ class _Analysis:
 
 
 def _file_type(filepath: Path) -> str | None:
-    """Same extension rules as the upstream scan."""
+    """Upstream scan extension rules, print files only (photos in project folders are skipped)."""
     ext = filepath.suffix.lower()
+    if ext in lib.IMAGE_EXTENSIONS or ext == ".svg":
+        return None
     if ext not in lib._SCANNABLE_EXTENSIONS:
         compound = "".join(filepath.suffixes[-2:]).lower() if len(filepath.suffixes) >= 2 else ""
         if compound not in lib._SCANNABLE_EXTENSIONS:
@@ -141,10 +146,6 @@ def _analyze(entry: _DiskEntry) -> _Analysis:
             thumb_full = thumbs_dir / f"{os.urandom(16).hex()}.png"
             thumb_full.write_bytes(thumb)
             result.thumbnail_path = lib.to_relative_path(thumb_full)
-    elif path.suffix.lower() in lib.IMAGE_EXTENSIONS:
-        created = lib.create_image_thumbnail(path, thumbs_dir)
-        if created:
-            result.thumbnail_path = lib.to_relative_path(Path(created))
     return result
 
 
@@ -260,6 +261,17 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         .scalars()
         .all()
     )
+    kept: list[LibraryFile] = []
+    removed = 0
+    for f in files:
+        if _file_type(Path(f.file_path)) is None:
+            # Not a print file (photos imported by earlier versions): drop the row like the upstream scan.
+            _drop_thumbnail(f.thumbnail_path)
+            await db.delete(f)
+            removed += 1
+        else:
+            kept.append(f)
+    files = kept
     by_path = {f.file_path: f for f in files}
     file_ids = {f.id for f in files}
     states = (
@@ -281,6 +293,7 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
         return st
 
     counts = dict.fromkeys(("added", "updated", "relinked", "missing", "corrupt", "pending", "unreadable"), 0)
+    counts["removed"] = removed
     disk_paths = {e.path for e in entries}
     fresh: list[_DiskEntry] = []
     touched = False
@@ -403,8 +416,45 @@ async def _sync(db: AsyncSession, folder: LibraryFolder) -> dict:
             lib._backfill_external_stl_thumbnails(list(set(folder_cache.values()))),
             name=f"stl-backfill-folder-{folder.id}",
         )
-    # "removed" keeps the upstream response shape; watched folders never delete rows.
-    return {"status": "success", "removed": 0, **counts}
+    await _propose_plates(db, folder.id)
+    # "removed" keeps the upstream response shape: only non-print rows are ever deleted.
+    return {"status": "success", **counts}
+
+
+# (library_file_id, sha256) already proposed: each project version is parsed once.
+# shortcut: in memory, so a restart re-checks every project once (cheap when its plates are stored).
+_plates_checked: set[tuple[int, str]] = set()
+
+
+async def _propose_plates(db: AsyncSession, folder_id: int) -> None:
+    """Propose the plates of new or changed 3MF projects, so they exist before anyone opens the file."""
+    rows = (
+        await db.execute(
+            select(LibraryFile, FarmLibraryFile)
+            .join(FarmLibraryFile, FarmLibraryFile.library_file_id == LibraryFile.id)
+            .where(
+                FarmLibraryFile.watch_folder_id == folder_id,
+                FarmLibraryFile.status == "ok",
+                LibraryFile.file_type == "3mf",
+                LibraryFile.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    for lib_file, state in rows:
+        key = (lib_file.id, state.sha256)
+        if key in _plates_checked:
+            continue
+        _plates_checked.add(key)
+        try:
+            await refresh_plates(db, lib_file, state)
+        except PlateReadError as exc:
+            logger.info("Farm sync: no plates for %s: %s", lib_file.filename, exc)
+        except Exception:
+            # Skipped from now on, so one odd project can't block the others; the rest go next scan
+            # (rollback expires the loaded rows).
+            logger.exception("Farm sync: plate proposal failed for %s", lib_file.filename)
+            await db.rollback()
+            break
 
 
 async def _remove_vanished_subfolders(
