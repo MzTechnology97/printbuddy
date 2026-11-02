@@ -259,6 +259,41 @@ class TestPrinterManager:
         mock_client.check_staleness.assert_called_once()
         assert result == mock_client.state
 
+    @pytest.mark.asyncio
+    async def test_provider_status_poll_does_not_block_event_loop(self, manager):
+        """HTTP providers (Klipper) poll in a thread: a slow printer must not stall the loop."""
+        import asyncio
+        import threading
+
+        from backend.app.services.printer_manager import PrinterInfo
+
+        release = threading.Event()
+        polls = []
+
+        def slow_poll():
+            polls.append(1)
+            release.wait(5)
+            client.state.connected = False
+            return False
+
+        client = MagicMock()
+        client.state.connected = True
+        client.check_staleness = MagicMock(side_effect=slow_poll)
+        manager._clients[1] = client
+        manager._printer_info[1] = PrinterInfo("K2", "SN", "klipper")
+
+        assert manager.is_connected(1) is True  # cached, returned at once
+        assert manager.get_status(1) is client.state
+        await asyncio.sleep(0.05)
+        assert len(polls) == 1  # one poll in flight, not one per read
+
+        release.set()
+        await manager._provider_polls[1]
+        assert manager.is_connected(1) is False
+        assert 1 in manager._provider_polls  # next background poll started
+        await manager._provider_polls[1]
+        assert manager._provider_polls == {}
+
     def test_get_status_returns_none_for_unknown(self, manager):
         """Verify get_status returns None for unknown printer."""
         result = manager.get_status(999)
