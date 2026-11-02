@@ -560,6 +560,7 @@ class MoonrakerPrinterClient:
         self._has_status_sample = False
         self._last_bed_temp: float | None = None
         self._current_print_started_at: float | None = None
+        self.webcams: list[dict[str, Any]] = []
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -693,7 +694,7 @@ class MoonrakerPrinterClient:
     def _available_cfs_objects(self, available: list[str] | None = None) -> list[str]:
         if available is None:
             available = self._available_objects()
-        wanted = ["box", "filament_rack", "filament_switch_sensor filament_sensor"]
+        wanted = ["box", "box_cfs_runtime", "filament_rack", "filament_switch_sensor filament_sensor"]
         return [name for name in wanted if name in available]
 
     def _query_cfs_status(self, available: list[str] | None = None) -> dict[str, Any]:
@@ -762,9 +763,14 @@ class MoonrakerPrinterClient:
             return False
         return self.send_gcode(macro)
 
+    def _is_k2_openhost_cfs(self) -> bool:
+        # K2 OpenHost maps tools to slots itself and has no M8200 commands.
+        cfs = self.state.raw_data.get("cfs")
+        return isinstance(cfs, dict) and cfs.get("type") == "k2_openhost_cfs"
+
     def _has_creality_cfs(self) -> bool:
         if isinstance(self.state.raw_data.get("cfs"), dict):
-            return True
+            return not self._is_k2_openhost_cfs()
         for ams_unit in self.state.raw_data.get("ams") or []:
             if isinstance(ams_unit, dict) and ams_unit.get("module_type") == "cfs":
                 return True
@@ -933,9 +939,89 @@ class MoonrakerPrinterClient:
                 normalized.append(candidate)
         return normalized
 
+    def _apply_k2_openhost_box(self, status: dict[str, Any]) -> None:
+        """Map the K2 OpenHost (Kalico) CFS: a flat ``box.slots`` list grouped by ``box.boxes`` units."""
+        box = status["box"]
+        slots: dict[int, dict[str, Any]] = {}
+        for slot in box.get("slots") or []:
+            index = _safe_int(slot.get("index")) if isinstance(slot, dict) else None
+            # External spool holder has no CFS position; Printbuddy has no vt_tray for Moonraker yet.
+            if index is not None and _creality_cfs_slot_name(index) and not slot.get("external"):
+                slots[index] = slot
+        units = [unit for unit in box.get("boxes") or [] if isinstance(unit, dict) and unit.get("online", True)]
+        if not units:
+            units = [
+                {"address": group + 1, "slots": [index for index in slots if index // 4 == group]}
+                for group in sorted({index // 4 for index in slots})
+            ]
+
+        loaded_slot = _safe_int(box.get("loaded_slot"))
+        self.state.tray_now = loaded_slot if loaded_slot in slots else 255
+        ams_units: list[dict[str, Any]] = []
+        active_slots: list[str] = []
+        for unit in units:
+            ams_id = (_safe_int(unit.get("address")) or 1) - 1
+            trays: list[dict[str, Any]] = []
+            for raw_index in unit.get("slots") or []:
+                index = _safe_int(raw_index)
+                slot = slots.get(index) if index is not None else None
+                if slot is None:
+                    continue
+                name = _creality_cfs_slot_name(index)
+                is_active = index == loaded_slot
+                if is_active:
+                    active_slots.append(name)
+                trays.append(
+                    {
+                        "id": index % 4,
+                        "slot": name,
+                        "tray_type": str(slot.get("material") or ""),
+                        "tray_sub_brands": str(slot.get("name") or ""),
+                        "tray_color": _normalize_creality_cfs_color(slot.get("color")),
+                        "remain": _safe_int(slot.get("rfid_percent")),
+                        "active": is_active,
+                        "state": 11 if slot.get("present") else 9,
+                        "tray_uuid": name,
+                        "tag_uid": "",
+                        "vendor": str(slot.get("brand") or ""),
+                    }
+                )
+            if trays:
+                ams_units.append(
+                    {
+                        "id": ams_id,
+                        "name": f"CFS T{ams_id + 1}",
+                        "humidity": _safe_int(unit.get("humidity_pct", box.get("humidity_pct"))),
+                        "temp": _safe_int(unit.get("temp_c", box.get("temp_c"))),
+                        "state": box.get("state"),
+                        "tray": trays,
+                    }
+                )
+
+        if not ams_units:
+            return
+        self.state.raw_data["ams"] = ams_units
+        self.state.raw_data["cfs"] = {
+            "type": "k2_openhost_cfs",
+            "api_version": box.get("api_version"),
+            "state": box.get("state"),
+            "loaded_slot": loaded_slot,
+            "active_slots": active_slots,
+            "print_mapping": box.get("print_mapping"),
+            "print_info": box.get("print_info"),
+            "filament_detected": box.get("filament_detected"),
+        }
+        self.state.raw_data["box"] = box
+
     def _apply_creality_cfs_box(self, status: dict[str, Any]) -> None:
         box = status.get("box") if isinstance(status, dict) else None
         if not isinstance(box, dict):
+            return
+        runtime = status.get("box_cfs_runtime")
+        if isinstance(box.get("slots"), list) or (
+            isinstance(runtime, dict) and runtime.get("firmware_family") == "k2oh"
+        ):
+            self._apply_k2_openhost_box(status)
             return
 
         filament_rack = status.get("filament_rack") if isinstance(status, dict) else None
@@ -1237,6 +1323,12 @@ class MoonrakerPrinterClient:
             # query failure should not make the saved printer appear offline;
             # the next status poll will retry and update the details.
             self.state.connected = True
+        # Printers added without the UI discovery step have no camera persisted;
+        # get_effective_camera_source() falls back to these.
+        try:
+            self.webcams = self.discover_webcams()
+        except Exception:  # noqa: BLE001 - webcams are optional
+            self.webcams = []
 
     def disconnect(self, timeout: float = 0) -> None:  # noqa: ARG002 - kept for Bambu client compatibility
         self.state.connected = False
@@ -1370,6 +1462,33 @@ class MoonrakerPrinterClient:
         response.raise_for_status()
         return response.content
 
+    def get_thumbnail(self, remote_path: str, max_size: int = 300) -> bytes | None:
+        """Return the largest slicer thumbnail (<= max_size px) Moonraker extracted for a gcode file."""
+        normalized = self._normalize_gcodes_path(remote_path)
+        metadata = self._get(f"server/files/metadata?filename={quote(normalized)}")
+        thumbnails = [
+            thumb
+            for thumb in metadata.get("thumbnails") or []
+            if isinstance(thumb, dict)
+            and thumb.get("relative_path")
+            and (_safe_int(thumb.get("width")) or 0) <= max_size
+        ]
+        if not thumbnails:
+            return None
+        best = max(thumbnails, key=lambda thumb: _safe_int(thumb.get("width")) or 0)
+        # relative_path is relative to the gcode file's own directory.
+        directory = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+        thumb_path = f"{directory}/{best['relative_path']}" if directory else str(best["relative_path"])
+        response = httpx.get(
+            urljoin(self.base_url, f"server/files/gcodes/{quote(thumb_path)}"),
+            headers=self._headers,
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.content
+
     def delete_file(self, remote_path: str, *, storage: str | None = None) -> bool:
         root = str(storage or "gcodes").strip().strip("/") or "gcodes"
         normalized = self._normalize_gcodes_path(remote_path)
@@ -1417,12 +1536,14 @@ class MoonrakerPrinterClient:
 
     def ams_load_filament(self, tray_id: int, extruder_id: int | None = None) -> bool:  # noqa: ARG002
         """Load/select a Creality CFS slot using the hardware-verified M8200 path."""
-        if _creality_cfs_slot_name(tray_id) is None:
+        if _creality_cfs_slot_name(tray_id) is None or self._is_k2_openhost_cfs():
             return False
         return self.send_gcode(f"M8200 P\nM8200 L I={int(tray_id)}\nM8200 O")
 
     def ams_unload_filament(self, tray_id: int | None = None) -> bool:
         """Unload the currently loaded Creality CFS filament using M8200."""
+        if self._is_k2_openhost_cfs():
+            return False
         if tray_id is not None and _creality_cfs_slot_name(int(tray_id)) is None:
             return False
         return self.send_gcode("M8200 P\nM8200 C\nM8200 R\nM8200 O")

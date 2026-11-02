@@ -241,6 +241,25 @@ def _prusalink_provider_camera_source(printer: Any) -> EffectiveCameraSource | N
     )
 
 
+def _moonraker_provider_camera_source(printer: Any) -> EffectiveCameraSource | None:
+    """Use the first enabled webcam the connected Moonraker client discovered."""
+    if str(getattr(printer, "provider", None) or "").strip().lower() not in MOONRAKER_CAMERA_PROVIDERS:
+        return None
+    from backend.app.services.printer_manager import printer_manager
+
+    client = printer_manager.get_client(getattr(printer, "id", None))
+    webcam = next((w for w in getattr(client, "webcams", None) or [] if w.get("enabled")), None)
+    if not webcam:
+        return None
+    return EffectiveCameraSource(
+        enabled=True,
+        url=webcam["stream_url"],
+        camera_type=webcam["camera_type"],
+        snapshot_url=webcam["snapshot_url"],
+        derived=True,
+    )
+
+
 def get_effective_camera_source(printer: Any) -> EffectiveCameraSource:
     """Return the camera source Printbuddy should use for a printer.
 
@@ -270,6 +289,10 @@ def get_effective_camera_source(printer: Any) -> EffectiveCameraSource:
     creality_webrtc_camera = _creality_webrtc_provider_camera_source(printer)
     if creality_webrtc_camera:
         return creality_webrtc_camera
+
+    moonraker_camera = _moonraker_provider_camera_source(printer)
+    if moonraker_camera:
+        return moonraker_camera
 
     if is_elegoo_sdcp_provider(getattr(printer, "provider", None)):
         derived_url = build_elegoo_sdcp_camera_url(getattr(printer, "ip_address", None))

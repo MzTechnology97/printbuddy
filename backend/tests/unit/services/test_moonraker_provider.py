@@ -688,3 +688,296 @@ def test_moonraker_print_control_commands_preserve_transport_errors(monkeypatch,
 
     with pytest.raises(RuntimeError, match="Moonraker rejected command"):
         getattr(client, method_name)()
+
+
+def _k2_openhost_slot(index, **values):
+    slot = {
+        "index": index,
+        "present": False,
+        "loaded": False,
+        "material": "",
+        "color": "",
+        "brand": "",
+        "name": "",
+        "source": "manual",
+        "rfid_code": "",
+        "rfid_active": False,
+        "rfid_percent": None,
+        "humidity_pct": 30,
+        "external": False,
+    }
+    slot.update(values)
+    return slot
+
+
+def _k2_openhost_cfs_status():
+    """Anonymized K2 OpenHost (Kalico) `box` + `box_cfs_runtime` payload."""
+    return {
+        "box": {
+            "api_version": 1,
+            "state": "PRINT",
+            "temp_c": 27,
+            "humidity_pct": 30,
+            "loaded_slot": 1,
+            "print_info": {
+                "filename": "part.gcode",
+                "tools": [{"tool": 0, "color": "#F75403", "material": "PETG", "name": "Generic PETG"}],
+            },
+            "print_mapping": {"filename": "part.gcode", "map": {"0": 1}, "active_tool": 0, "active_slot": 1},
+            "filament_detected": True,
+            # Creality-compat keys OpenHost also exposes; they must not trigger the T1..T4 parser.
+            "filament": 1,
+            "same_material": [],
+            "slots": [
+                _k2_openhost_slot(0),
+                _k2_openhost_slot(
+                    1,
+                    present=True,
+                    loaded=True,
+                    material="PETG",
+                    color="#F75403",
+                    brand="Acme",
+                    name="Acme PETG HF",
+                    source="rfid",
+                    rfid_active=True,
+                    rfid_percent=40.2,
+                ),
+                _k2_openhost_slot(
+                    2, present=True, material="PLA", color="#B1BEC6", brand="Acme", name="Acme PLA", rfid_percent=50.0
+                ),
+                _k2_openhost_slot(3),
+                _k2_openhost_slot(4, present=True, external=True, humidity_pct=None),
+            ],
+            "boxes": [
+                {"address": 1, "online": True, "temp_c": 27, "humidity_pct": 30, "slots": [0, 1, 2, 3]},
+            ],
+        },
+        "box_cfs_runtime": {"k2oh": True, "firmware_family": "k2oh", "supported": True},
+    }
+
+
+def test_moonraker_maps_k2_openhost_cfs_slots_to_ams_shape():
+    client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+
+    client._apply_creality_cfs_box(_k2_openhost_cfs_status())
+
+    ams = client.state.raw_data["ams"]
+    assert [(unit["id"], unit["name"], unit["humidity"], unit["temp"]) for unit in ams] == [(0, "CFS T1", 30, 27)]
+    trays = ams[0]["tray"]
+    assert [tray["slot"] for tray in trays] == ["T1A", "T1B", "T1C", "T1D"]  # external spool holder skipped
+    assert trays[1] == {
+        "id": 1,
+        "slot": "T1B",
+        "tray_type": "PETG",
+        "tray_sub_brands": "Acme PETG HF",
+        "tray_color": "#F75403",
+        "remain": 40,
+        "active": True,
+        "state": 11,
+        "tray_uuid": "T1B",
+        "tag_uid": "",
+        "vendor": "Acme",
+    }
+    assert trays[2]["tray_color"] == "#B1BEC6"
+    assert trays[2]["active"] is False
+    assert trays[0]["tray_type"] == "" and trays[0]["tray_color"] is None and trays[0]["state"] == 9
+    assert client.state.tray_now == 1
+    cfs = client.state.raw_data["cfs"]
+    assert cfs["type"] == "k2_openhost_cfs"
+    assert cfs["active_slots"] == ["T1B"]
+    assert cfs["print_mapping"]["map"] == {"0": 1}
+
+
+def test_moonraker_k2_openhost_without_boxes_groups_slots_by_four():
+    status = _k2_openhost_cfs_status()
+    del status["box"]["boxes"]
+    del status["box_cfs_runtime"]
+    client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+
+    client._apply_creality_cfs_box(status)
+
+    assert [unit["id"] for unit in client.state.raw_data["ams"]] == [0]
+    assert len(client.state.raw_data["ams"][0]["tray"]) == 4
+
+
+def test_moonraker_k2_openhost_progress_and_cfs_through_status_poll(monkeypatch):
+    client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+    base_status = {
+        "print_stats": {"state": "printing", "filename": "part.gcode", "print_duration": 666.0},
+        "virtual_sdcard": {"progress": 0.0066, "file_position": 467581, "file_size": 70225773},
+        "display_status": {"progress": 0.03},
+        "extruder": {"temperature": 245.0, "target": 245.0},
+        "heater_bed": {"temperature": 70.0, "target": 70.0},
+    }
+    monkeypatch.setattr(client, "_query_objects", lambda object_names: dict(base_status))
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: _k2_openhost_cfs_status())
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+
+    assert client.request_status_update() is True
+
+    # Same 0-100 scale as other Klipper printers (display_status 0.03 -> 3%).
+    assert client.state.progress == 3.0
+    assert len(client.state.raw_data["ams"][0]["tray"]) == 4
+
+
+def test_moonraker_k2_openhost_never_sends_creality_m8200(monkeypatch):
+    client = MoonrakerPrinterClient("http://k2.local:7125", printer_model="K2")
+    client._apply_creality_cfs_box(_k2_openhost_cfs_status())
+    sent: list[str] = []
+    posts: list[tuple[str, dict]] = []
+    monkeypatch.setattr(client, "send_gcode", lambda script: sent.append(script) or True)
+    monkeypatch.setattr(client, "_post", lambda path, payload: posts.append((path, payload)) or {})
+
+    assert client.ams_load_filament(2) is False
+    assert client.ams_unload_filament(1) is False
+    assert client.start_print("part.gcode", ams_mapping=[2]) is True
+    assert sent == []
+    assert posts == [("printer/print/start", {"filename": "part.gcode"})]
+
+
+def test_moonraker_connect_stores_discovered_webcams(monkeypatch):
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+
+    def fake_get(path, *, base_url=None):
+        if path == "server/info":
+            return {"klippy_state": "ready"}
+        if path == "server/webcams/list":
+            return {
+                "webcams": [
+                    {
+                        "name": "Cam",
+                        "enabled": True,
+                        "service": "mjpegstreamer",
+                        "stream_url": "/webcam/?action=stream",
+                        "snapshot_url": "/webcam/?action=snapshot",
+                    }
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "request_status_update", lambda: True)
+
+    client.connect()
+
+    assert client.webcams[0]["stream_url"] == "http://printer.local/webcam/?action=stream"
+    assert client.webcams[0]["snapshot_url"] == "http://printer.local/webcam/?action=snapshot"
+
+
+def test_moonraker_connect_survives_webcam_discovery_failure(monkeypatch):
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+
+    def fake_get(path, *, base_url=None):
+        if path == "server/info":
+            return {"klippy_state": "ready"}
+        raise RuntimeError("webcams endpoint missing")
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    monkeypatch.setattr(client, "request_status_update", lambda: True)
+
+    client.connect()
+
+    assert client.state.connected is True
+    assert client.webcams == []
+
+
+def test_effective_camera_uses_moonraker_webcam_unless_manual_camera_set(monkeypatch):
+    from types import SimpleNamespace
+
+    from backend.app.services import elegoo_camera
+    from backend.app.services.printer_manager import printer_manager
+
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+    client.webcams = [
+        {
+            "name": "Cam",
+            "stream_url": "http://printer.local/webcam/?action=stream",
+            "snapshot_url": "http://printer.local/webcam/?action=snapshot",
+            "camera_type": "mjpeg",
+            "enabled": True,
+        }
+    ]
+    monkeypatch.setattr(printer_manager, "get_client", lambda printer_id: client if printer_id == 7 else None)
+    printer = SimpleNamespace(id=7, provider="klipper", external_camera_enabled=False, external_camera_url=None)
+
+    source = elegoo_camera.get_effective_camera_source(printer)
+    assert (source.enabled, source.url, source.snapshot_url, source.derived) == (
+        True,
+        "http://printer.local/webcam/?action=stream",
+        "http://printer.local/webcam/?action=snapshot",
+        True,
+    )
+
+    printer.external_camera_enabled = True
+    printer.external_camera_url = "http://camera.local/stream"
+    assert elegoo_camera.get_effective_camera_source(printer).url == "http://camera.local/stream"
+
+    unconnected = SimpleNamespace(id=8, provider="klipper", external_camera_enabled=False, external_camera_url=None)
+    assert elegoo_camera.get_effective_camera_source(unconnected).enabled is False
+
+
+def _thumbnail_metadata(prefix=".thumbs/part"):
+    return {
+        "filename": "part.gcode",
+        "thumbnails": [
+            {"width": 32, "height": 32, "size": 793, "relative_path": f"{prefix}-32x32.png"},
+            {"width": 400, "height": 400, "size": 20000, "relative_path": f"{prefix}-400x400.png"},
+            {"width": 300, "height": 300, "size": 10191, "relative_path": f"{prefix}-300x300.png"},
+            {"width": 96, "height": 96, "size": 2089, "relative_path": f"{prefix}-96x96.png"},
+        ],
+    }
+
+
+def test_moonraker_get_thumbnail_downloads_largest_up_to_300px(monkeypatch):
+    import httpx
+
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+    queried: list[str] = []
+    fetched: list[str] = []
+    monkeypatch.setattr(client, "_get", lambda path: queried.append(path) or _thumbnail_metadata())
+
+    def fake_http_get(url, **kwargs):
+        fetched.append(url)
+        return httpx.Response(200, content=b"PNG", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_http_get)
+
+    assert client.get_thumbnail("/models/my part.gcode") == b"PNG"
+    assert queried == ["server/files/metadata?filename=models/my%20part.gcode"]
+    # relative_path is relative to the gcode's directory.
+    assert fetched == ["http://printer.local:7125/server/files/gcodes/models/.thumbs/part-300x300.png"]
+
+
+def test_moonraker_get_thumbnail_returns_none_without_thumbnails(monkeypatch):
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+    monkeypatch.setattr(client, "_get", lambda path: {"filename": "part.gcode", "thumbnails": []})
+
+    assert client.get_thumbnail("part.gcode") is None
+
+
+async def test_provider_file_thumbnail_is_cached_and_404s_without_image():
+    from fastapi import HTTPException
+
+    from backend.app.api.routes import printers as printer_routes
+
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_thumbnail(self, path):
+            calls.append(path)
+            return b"PNG" if path == "part.gcode" else None
+
+    printer_routes._provider_thumb_cache.clear()
+    assert await printer_routes._provider_file_thumbnail(1, FakeClient(), "part.gcode") == b"PNG"
+    assert await printer_routes._provider_file_thumbnail(1, FakeClient(), "part.gcode") == b"PNG"
+    for _ in range(2):
+        with pytest.raises(HTTPException) as exc:
+            await printer_routes._provider_file_thumbnail(1, FakeClient(), "plain.gcode")
+        assert exc.value.status_code == 404
+    assert calls == ["part.gcode", "plain.gcode"]
+
+    with pytest.raises(HTTPException) as exc:
+        await printer_routes._provider_file_thumbnail(1, object(), "part.gcode")
+    assert exc.value.status_code == 404
+    printer_routes._provider_thumb_cache.clear()

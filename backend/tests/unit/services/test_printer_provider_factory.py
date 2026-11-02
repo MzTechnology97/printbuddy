@@ -552,6 +552,7 @@ def test_moonraker_connect_tries_7125_when_fluidd_ui_url_is_pasted(monkeypatch):
         "http://neptune.local:7125/server/info",
         "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
         "http://neptune.local:7125/printer/objects/list",
+        "http://neptune.local:7125/server/webcams/list",
     ]
     assert client.base_url == "http://neptune.local:7125/"
     assert client.state.state == "IDLE"
@@ -580,6 +581,7 @@ def test_moonraker_connect_tries_no_port_proxy_when_7125_fails(monkeypatch):
         "http://neptune.local/server/info",
         "http://neptune.local/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
         "http://neptune.local/printer/objects/list",
+        "http://neptune.local/server/webcams/list",
     ]
     assert client.base_url == "http://neptune.local/"
     assert client.state.state == "IDLE"
@@ -770,6 +772,7 @@ def test_moonraker_connect_fetches_status_and_check_staleness_keeps_connected(mo
         "http://neptune.local:7125/server/info",
         "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
         "http://neptune.local:7125/printer/objects/list",
+        "http://neptune.local:7125/server/webcams/list",
         "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
         "http://neptune.local:7125/printer/objects/list",
     ]

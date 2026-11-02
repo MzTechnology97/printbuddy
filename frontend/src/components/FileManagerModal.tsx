@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
@@ -253,6 +253,20 @@ function formatStorageSize(bytes: number): string {
   return `${mb.toFixed(0)} MB`;
 }
 
+function GcodeThumbnail({ src, fallback }: { src: string; fallback: ReactNode }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <>{fallback}</>;
+  return (
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      className="w-10 h-10 flex-shrink-0 rounded object-cover bg-bambu-dark-tertiary"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function getFileIcon(filename: string, isDirectory: boolean) {
   if (isDirectory) return Folder;
 
@@ -307,6 +321,7 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
   const [elegooPrintPlatformType, setElegooPrintPlatformType] = useState<ElegooPrintPlatformType>(0);
   const isPrusaPrinter = printerProvider === 'prusalink' || printerProvider === 'prusaconnect';
   const isPrusaLinkPrinter = printerProvider === 'prusalink';
+  const isMoonrakerPrinter = printerProvider === 'klipper' || printerProvider === 'mainsail' || printerProvider === 'fluidd';
   const isElegooSDCPPrinter = isElegooCc1Printer(printerProvider, printerModel);
 
   // Close on Escape key
@@ -826,11 +841,23 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
                             )}
                           </button>
                         ) : null}
-                        <FileIcon
-                          className={`w-5 h-5 flex-shrink-0 ${
-                            file.is_directory ? 'text-bambu-green' : 'text-bambu-gray'
-                          }`}
-                        />
+                        {(() => {
+                          const icon = (
+                            <FileIcon
+                              className={`w-5 h-5 flex-shrink-0 ${
+                                file.is_directory ? 'text-bambu-green' : 'text-bambu-gray'
+                              }`}
+                            />
+                          );
+                          return isMoonrakerPrinter && lowerName.endsWith('.gcode') ? (
+                            <GcodeThumbnail
+                              src={api.getPrinterFileThumbnail(printerId, file.path, file.mtime)}
+                              fallback={icon}
+                            />
+                          ) : (
+                            icon
+                          );
+                        })()}
                         <span className="flex-1 text-white truncate">{file.name}</span>
                         {canPreview && (
                           <button
