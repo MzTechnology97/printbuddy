@@ -11,7 +11,6 @@ import asyncio
 import hashlib
 import logging
 import uuid
-from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +21,7 @@ from backend.app.core.config import settings as app_settings
 from backend.app.farm.detect import SLICEABLE, SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import library as nas_library
+from backend.app.farm.nas.access import library_path
 from backend.app.farm.nas.cache import ensure_local
 from backend.app.models.library import LibraryFile
 from backend.app.schemas.slicer import SliceResponse
@@ -64,7 +64,7 @@ async def slice_embedded(
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source."""
     slicer = resolve_slicer(state)
     await ensure_local(db, lib_file)  # NAS projects are fetched into the cache now, on use
-    src = Path(lib_file.file_path)
+    src = library_path(lib_file.file_path)
     raw = await asyncio.to_thread(src.read_bytes)
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
     source_sha = state.sha256

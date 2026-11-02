@@ -12,9 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, TypeVar
 
+from backend.app.core.config import settings as app_settings
 from backend.app.farm.nas.remote import Remote, with_retry
 
 T = TypeVar("T")
+
+
+def library_path(path: str | Path) -> Path:
+    """Absolute path of a ``LibraryFile.file_path``.
+
+    An upstream startup migration strips the data dir from every library path under it,
+    so NAS rows (cached under ``<data>/farm_nas/cache``) come back relative after a restart.
+    """
+    p = Path(path)
+    return p if p.is_absolute() else Path(app_settings.base_dir) / p
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +38,7 @@ class Active:
     def parts(self, path: str | Path) -> tuple[str, ...] | None:
         """Share path of a library path under the cache root, else None (not a NAS file)."""
         try:
-            rel = Path(path).relative_to(self.cache_root)
+            rel = library_path(path).relative_to(self.cache_root)
         except ValueError:
             return None
         return self.base + rel.parts
@@ -55,6 +66,6 @@ def read_file(path: str | Path, fn: Callable[[BinaryIO], T]) -> T:
     active = _active
     parts = active.parts(path) if active else None
     if parts is None:
-        with open(path, "rb") as fh:
+        with open(library_path(path), "rb") as fh:
             return fn(fh)
     return with_retry(active.remote.read, parts, fn)
