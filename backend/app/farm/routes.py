@@ -14,6 +14,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.library_sync import sync_external_folder
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+from backend.app.farm.plates.routes import router as plates_router
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 router = APIRouter(prefix="/farm", tags=["farm"])
@@ -182,3 +183,6 @@ async def slice_farm_file(library_file_id: int, body: FarmSliceRequest, db: Asyn
         kind="library_file", source_id=library_file_id, source_name=lib_file.filename, run=_run
     )
     return {"job_id": job.id, "status": job.status, "status_url": f"/api/v1/slice-jobs/{job.id}"}
+
+
+router.include_router(plates_router)
