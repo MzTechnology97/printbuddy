@@ -90,6 +90,9 @@ describe('PlatesPanel', () => {
     expect(top).toHaveValue('5');
     expect(screen.getByText('proposed')).toBeInTheDocument();
     expect(screen.getByText(/3h 20m · 151 g/)).toBeInTheDocument();
+    // The plate preview comes from the 3MF and opens the 3D viewer.
+    const preview = screen.getByRole('button', { name: 'Open in the 3D viewer Plate 1' });
+    expect(preview.querySelector('img')?.getAttribute('src')).toContain('/library/files/1/plate-thumbnail/1');
 
     await user.selectOptions(screen.getByLabelText('Shape Trurffle_sotto (1) (1)'), 'Tartufo sotto');
     await user.click(screen.getByRole('button', { name: 'Confirm plate' }));
