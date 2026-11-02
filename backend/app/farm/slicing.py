@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import json
 import logging
 import uuid
+import zipfile
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.routes import library as lib
 from backend.app.api.routes.settings import get_setting
 from backend.app.core.config import settings as app_settings
-from backend.app.farm.detect import SLICEABLE, SLICER_ORCA
+from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import library as nas_library
 from backend.app.farm.nas.access import library_path
@@ -40,6 +43,41 @@ async def sidecar_url(db: AsyncSession, slicer: str) -> str:
     if slicer == SLICER_ORCA:
         return ((await get_setting(db, "orcaslicer_api_url")) or app_settings.slicer_api_url).strip()
     return ((await get_setting(db, "bambu_studio_api_url")) or app_settings.bambu_studio_api_url).strip()
+
+
+def fix_printer_inherits(model_bytes: bytes) -> bytes:
+    """Point the printer entry of ``inherits_group`` (the last one) back at the project's own printer.
+
+    Re-slicing a project without external presets, the slicer CLI takes that entry as the printer's
+    system name and refuses unless it is in ``print_compatible_printers`` ("The selected printer is
+    not compatible with the process preset in the 3mf"); the GUI doesn't check it. Some OrcaSlicer
+    betas write a filament there, and a user printer may name its system parent while the list holds
+    the user printer. When the project's printer is in the list, an empty entry ("the printer preset
+    itself") makes the CLI accept the pair it was saved with. Only the bytes sent to the slicer change.
+    """
+    with zipfile.ZipFile(io.BytesIO(model_bytes)) as zin:
+        try:
+            cfg = json.loads(zin.read(PROJECT_SETTINGS_ENTRY))
+        except (KeyError, ValueError):
+            return model_bytes
+        group, compatible = cfg.get("inherits_group"), cfg.get("print_compatible_printers")
+        if not (
+            isinstance(group, list)
+            and group
+            and group[-1]
+            and isinstance(compatible, list)
+            and cfg.get("printer_settings_id") in compatible
+            and group[-1] not in compatible
+        ):
+            return model_bytes
+        logger.info("Farm slice: printer inherits %r replaced by the project's printer for the CLI", group[-1])
+        group[-1] = ""
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                data = json.dumps(cfg, indent=4) if info.filename == PROJECT_SETTINGS_ENTRY else zin.read(info.filename)
+                zout.writestr(info, data)
+    return out.getvalue()
 
 
 def resolve_slicer(state: FarmLibraryFile) -> str:
@@ -68,7 +106,7 @@ async def slice_embedded(
     raw = await asyncio.to_thread(src.read_bytes)
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
     source_sha = state.sha256
-    model_bytes = lib._sanitize_project_settings_sentinels(raw)
+    model_bytes = await asyncio.to_thread(fix_printer_inherits, lib._sanitize_project_settings_sentinels(raw))
 
     progress_request_id = on_progress = None
     if job_id is not None:
