@@ -62,9 +62,10 @@ async def slice_embedded(
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source."""
     slicer = resolve_slicer(state)
     src = Path(lib_file.file_path)
-    model_bytes = lib._sanitize_project_settings_sentinels(await asyncio.to_thread(src.read_bytes))
-    # Hash of the bytes actually sliced: tells later whether the output is stale.
-    source_sha = hashlib.sha256(model_bytes).hexdigest()
+    raw = await asyncio.to_thread(src.read_bytes)
+    # Same hash as FarmLibraryFile.sha256: tells later whether the output is stale.
+    source_sha = hashlib.sha256(raw).hexdigest()
+    model_bytes = lib._sanitize_project_settings_sentinels(raw)
 
     progress_request_id = on_progress = None
     if job_id is not None:
