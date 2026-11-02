@@ -969,6 +969,8 @@ class MoonrakerPrinterClient:
                     continue
                 name = _creality_cfs_slot_name(index)
                 is_active = index == loaded_slot
+                # -1 = unknown level, as on Bambu; AMSTray.remain must be an int.
+                remain = _safe_int(slot.get("rfid_percent"))
                 if is_active:
                     active_slots.append(name)
                 trays.append(
@@ -978,7 +980,7 @@ class MoonrakerPrinterClient:
                         "tray_type": str(slot.get("material") or ""),
                         "tray_sub_brands": str(slot.get("name") or ""),
                         "tray_color": _normalize_creality_cfs_color(slot.get("color")),
-                        "remain": _safe_int(slot.get("rfid_percent")),
+                        "remain": -1 if remain is None else remain,
                         "active": is_active,
                         "state": 11 if slot.get("present") else 9,
                         "tray_uuid": name,
