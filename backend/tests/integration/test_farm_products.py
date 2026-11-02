@@ -10,6 +10,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from backend.app.core.auth import generate_api_key
+from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.products.models import FarmProduct, FarmProductPart
 from backend.app.models.api_key import APIKey
 from backend.app.models.print_queue import PrintQueueItem
@@ -76,6 +77,30 @@ class TestProducts:
             {"component_code": "C-0001", "name": "Base X", "quantity": 1, "plates": []},
             {"component_code": "C-0002", "name": "Gancio", "quantity": 2, "plates": []},
         ]
+
+    @pytest.mark.asyncio
+    async def test_parts_list_confirmed_plates(self, async_client, db_session):
+        base, hook = await component(async_client, "Base X"), await component(async_client, "Gancio")
+        await product(async_client, name="X", parts=[{"component_code": base}, {"component_code": hook, "quantity": 2}])
+        # A mixed plate (4 bases + 6 hooks) and a plate still to confirm.
+        mixed = FarmPlate(
+            library_file_id=42, plate_index=1, printer_model="P1S", materials=["PETG"], status="confirmed"
+        )
+        mixed.yields = [
+            FarmPlateYield(object_name="Base", quantity=4, component_code=base),
+            FarmPlateYield(object_name="Hook", quantity=6, component_code=hook),
+        ]
+        draft = FarmPlate(library_file_id=43, plate_index=1, printer_model="P1S", materials=["PLA"])
+        draft.yields = [FarmPlateYield(object_name="Hook", quantity=9, component_code=hook)]
+        db_session.add_all([mixed, draft])
+        await db_session.commit()
+
+        [p] = await products(async_client)
+        plates = {part["component_code"]: part["plates"] for part in p["parts"]}
+        assert plates[base] == [
+            {"library_file_id": 42, "plate": 1, "printer_model": "P1S", "material": "PETG", "yield": 4}
+        ]
+        assert [x["yield"] for x in plates[hook]] == [6]
 
     @pytest.mark.asyncio
     async def test_component_shared_by_two_products(self, async_client):

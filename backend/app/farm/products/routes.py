@@ -23,6 +23,7 @@ from backend.app.core.auth import (
 )
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
+from backend.app.farm.plates.service import plates_by_component
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
 from backend.app.models.archive import PrintArchive
 from backend.app.models.print_queue import PrintQueueItem
@@ -115,6 +116,7 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
     parts_by_product: dict[int, list[FarmProductPart]] = {}
     for part in (await db.execute(select(FarmProductPart).order_by(FarmProductPart.sort_order))).scalars():
         parts_by_product.setdefault(part.project_id, []).append(part)
+    plates = await plates_by_component(db, [c.code for c in components.values()])
 
     products = []
     for product, project in rows:
@@ -123,8 +125,8 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "component_code": components[p.component_id].code,
                 "name": components[p.component_id].name,
                 "quantity": p.quantity,
-                # Filled by the plates module (file × printer model × material → yield per component).
-                "plates": [],
+                # Confirmed plates (file × printer model × material) and their yield of this component.
+                "plates": plates.get(components[p.component_id].code, []),
             }
             for p in parts_by_product.get(product.project_id, [])
         ]
