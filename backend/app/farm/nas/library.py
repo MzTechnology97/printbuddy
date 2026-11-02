@@ -135,28 +135,35 @@ def _unique(name: str, taken: set[str]) -> str:
     return f"{stem} ({n}){ext}"
 
 
-def _publish(active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes) -> RemoteEntry:
-    """Write a new file on the NAS without ever replacing one: temp dot name, then rename without overwrite."""
+def _publish(
+    active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes, overwrite: bool = False
+) -> RemoteEntry:
+    """Write a file on the NAS: temp dot name, then rename. Without ``overwrite`` a taken name gets a
+    " (2)" suffix and nothing is replaced; with it, the file of that name is replaced."""
     remote = active.remote
     with_retry(remote.makedirs, out_dir)
-    final = _unique(check_name(name), {e.name for e in with_retry(remote.scandir, out_dir)})
+    final = check_name(name)
+    if not overwrite:
+        final = _unique(final, {e.name for e in with_retry(remote.scandir, out_dir)})
     tmp = out_dir + (f".{final}.part",)  # dot names are skipped by the scan
     with_retry(remote.write, tmp, data)
-    with_retry(remote.rename, tmp, out_dir + (final,))
+    with_retry(remote.replace if overwrite else remote.rename, tmp, out_dir + (final,))
     return next(e for e in with_retry(remote.scandir, out_dir) if e.name == final)
 
 
 async def _store(
-    db: AsyncSession, active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes
+    db: AsyncSession, active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes, overwrite: bool = False
 ) -> tuple[RemoteEntry, Path]:
-    """Write a new file on the NAS and keep its cache copy; returns the NAS entry and the library path."""
-    entry = await asyncio.to_thread(_publish, active, out_dir, name, data)
+    """Write a file on the NAS and keep its cache copy; returns the NAS entry and the library path."""
+    entry = await asyncio.to_thread(_publish, active, out_dir, name, data, overwrite)
     path = active.cache_root.joinpath(*out_dir[len(active.base) :], entry.name)
 
     def keep_copy() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        os.utime(path, (time.time(), entry.mtime))  # NAS mtime: the cache sees it as current
+        tmp = path.with_name(f".{path.name}.part")
+        tmp.write_bytes(data)
+        os.utime(tmp, (time.time(), entry.mtime))  # NAS mtime: the cache sees it as current
+        os.replace(tmp, path)  # a print starting meanwhile never reads half a file
 
     await asyncio.to_thread(keep_copy)
     limit = (await service.load(db)).cache_mb * 1024 * 1024
@@ -172,21 +179,33 @@ def _bytes_analysis(entry: _DiskEntry, data: bytes) -> _Analysis:
 
 
 async def _track(db: AsyncSession, lib_file: LibraryFile, entry: _DiskEntry, analysis: _Analysis) -> None:
-    state = FarmLibraryFile(
-        watch_folder_id=await service.nas_folder_id(db), library_file_id=lib_file.id, path="", mtime=0, size=0
-    )
+    """The farm state of a file just written (updated in place when the row already had one)."""
+    state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == lib_file.id))
+    if state is None:
+        state = FarmLibraryFile(
+            watch_folder_id=await service.nas_folder_id(db), library_file_id=lib_file.id, path="", mtime=0, size=0
+        )
+        db.add(state)
     _apply_detection(state, entry, analysis)
-    db.add(state)
 
 
-async def save_sliced(db: AsyncSession, lib_file: LibraryFile, filename: str, data: bytes) -> SavedOutput | None:
-    """Store a slicing output of a NAS project on the NAS (``<project dir>/Printbuddy``) and keep
-    the local copy in the cache. None when the project isn't on the NAS."""
+async def save_sliced(
+    db: AsyncSession, lib_file: LibraryFile, filename: str, data: bytes, replaces: LibraryFile | None = None
+) -> SavedOutput | None:
+    """Store a slicing output of a NAS project on the NAS and keep the local copy in the cache.
+
+    A first output goes to ``<project dir>/Printbuddy/<filename>``; a new slice of the same plate
+    (``replaces``) is written over the previous output's file. None when the project isn't on the NAS.
+    """
     active = await service.refresh_access(db)
     src = active.parts(lib_file.file_path) if active else None
     if src is None:
         return None
-    entry, path = await _store(db, active, src[:-1] + (OUTPUT_DIR,), filename, data)
+    previous = active.parts(replaces.file_path) if replaces is not None and replaces.is_external else None
+    target = previous or src[:-1] + (OUTPUT_DIR, filename)
+    entry, path = await _store(db, active, target[:-1], target[-1], data, overwrite=True)
+    if replaces is not None and previous is not None:
+        return SavedOutput(path, replaces.folder_id, entry.name, entry.mtime, entry.size)
     folder = await db.scalar(
         select(LibraryFolder).where(
             LibraryFolder.parent_id == lib_file.folder_id, LibraryFolder.external_path == str(path.parent)

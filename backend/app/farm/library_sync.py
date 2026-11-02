@@ -307,6 +307,7 @@ async def _sync(
     disk_paths = {e.path for e in entries}
     fresh: list[_DiskEntry] = []
     touched = False
+    changed_projects: list[int] = []  # 3MF projects saved again: their outputs get re-sliced
 
     for entry in entries:
         settled = now - entry.mtime >= SETTLE_SECONDS
@@ -350,6 +351,8 @@ async def _sync(
         lib_file.thumbnail_path = analysis.thumbnail_path
         lib_file.file_metadata = analysis.metadata
         touched = True
+        if entry.file_type == "3mf":
+            changed_projects.append(lib_file.id)
 
     # Analyse new paths first: their hashes decide which missing files were moved.
     candidates: defaultdict[str, list[tuple[_DiskEntry, _Analysis]]] = defaultdict(list)
@@ -432,6 +435,13 @@ async def _sync(
             name=f"stl-backfill-folder-{folder.id}",
         )
     await _propose_plates(db, folder.id)
+    if changed_projects:
+        from backend.app.farm import reslice  # imports slicing, which imports this module
+
+        try:
+            await reslice.schedule(db, changed_projects)
+        except Exception:  # the scan itself succeeded
+            logger.exception("Farm sync: auto re-slice could not be scheduled")
     # "removed" keeps the upstream response shape: only non-print rows are ever deleted.
     return {"status": "success", **counts}
 

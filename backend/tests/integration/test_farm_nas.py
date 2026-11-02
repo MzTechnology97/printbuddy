@@ -70,6 +70,9 @@ class FakeRemote:
             raise FileExistsError(target.name)  # like SMB: never replaces
         self._path("rename", src).rename(target)
 
+    def replace(self, src, dst):
+        os.replace(self._path("replace", src), self._path("replace", dst))
+
     def close(self):
         pass
 
@@ -320,48 +323,120 @@ class TestNasCache:
         )
 
 
+@pytest.fixture
+def sidecar(monkeypatch, tmp_path):
+    """Fake slicer: every call returns a new, distinct output."""
+    from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+    calls = []
+
+    async def fake_slice(self, **kwargs):
+        calls.append(kwargs)
+        out = make_3mf(tmp_path / "out" / f"{len(calls)}.gcode.3mf", BAMBU, body=f"<!-- slice {len(calls)} -->")
+        return SliceResult(
+            content=out.read_bytes(), print_time_seconds=60 * len(calls), filament_used_g=1.0, filament_used_mm=10.0
+        )
+
+    monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+    return calls
+
+
+async def slice_now(db_session, file_id, plate=None):
+    from backend.app.farm.slicing import slice_embedded
+
+    lib_file = await db_session.get(LibraryFile, file_id)
+    state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == file_id))
+    await db_session.refresh(state)
+    return await slice_embedded(db_session, lib_file=lib_file, state=state, plate=plate)
+
+
 @pytest.mark.integration
 class TestNasSlicing:
-    async def test_output_is_written_next_to_the_project_without_replacing(
-        self, async_client, db_session, share, tmp_path, monkeypatch
+    async def test_new_slice_replaces_the_previous_output_of_the_same_plate(
+        self, async_client, db_session, share, sidecar
     ):
-        from backend.app.farm.slicing import slice_embedded
-        from backend.app.services.slicer_api import SlicerApiService, SliceResult
-
-        output = make_3mf(tmp_path / "out.gcode.3mf", BAMBU, body="<!-- sliced -->").read_bytes()
-
-        async def fake_slice(self, **kwargs):
-            return SliceResult(content=output, print_time_seconds=60, filament_used_g=1.0, filament_used_mm=10.0)
-
-        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
         await configure(async_client)
         await sync(async_client)
         box_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
-        # A file with the same name is already there: it must be kept as it is.
         out_dir = share / SUB / "Box" / "Printbuddy"
-        theirs = make_3mf(out_dir / "box.gcode.3mf", BAMBU, body="<!-- user copy -->").read_bytes()
 
-        lib_file = await db_session.get(LibraryFile, box_id)
-        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == box_id))
-        response = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1)
+        first = await slice_now(db_session, box_id)
+        assert first.name == "box.gcode.3mf"
+        v1 = (out_dir / "box.gcode.3mf").read_bytes()
 
-        assert (out_dir / "box (2).gcode.3mf").read_bytes() == output
-        assert (out_dir / "box.gcode.3mf").read_bytes() == theirs
-        assert sorted(p.name for p in out_dir.iterdir()) == ["box (2).gcode.3mf", "box.gcode.3mf"]  # no temp left
-        assert not any(op == "write" and parts[-1] == "box.gcode.3mf" for op, parts in FakeRemote.calls)
-        out = await db_session.get(LibraryFile, response.library_file_id)
-        assert (out.filename, out.is_external) == ("box (2).gcode.3mf", True)
-        assert out.file_metadata["sliced_from_library_file_id"] == box_id
-        assert Path(out.file_path).read_bytes() == output  # the local file is the cache copy
+        # Sliced again (same plate: "no plate" is plate 1): same row, same file, new content.
+        second = await slice_now(db_session, box_id, plate=1)
+        assert second.library_file_id == first.library_file_id
+        assert sorted(p.name for p in out_dir.iterdir()) == ["box.gcode.3mf"]  # replaced, no copy or temp left
+        assert (out_dir / "box.gcode.3mf").read_bytes() != v1
+        out = await db_session.get(LibraryFile, first.library_file_id)
+        await db_session.refresh(out)
+        assert Path(out.file_path).read_bytes() == (out_dir / "box.gcode.3mf").read_bytes()  # cache copy
+        assert out.file_metadata["print_time_seconds"] == 120
 
-        # The next scan sees the output as already known (only the user's file is new).
+        # Another plate is another output.
+        third = await slice_now(db_session, box_id, plate=2)
+        assert third.library_file_id != first.library_file_id
+        assert sorted(p.name for p in out_dir.iterdir()) == ["box - plate 2.gcode.3mf", "box.gcode.3mf"]
+
+        # The next scan sees the outputs as known; evicted from the cache they come back from the NAS.
         result = await sync(async_client)
-        assert (result["added"], result["updated"], result["relinked"]) == (1, 0, 0)
-
-        # Evicted from the cache: fetched back from the NAS, never sliced again.
+        assert (result["added"], result["updated"], result["relinked"]) == (0, 0, 0)
         os.remove(out.file_path)
         assert await cache.ensure_local(db_session, out)
-        assert Path(out.file_path).read_bytes() == output
+        assert Path(out.file_path).read_bytes() == (out_dir / "box.gcode.3mf").read_bytes()
+
+    async def test_plates_find_their_nas_output(self, async_client, db_session, share, sidecar):
+        await configure(async_client)
+        await sync(async_client)
+        hook_id = (await files_by_name(async_client))["hook.3mf"]["library_file_id"]
+        out = await slice_now(db_session, hook_id)  # the default plate, as the slice dialog sends it
+
+        plates = (await async_client.get(f"/api/v1/farm/library/files/{hook_id}/plates")).json()
+        assert [(p["plate_index"], p["sliced_file_id"]) for p in plates] == [(1, out.library_file_id), (2, None)]
+
+    async def test_project_saved_again_is_resliced_automatically(self, async_client, db_session, share, sidecar):
+        import asyncio
+
+        from backend.app.farm import reslice
+        from backend.app.services.slice_dispatch import slice_dispatch
+
+        reslice._running.clear()
+        await configure(async_client)
+        await sync(async_client)
+        hook_id = (await files_by_name(async_client))["hook.3mf"]["library_file_id"]
+        out = await slice_now(db_session, hook_id)
+        before = (share / SUB / "Hook" / "Printbuddy" / "hook.gcode.3mf").read_bytes()
+
+        # Saved again from the PC under the same name, with different settings.
+        changed = {1: [("Hook", 1)] * 6 + [("Base", 2)], 2: TWO_PLATES[2]}
+        make_project(share / SUB / "Hook" / "hook.3mf", changed, printer_model="Bambu Lab X1 Carbon")
+        age(share / SUB / "Hook" / "hook.3mf", 120)
+        assert (await sync(async_client))["updated"] == 1
+
+        for _ in range(200):  # the re-slice runs as a background slice job
+            jobs = [j for j in slice_dispatch._jobs.values() if j.source_id == hook_id]
+            if jobs and all(j.status in ("completed", "failed") for j in jobs):
+                break
+            await asyncio.sleep(0.05)
+        assert [j.status for j in jobs] == ["completed"]
+        assert len(sidecar) == 2  # the first slice and the automatic one
+
+        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == hook_id))
+        await db_session.refresh(state)
+        resliced = await db_session.get(LibraryFile, out.library_file_id)  # same row: queued prints follow
+        await db_session.refresh(resliced)
+        assert resliced.file_metadata["sliced_from_sha256"] == state.sha256
+        assert (share / SUB / "Hook" / "Printbuddy" / "hook.gcode.3mf").read_bytes() != before
+        plates = (await async_client.get(f"/api/v1/farm/library/files/{hook_id}/plates")).json()
+        assert (plates[0]["sliced_file_id"], plates[0]["print_time_seconds"]) == (out.library_file_id, 120)
+
+        # A project without outputs is not sliced when it changes.
+        make_3mf(share / SUB / "Box" / "box.3mf", BAMBU, "Bambu Lab X1 Carbon", body="<!-- v2 -->")
+        age(share / SUB / "Box" / "box.3mf", 120)
+        assert (await sync(async_client))["updated"] == 1
+        await asyncio.sleep(0.2)
+        assert len(sidecar) == 2
 
 
 @pytest.mark.integration

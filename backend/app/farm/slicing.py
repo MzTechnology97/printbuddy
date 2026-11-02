@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import uuid
 import zipfile
 
@@ -22,6 +23,7 @@ from backend.app.api.routes import library as lib
 from backend.app.api.routes.settings import get_setting
 from backend.app.core.config import settings as app_settings
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_ORCA
+from backend.app.farm.library_sync import _drop_thumbnail
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import library as nas_library
 from backend.app.farm.nas.access import library_path
@@ -80,6 +82,34 @@ def fix_printer_inherits(model_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def plate_key(plate: int | None) -> int:
+    """``None`` (the project's default plate) and 1 are the same output; 0 is "all plates"."""
+    return 1 if plate is None else plate
+
+
+def output_name(base: str, plate: int | None) -> str:
+    key = plate_key(plate)
+    if key == 1:
+        return f"{base}.gcode.3mf"
+    return f"{base} - all plates.gcode.3mf" if key == 0 else f"{base} - plate {key}.gcode.3mf"
+
+
+async def previous_output(db: AsyncSession, project_id: int, plate: int | None) -> LibraryFile | None:
+    """The output a new slice of this project plate replaces (the latest one, if older copies exist)."""
+    key, found = plate_key(plate), None
+    rows = await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
+    for out in rows.scalars():
+        meta = out.file_metadata or {}
+        if (
+            meta.get("used_embedded_settings")
+            and "extracted_from_library_file_id" not in meta  # Klipper .gcode taken out of an output
+            and meta.get("sliced_from_library_file_id") == project_id
+            and plate_key(meta.get("sliced_plate")) == key
+        ):
+            found = out
+    return found
+
+
 def resolve_slicer(state: FarmLibraryFile) -> str:
     if state.status != "ok":
         raise HTTPException(status_code=409, detail=f"File is {state.status}, not sliceable")
@@ -135,16 +165,26 @@ async def slice_embedded(
         await service.close()
 
     base_name = lib_file.filename.removesuffix(".3mf")
+    # A new slice of the same plate replaces the previous output (same row, same file): queued
+    # prints and plates follow it, and printers get it under the same name.
+    previous = await previous_output(db, lib_file.id, plate)
     # NAS project: the output goes on the NAS next to it, the local file is only its cache copy.
     try:
-        saved = await nas_library.save_sliced(db, lib_file, f"{base_name}.gcode.3mf", result.content)
+        saved = await nas_library.save_sliced(
+            db, lib_file, output_name(base_name, plate), result.content, replaces=previous
+        )
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Cannot save the sliced file on the NAS: {exc}"[:500]) from exc
     if saved is not None:
         out_path = saved.path
     else:
-        out_path = lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
-        out_path.write_bytes(result.content)
+        reuse = previous is not None and not previous.is_external
+        out_path = (
+            library_path(previous.file_path) if reuse else lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode.3mf"
+        )
+        tmp = out_path.with_name(f".{out_path.name}.part")
+        tmp.write_bytes(result.content)
+        os.replace(tmp, out_path)
 
     thumbnail = None
     parsed: dict = {}
@@ -174,19 +214,19 @@ async def slice_embedded(
             "sliced_with": slicer,
         }
     )
-    new_file = LibraryFile(
-        folder_id=saved.folder_id if saved else lib_file.folder_id,
-        is_external=saved is not None,
-        filename=saved.filename if saved else f"{base_name}.gcode.3mf",
-        file_path=str(out_path) if saved else lib.to_relative_path(out_path),
-        file_type="gcode",
-        file_size=len(result.content),
-        file_hash=hashlib.sha256(result.content).hexdigest(),
-        thumbnail_path=thumbnail,
-        file_metadata=metadata,
-        source_type="sliced",
-    )
-    db.add(new_file)
+    new_file = previous or LibraryFile(file_type="gcode", source_type="sliced")
+    if previous is not None:
+        _drop_thumbnail(previous.thumbnail_path)
+    else:
+        new_file.folder_id = saved.folder_id if saved else lib_file.folder_id
+        new_file.filename = saved.filename if saved else output_name(base_name, plate)
+        db.add(new_file)
+    new_file.is_external = saved is not None
+    new_file.file_path = str(out_path) if saved else lib.to_relative_path(out_path)
+    new_file.file_size = len(result.content)
+    new_file.file_hash = hashlib.sha256(result.content).hexdigest()
+    new_file.thumbnail_path = thumbnail
+    new_file.file_metadata = metadata
     if saved is not None:
         await db.flush()
         await nas_library.track_sliced(db, new_file, saved, result.content)

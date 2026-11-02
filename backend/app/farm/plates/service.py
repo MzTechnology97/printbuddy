@@ -115,20 +115,23 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
 
 
 async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | None) -> dict[int, LibraryFile]:
-    """Sliced outputs of this exact file version, by plate number."""
+    """Sliced outputs of this exact file version, by plate number.
+
+    Any folder: NAS outputs live in the project's ``Printbuddy`` subfolder. An output sliced
+    without a plate number is the project's default plate (1); "all plates" (0) is no single plate.
+    """
     rows = (
-        await db.execute(
-            LibraryFile.active()
-            .where(LibraryFile.source_type == "sliced", LibraryFile.folder_id == lib_file.folder_id)
-            .order_by(LibraryFile.id)
-        )
+        await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
     ).scalars()
     by_plate: dict[int, LibraryFile] = {}
     for out in rows:
         meta = out.file_metadata or {}
+        if "extracted_from_library_file_id" in meta:
+            continue  # a Klipper .gcode taken out of an output, not an output itself
         if meta.get("sliced_from_library_file_id") == lib_file.id and meta.get("sliced_from_sha256") == sha256:
-            if meta.get("sliced_plate"):
-                by_plate[meta["sliced_plate"]] = out  # later ids win
+            plate = 1 if meta.get("sliced_plate") is None else meta["sliced_plate"]
+            if plate:
+                by_plate[plate] = out  # later ids win
     return by_plate
 
 
