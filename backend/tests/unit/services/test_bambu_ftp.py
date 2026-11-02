@@ -1036,6 +1036,22 @@ class TestAsyncWrappers:
         assert local.read_bytes() == b"second path"
 
     @pytest.mark.asyncio
+    async def test_download_file_try_paths_stops_after_failed_transfer(self, tmp_path):
+        """A failed transfer (not a 550) ends the fan-out: other paths would fail the same way."""
+        from unittest.mock import patch
+
+        with (
+            patch.object(BambuFTPClient, "connect", return_value=True),
+            patch.object(BambuFTPClient, "disconnect"),
+            patch.object(BambuFTPClient, "download_to_file", return_value=False) as download,
+        ):
+            result = await download_file_try_paths_async(
+                "127.0.0.1", "12345678", ["/a.3mf", "/cache/a.3mf"], tmp_path / "a.3mf", printer_model="A1"
+            )
+        assert result is False
+        assert download.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_list_files_async_success(self, patch_ftp_port):
         """list_files_async returns file list."""
         server = patch_ftp_port

@@ -932,6 +932,85 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_cover_failed_ftp_transfer_is_not_retried(
+        self, async_client: AsyncClient, printer_factory, db_session
+    ):
+        """A1: the data channel fails (SSL EOF) and the download returns False.
+        One FTP attempt only, then the cached 404, instead of a 40 s fan-out."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from backend.app.api.routes.printers import _cover_404_cache, _cover_cache
+        from backend.app.services.bambu_mqtt import PrinterState
+
+        printer = await printer_factory(model="A1")
+        _cover_cache.pop(printer.id, None)
+        _cover_404_cache.pop(printer.id, None)
+
+        state = PrinterState()
+        state.connected = True
+        state.state = "RUNNING"
+        state.subtask_name = "Job_v1.gcode.3mf"
+        state.gcode_file = "Job_v1.gcode.3mf"
+
+        ftp_mock = AsyncMock(return_value=False)
+        with (
+            patch("backend.app.api.routes.printers.printer_manager") as mock_pm,
+            patch("backend.app.api.routes.printers.download_file_try_paths_async", ftp_mock),
+        ):
+            mock_pm.get_status = MagicMock(return_value=state)
+            mock_pm.is_awaiting_plate_clear = MagicMock(return_value=False)
+            r1 = await async_client.get(f"/api/v1/printers/{printer.id}/cover")
+            r2 = await async_client.get(f"/api/v1/printers/{printer.id}/cover")
+
+        assert (r1.status_code, r2.status_code) == (404, 404)
+        assert ftp_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_cover_uses_archived_3mf_without_asking_printer(
+        self, async_client: AsyncClient, printer_factory, archive_factory, db_session, tmp_path
+    ):
+        """A 3MF with the job's name in the archive (any printer) serves the cover; no FTP."""
+        import zipfile
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from backend.app.api.routes.printers import _cover_404_cache, _cover_cache
+        from backend.app.services.bambu_mqtt import PrinterState
+
+        printer = await printer_factory(model="A1")
+        other = await printer_factory(name="Other A1", model="A1")
+        _cover_cache.pop(printer.id, None)
+        _cover_404_cache.pop(printer.id, None)
+
+        threemf = tmp_path / "Job_v2.gcode.3mf"
+        with zipfile.ZipFile(threemf, "w") as zf:
+            zf.writestr("Metadata/plate_1.png", b"ARCHIVED_PNG")
+        await archive_factory(other.id, filename="Job_v2.gcode.3mf", file_path=str(threemf), with_run=False)
+        # An archive row without its file (failed download) is skipped.
+        await archive_factory(printer.id, filename="Job_v2.gcode.3mf", file_path="", with_run=False)
+
+        state = PrinterState()
+        state.connected = True
+        state.state = "RUNNING"
+        state.subtask_name = "Job_v2.gcode.3mf"
+        state.gcode_file = "Job_v2.gcode.3mf"
+
+        ftp_mock = AsyncMock(return_value=False)
+        with (
+            patch("backend.app.api.routes.printers.printer_manager") as mock_pm,
+            patch("backend.app.api.routes.printers.download_file_try_paths_async", ftp_mock),
+        ):
+            mock_pm.get_status = MagicMock(return_value=state)
+            mock_pm.is_awaiting_plate_clear = MagicMock(return_value=False)
+            response = await async_client.get(f"/api/v1/printers/{printer.id}/cover")
+
+        assert response.status_code == 200
+        assert response.content == b"ARCHIVED_PNG"
+        ftp_mock.assert_not_awaited()
+        assert threemf.exists()  # archive file is user data, never deleted
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_printer_status_omits_fila_switch_when_not_installed(
         self, async_client: AsyncClient, printer_factory, db_session
     ):

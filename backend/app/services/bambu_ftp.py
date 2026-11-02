@@ -928,8 +928,9 @@ async def download_file_try_paths_async(
             # over one connection. Only a real transport error should bubble.
             for remote_path in remote_paths:
                 try:
-                    if client.download_to_file(remote_path, local_path):
-                        return True
+                    # False is a failed transfer, not a missing file: the
+                    # other paths would fail the same way (A1 data channel).
+                    return client.download_to_file(remote_path, local_path)
                 except FileNotOnPrinterError:
                     continue
             return False
