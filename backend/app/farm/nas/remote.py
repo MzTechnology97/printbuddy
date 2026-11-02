@@ -41,6 +41,15 @@ class NasFileError(OSError):
     """The NAS refused or failed one path; not retried, the file is tried again next scan."""
 
 
+class NasBusyError(OSError):
+    """The shared session stayed busy too long; not retried (the caller tries again later)."""
+
+
+# An SMB call that takes longer than this has its connection dropped (smbprotocol itself waits forever).
+OP_TIMEOUT = 120
+LOCK_TIMEOUT = OP_TIMEOUT + 30
+
+
 def check_name(name: str) -> str:
     if not name or name in (".", "..") or _FORBIDDEN.search(name) or name != name.strip():
         raise NasPathError(f"Invalid path component: {name!r}")
@@ -113,10 +122,43 @@ class SmbRemote:
     def _unc(self, parts: tuple[str, ...]) -> str:
         return "\\".join([self._root, *(check_name(p) for p in parts)])
 
+    @contextmanager
+    def _session(self):
+        """One request at a time on the shared session, never waiting forever.
+
+        smbprotocol waits for a response with no time limit, so a request the NAS never answers
+        would hold the session (and every caller queued behind it) for good. A watchdog drops the
+        connection after ``OP_TIMEOUT``: the stuck request fails, is retried on a new connection,
+        and the session is free again. Waiting for the session itself gives up after ``LOCK_TIMEOUT``.
+        """
+        if not self._lock.acquire(timeout=LOCK_TIMEOUT):
+            raise NasBusyError(f"NAS busy: a request has held the connection for over {LOCK_TIMEOUT}s")
+        watchdog = threading.Timer(OP_TIMEOUT, self._drop, args=(f"no answer in {OP_TIMEOUT}s",))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            with self._connection_errors():
+                yield
+        finally:
+            watchdog.cancel()
+            self._lock.release()
+
+    def _drop(self, reason: str) -> None:
+        """Close the sockets without a polite logoff (it would wait on the server too): every
+        request still waiting is woken with an error, and the next one opens a new connection."""
+        if reason:
+            logger.warning("NAS: dropping the connection (%s)", reason)
+        for conn in list(self._cache.values()):
+            try:
+                conn.disconnect(False)
+            except Exception:  # pragma: no cover - best effort on a dead connection
+                logger.debug("NAS: closing a connection failed", exc_info=True)
+        self._cache.clear()
+
     @staticmethod
     @contextmanager
     def _connection_errors():
-        from smbprotocol.exceptions import SMBConnectionClosed, SMBResponseException
+        from smbprotocol.exceptions import SMBConnectionClosed, SMBException, SMBResponseException
 
         try:
             yield
@@ -125,15 +167,16 @@ class SmbRemote:
         except SMBResponseException as exc:
             # The server answered: a problem with this path (e.g. a disk I/O error), not the connection.
             raise NasFileError(str(exc)) from exc
-        except (SMBConnectionClosed, ConnectionError, TimeoutError, ValueError) as exc:
-            # smbprotocol reports a refused/failed connect as ValueError("Failed to connect ...").
+        except (SMBConnectionClosed, SMBException, ConnectionError, TimeoutError, ValueError) as exc:
+            # smbprotocol reports a refused/failed connect as ValueError("Failed to connect ...");
+            # a connection dropped by the watchdog surfaces as SMBConnectionClosed / SMBException.
             raise NasConnectionError(str(exc)) from exc
 
     def scandir(self, parts: tuple[str, ...]) -> list[RemoteEntry]:
         import smbclient
 
         entries = []
-        with self._lock, self._connection_errors():
+        with self._session():
             for e in smbclient.scandir(self._unc(parts), **self._kwargs):
                 if e.is_symlink():
                     continue  # reparse points could lead outside the folder
@@ -146,8 +189,7 @@ class SmbRemote:
         import smbclient
 
         with (
-            self._lock,
-            self._connection_errors(),
+            self._session(),
             smbclient.open_file(self._unc(parts), mode="rb", share_access="rwd", **self._kwargs) as src,
         ):
             return fn(src)
@@ -158,7 +200,7 @@ class SmbRemote:
     def makedirs(self, parts: tuple[str, ...]) -> None:
         import smbclient
 
-        with self._lock, self._connection_errors():
+        with self._session():
             smbclient.makedirs(self._unc(parts), exist_ok=True, **self._kwargs)
 
     def write(self, parts: tuple[str, ...], data: bytes) -> None:
@@ -166,8 +208,7 @@ class SmbRemote:
         import smbclient
 
         with (
-            self._lock,
-            self._connection_errors(),
+            self._session(),
             smbclient.open_file(self._unc(parts), mode="wb", **self._kwargs) as dst,
         ):
             dst.write(data)
@@ -176,17 +217,15 @@ class SmbRemote:
         """Fails if ``dst`` exists: nothing on the NAS is replaced this way."""
         import smbclient
 
-        with self._lock, self._connection_errors():
+        with self._session():
             smbclient.rename(self._unc(src), self._unc(dst), **self._kwargs)
 
     def replace(self, src: tuple[str, ...], dst: tuple[str, ...]) -> None:
         """Rename over ``dst``: only for the farm's own slicing outputs, which a new slice replaces."""
         import smbclient
 
-        with self._lock, self._connection_errors():
+        with self._session():
             smbclient.replace(self._unc(src), self._unc(dst), **self._kwargs)
 
     def close(self) -> None:
-        import smbclient
-
-        smbclient.reset_connection_cache(connection_cache=self._cache)
+        self._drop("")

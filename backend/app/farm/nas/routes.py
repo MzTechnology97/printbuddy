@@ -13,7 +13,7 @@ from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.library_sync import _file_type, get_watch, sync_external_folder
-from backend.app.farm.nas import cache, service
+from backend.app.farm.nas import access, cache, service
 from backend.app.farm.nas.remote import HOST_RE, NasPathError, list_dirs, split_path
 from backend.app.models.library import LibraryFolder
 
@@ -91,7 +91,7 @@ async def _with_remote(db: AsyncSession, body: Connection, action):
             remote.close()
 
     try:
-        return await asyncio.to_thread(run)
+        return await access.run(run)
     except NasPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

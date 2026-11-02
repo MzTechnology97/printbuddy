@@ -26,7 +26,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
 from pathlib import Path
 from stat import S_ISLNK
 
@@ -37,7 +36,7 @@ from backend.app.api.routes import library as lib
 from backend.app.core import database
 from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
-from backend.app.farm.nas.access import library_path
+from backend.app.farm.nas.access import library_path, run as access_run
 from backend.app.farm.plates.service import PlateReadError, refresh_plates
 from backend.app.models.library import LibraryFile, LibraryFolder
 
@@ -155,7 +154,8 @@ def _analyze(entry: _DiskEntry) -> _Analysis:
 async def _try_analyze(entry: _DiskEntry, analyze: Callable[[_DiskEntry], _Analysis] | None) -> _Analysis | None:
     """None when the share fails to read the file (EIO on SMB): retried next scan, never marked corrupt."""
     try:
-        return await asyncio.to_thread(analyze or _analyze, entry)
+        # SMB analysis runs in the NAS pool, so a NAS that stops answering can't starve the default one.
+        return await (access_run(analyze, entry) if analyze else asyncio.to_thread(_analyze, entry))
     except OSError as exc:
         logger.warning("Farm sync: cannot read %s, retrying next scan: %s", entry.path, exc)
         return None
@@ -218,7 +218,9 @@ async def _sync(
         raise FileNotFoundError(f"External path is not accessible: {folder.external_path}")
     now = time.time()
     on_disk = walk is None
-    entries, seen_dirs = await asyncio.to_thread(walk or partial(_walk, root, folder.external_show_hidden))
+    entries, seen_dirs = await (
+        access_run(walk) if walk else asyncio.to_thread(_walk, root, folder.external_show_hidden)
+    )
 
     # Subfolder tree of this external folder: relative dir -> folder id.
     ext_folders = (await db.execute(select(LibraryFolder).where(LibraryFolder.is_external.is_(True)))).scalars().all()
