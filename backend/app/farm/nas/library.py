@@ -25,6 +25,7 @@ from functools import partial
 from pathlib import Path
 from typing import BinaryIO
 
+from fastapi import HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,8 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import access, cache, service
 from backend.app.farm.nas.remote import RemoteEntry, check_name, with_retry
 from backend.app.models.library import LibraryFile, LibraryFolder
+from backend.app.models.user import User
+from backend.app.schemas.library import FileUploadResponse
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +146,11 @@ def _publish(active: access.Active, out_dir: tuple[str, ...], name: str, data: b
     return next(e for e in with_retry(remote.scandir, out_dir) if e.name == final)
 
 
-async def save_sliced(db: AsyncSession, lib_file: LibraryFile, filename: str, data: bytes) -> SavedOutput | None:
-    """Store a slicing output of a NAS project on the NAS (``<project dir>/Printbuddy``) and keep
-    the local copy in the cache. None when the project isn't on the NAS."""
-    active = await service.refresh_access(db)
-    src = active.parts(lib_file.file_path) if active else None
-    if src is None:
-        return None
-    out_dir = src[:-1] + (OUTPUT_DIR,)
-    entry = await asyncio.to_thread(_publish, active, out_dir, filename, data)
+async def _store(
+    db: AsyncSession, active: access.Active, out_dir: tuple[str, ...], name: str, data: bytes
+) -> tuple[RemoteEntry, Path]:
+    """Write a new file on the NAS and keep its cache copy; returns the NAS entry and the library path."""
+    entry = await asyncio.to_thread(_publish, active, out_dir, name, data)
     path = active.cache_root.joinpath(*out_dir[len(active.base) :], entry.name)
 
     def keep_copy() -> None:
@@ -162,6 +161,32 @@ async def save_sliced(db: AsyncSession, lib_file: LibraryFile, filename: str, da
     await asyncio.to_thread(keep_copy)
     limit = (await service.load(db)).cache_mb * 1024 * 1024
     await asyncio.to_thread(cache.evict, active.cache_root, limit)
+    return entry, path
+
+
+def _bytes_analysis(entry: _DiskEntry, data: bytes) -> _Analysis:
+    """What the scan would record for these bytes, so the next scan sees the file as unchanged."""
+    if entry.file_type in ("3mf", "gcode.3mf"):
+        return _inspect_zip(entry, io.BytesIO(data))
+    return _Analysis(sha256=stat_fingerprint(entry))
+
+
+async def _track(db: AsyncSession, lib_file: LibraryFile, entry: _DiskEntry, analysis: _Analysis) -> None:
+    state = FarmLibraryFile(
+        watch_folder_id=await service.nas_folder_id(db), library_file_id=lib_file.id, path="", mtime=0, size=0
+    )
+    _apply_detection(state, entry, analysis)
+    db.add(state)
+
+
+async def save_sliced(db: AsyncSession, lib_file: LibraryFile, filename: str, data: bytes) -> SavedOutput | None:
+    """Store a slicing output of a NAS project on the NAS (``<project dir>/Printbuddy``) and keep
+    the local copy in the cache. None when the project isn't on the NAS."""
+    active = await service.refresh_access(db)
+    src = active.parts(lib_file.file_path) if active else None
+    if src is None:
+        return None
+    entry, path = await _store(db, active, src[:-1] + (OUTPUT_DIR,), filename, data)
     folder = await db.scalar(
         select(LibraryFolder).where(
             LibraryFolder.parent_id == lib_file.folder_id, LibraryFolder.external_path == str(path.parent)
@@ -183,17 +208,58 @@ async def save_sliced(db: AsyncSession, lib_file: LibraryFile, filename: str, da
 async def track_sliced(db: AsyncSession, new_file: LibraryFile, saved: SavedOutput, data: bytes) -> None:
     """The farm state of a saved output, as the next scan would record it (so it is seen as unchanged)."""
     entry = _DiskEntry(str(saved.path), "", saved.filename, "gcode.3mf", saved.mtime, saved.size)
+    await _track(db, new_file, entry, await asyncio.to_thread(_bytes_analysis, entry, data))
+
+
+async def upload_if_nas(
+    db: AsyncSession, folder: LibraryFolder | None, file: UploadFile, user: User | None
+) -> FileUploadResponse | None:
+    """Upstream upload into a NAS library folder: the file goes onto the NAS (never replacing one,
+    a taken name gets a " (2)" suffix) and its cache copy into the library. None for other folders."""
+    active = await service.refresh_access(db) if folder is not None and folder.is_external else None
+    out_dir = active.parts(folder.external_path) if active and folder.external_path else None
+    if out_dir is None:
+        return None
+    filename = file.filename or ""
     try:
-        info = inspect_3mf(io.BytesIO(data))
-    except CorruptFileError:
-        info = None
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        analysis = _Analysis(sha256=zip_fingerprint(zf), info=info)
-    state = FarmLibraryFile(
-        watch_folder_id=await service.nas_folder_id(db), library_file_id=new_file.id, path="", mtime=0, size=0
+        name = check_name(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid filename") from exc
+    file_type = _file_type(Path(name))
+    if file_type is None:
+        raise HTTPException(status_code=400, detail="Only print files can be uploaded to the NAS")
+    data = await file.read()
+    lib.validate_print_file_upload(name, data)
+    try:
+        entry, path = await _store(db, active, out_dir, name, data)
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"NAS error: {exc}"[:500]) from exc
+    disk = _DiskEntry(str(path), "", entry.name, file_type, entry.mtime, entry.size)
+    analysis = await asyncio.to_thread(_bytes_analysis, disk, data)
+    lib_file = LibraryFile(
+        folder_id=folder.id,
+        is_external=True,
+        filename=entry.name,
+        file_path=str(path),
+        file_type=file_type,
+        file_size=len(data),
+        file_hash=hashlib.sha256(data).hexdigest(),
+        thumbnail_path=analysis.thumbnail_path,
+        created_by_id=user.id if user else None,
     )
-    _apply_detection(state, entry, analysis)
-    db.add(state)
+    db.add(lib_file)
+    await db.flush()
+    await _track(db, lib_file, disk, analysis)
+    await db.commit()
+    return FileUploadResponse(
+        id=lib_file.id,
+        filename=lib_file.filename,
+        file_type=lib_file.file_type,
+        file_size=lib_file.file_size,
+        thumbnail_path=lib_file.thumbnail_path,
+        duplicate_of=None,
+        metadata=None,
+    )
 
 
 async def sync(db: AsyncSession, folder: LibraryFolder) -> dict:

@@ -2,7 +2,8 @@
 
 Security rules, enforced here and nowhere else:
 - nothing on the NAS is ever deleted or replaced: the only writes are new files
-  (slicing outputs), written under a temporary dot name and renamed without overwrite;
+  (slicing outputs, library uploads), written under a temporary dot name and renamed
+  without overwrite;
 - paths are lists of plain names: no separators, no ``.``/``..``, so nothing can
   climb out of the folder a caller is scoped to;
 - the share root may hold credential files: callers list its *directories* only
