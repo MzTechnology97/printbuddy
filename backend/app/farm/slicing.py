@@ -21,6 +21,7 @@ from backend.app.api.routes.settings import get_setting
 from backend.app.core.config import settings as app_settings
 from backend.app.farm.detect import SLICEABLE, SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.nas.cache import ensure_local
 from backend.app.models.library import LibraryFile
 from backend.app.schemas.slicer import SliceResponse
 from backend.app.services.slicer_api import (
@@ -61,10 +62,11 @@ async def slice_embedded(
 ) -> SliceResponse:
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source."""
     slicer = resolve_slicer(state)
+    await ensure_local(db, lib_file)  # NAS projects are fetched into the cache now, on use
     src = Path(lib_file.file_path)
     raw = await asyncio.to_thread(src.read_bytes)
-    # Same hash as FarmLibraryFile.sha256: tells later whether the output is stale.
-    source_sha = hashlib.sha256(raw).hexdigest()
+    # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
+    source_sha = state.sha256
     model_bytes = lib._sanitize_project_settings_sentinels(raw)
 
     progress_request_id = on_progress = None

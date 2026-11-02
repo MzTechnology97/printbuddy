@@ -13,7 +13,7 @@ const STRINGS = {
   it: {
     title: 'NAS (libreria della farm)',
     intro:
-      'Printbuddy copia in sola lettura i file di stampa di una sottocartella della share e li tiene aggiornati in libreria. La radice della share non viene mai letta.',
+      'Printbuddy legge i file di stampa di una sottocartella della share direttamente via SMB, senza copiarli: la scansione legge solo elenco e intestazioni dei 3MF. Un file viene scaricato nella cache solo quando lo usi (slicing, stampa, download). La radice della share non viene mai letta.',
     host: 'Host (nome o IP)',
     share: 'Share',
     path: 'Sottocartella',
@@ -26,17 +26,19 @@ const STRINGS = {
     choose: 'Usa questa cartella',
     test: 'Prova connessione',
     save: 'Salva',
-    syncNow: 'Sincronizza ora',
+    syncNow: 'Scansiona ora',
     testOk: (d: number, f: number) => `Connessione riuscita: ${d} cartelle, ${f} file di stampa`,
     saved: 'Impostazioni NAS salvate',
-    synced: 'Sincronizzazione completata',
-    lastResult: 'Ultima copia',
+    synced: 'Scansione completata',
+    lastResult: 'Ultima scansione',
     noSubfolders: 'Nessuna sottocartella',
+    cacheMb: 'Limite della cache (MB): i file usati meno di recente vengono tolti',
+    cacheUsed: (used: string, limit: number) => `Cache: ${used} MB usati su ${limit} MB`,
   },
   en: {
     title: 'NAS (farm library)',
     intro:
-      "Printbuddy copies the print files of one share subfolder read-only and keeps them up to date in the library. The share root is never read.",
+      'Printbuddy reads the print files of one share subfolder straight over SMB, without copying them: the scan reads only the listing and 3MF headers. A file is downloaded into the cache only when you use it (slicing, printing, download). The share root is never read.',
     host: 'Host (name or IP)',
     share: 'Share',
     path: 'Subfolder',
@@ -49,12 +51,14 @@ const STRINGS = {
     choose: 'Use this folder',
     test: 'Test connection',
     save: 'Save',
-    syncNow: 'Sync now',
+    syncNow: 'Scan now',
     testOk: (d: number, f: number) => `Connected: ${d} folders, ${f} print files`,
     saved: 'NAS settings saved',
-    synced: 'Sync finished',
-    lastResult: 'Last copy',
+    synced: 'Scan finished',
+    lastResult: 'Last scan',
     noSubfolders: 'No subfolders',
+    cacheMb: 'Cache limit (MB): least recently used files are removed',
+    cacheUsed: (used: string, limit: number) => `Cache: ${used} MB used of ${limit} MB`,
   },
 };
 
@@ -68,7 +72,7 @@ export function NasSettingsCard() {
   const queryClient = useQueryClient();
   const { data } = useQuery({ queryKey: ['farm-nas'], queryFn: farmNasApi.get });
 
-  const [form, setForm] = useState({ host: '', share: '', path: '', username: '', minutes: 5 });
+  const [form, setForm] = useState({ host: '', share: '', path: '', username: '', minutes: 5, cacheMb: 4096 });
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [browser, setBrowser] = useState<{ path: string; directories: string[] } | null>(null);
@@ -81,6 +85,7 @@ export function NasSettingsCard() {
         path: data.path,
         username: data.username,
         minutes: Math.round(data.scan_interval_seconds / 60),
+        cacheMb: data.cache_mb,
       });
     }
   }, [data]);
@@ -91,6 +96,7 @@ export function NasSettingsCard() {
     path: form.path.trim(),
     username: form.username,
     scan_interval_seconds: Math.max(0, form.minutes) * 60,
+    cache_mb: Math.max(256, form.cacheMb),
     ...(password ? { password } : {}),
   });
 
@@ -216,6 +222,23 @@ export function NasSettingsCard() {
           />
         </label>
 
+        <label className="block">
+          <span className="block text-sm text-bambu-gray mb-1">{s.cacheMb}</span>
+          <input
+            type="number"
+            min={256}
+            step={256}
+            className={`${inputClass} w-32`}
+            value={form.cacheMb}
+            onChange={(e) => setForm({ ...form, cacheMb: parseInt(e.target.value, 10) || 0 })}
+          />
+          {data && (
+            <span className="block text-xs text-bambu-gray mt-1">
+              {s.cacheUsed((data.cache_used_bytes / 1024 / 1024).toFixed(0), data.cache_mb)}
+            </span>
+          )}
+        </label>
+
         <div className="flex flex-wrap gap-2">
           <Button
             variant="secondary"
@@ -264,7 +287,8 @@ export function NasSettingsCard() {
 
         {data?.last_result && (
           <p className="text-xs text-bambu-gray">
-            {s.lastResult}:{' '}
+            {s.lastResult}
+            {data.last_scan_at ? ` (${new Date(`${data.last_scan_at}Z`).toLocaleString()})` : ''}:{' '}
             {Object.entries(data.last_result)
               .map(([k, v]) => `${k}: ${v}`)
               .join(' · ')}

@@ -947,6 +947,9 @@ class PrintScheduler:
             result = await db.execute(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
             library_file = result.scalar_one_or_none()
             if library_file:
+                from backend.app.farm.nas.cache import ensure_local  # fork: NAS files are fetched on use
+
+                await ensure_local(db, library_file)
                 lib_path = Path(library_file.file_path)
                 file_path = lib_path if lib_path.is_absolute() else settings.base_dir / library_file.file_path
 
@@ -2091,6 +2094,9 @@ class PrintScheduler:
                 logger.error("Queue item %s: Library file %s not found", item.id, item.library_file_id)
                 await self._power_off_if_needed(db, item)
                 return
+            from backend.app.farm.nas.cache import ensure_local  # fork: NAS files are fetched on use
+
+            await ensure_local(db, library_file)
             # Library files store absolute paths
             lib_path = Path(library_file.file_path)
             file_path = lib_path if lib_path.is_absolute() else settings.base_dir / library_file.file_path

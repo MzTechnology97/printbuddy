@@ -933,6 +933,9 @@ class BackgroundDispatchService:
             if not self._is_sliced_file(lib_file.filename):
                 raise RuntimeError("Not a sliced file. Only .bgcode, .gcode or .gcode.3mf files can be printed.")
 
+            from backend.app.farm.nas.cache import ensure_local  # fork: NAS files are fetched on use
+
+            await ensure_local(db, lib_file)
             file_path = Path(settings.base_dir) / lib_file.file_path
             if not file_path.exists():
                 raise RuntimeError("File not found on disk")

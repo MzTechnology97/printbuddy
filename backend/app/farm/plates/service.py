@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.nas.access import read_file
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.models.library import LibraryFile, LibraryFolder
@@ -142,7 +143,7 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
     }
     if state.status == "ok" and (not plates or any(p.source_sha256 != state.sha256 for p in plates.values())):
         try:
-            parsed, nozzle = await asyncio.to_thread(parse_plates, Path(lib_file.file_path))
+            parsed, nozzle = await asyncio.to_thread(read_file, lib_file.file_path, parse_plates)
         except (ET.ParseError, zipfile.BadZipFile, KeyError, OSError) as exc:
             # Keep the stored plates: an unreadable version must not wipe confirmed ones.
             raise PlateReadError(f"Cannot read plates from {lib_file.filename}: {exc}") from exc
