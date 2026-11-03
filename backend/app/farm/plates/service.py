@@ -25,7 +25,7 @@ from backend.app.farm.plates.geometry import object_fingerprints, object_meshes,
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
-from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes, component_yield
+from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
@@ -352,30 +352,21 @@ async def plates_for(db: AsyncSession, components: list[FarmComponent]) -> dict[
     A plate of a shape serves every colour of it; a set's plate yields its complete sets. Only
     the 3MFs of the component's products count.
     """
+    from backend.app.farm.products.shapes import candidate_plates, plate_yield, product_shapes
+
     result: dict[int, list[dict]] = {c.id: [] for c in components}
-    shapes = {s for c in components for s in component_shapes(c)}
-    codes = {c.code for c in components if not component_shapes(c)}
-    if not shapes and not codes:
-        return result
-    plates = (
-        await db.execute(
-            select(FarmPlate)
-            .where(
-                FarmPlate.status == "confirmed",
-                FarmPlate.yields.any(FarmPlateYield.shape_id.in_(shapes) | FarmPlateYield.component_code.in_(codes)),
-                FarmPlate.library_file_id.notin_(await excluded_files(db)),
-            )
-            .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
-        )
-    ).scalars()
-    resolver = await PrinterModelResolver.load(db)
     files = await component_files(db)
+    plates = await candidate_plates(db, components, files)
+    if not plates:
+        return result
+    own = await product_shapes(db, {c.project_id for c in components if c.project_id is not None})
+    resolver = await PrinterModelResolver.load(db)
     for plate in plates:
         model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
         for c in components:
             if not may_print(files, c.id, plate.library_file_id):
                 continue
-            if n := component_yield(c, plate.yields):
+            if n := plate_yield(c, plate, own):
                 result[c.id].append(
                     {
                         "library_file_id": plate.library_file_id,

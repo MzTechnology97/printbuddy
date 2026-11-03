@@ -35,22 +35,17 @@ async def farm(async_client, db_session, monkeypatch):
     shape = (await async_client.post(f"{API}/shapes", json={"name": "Sopra"})).json()
     black = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Nero"})).json()
     white = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Bianco"})).json()
-    r = await async_client.post(
-        f"{API}/products", json={"name": "Tappo – Nero", "parts": [{"component_code": black["code"], "quantity": 2}]}
-    )
-    assert r.status_code == 200, r.text
-    pids = [r.json()["project_id"]]
-    # Another product sold in white too: a colour variant of its black part.
+    # Sold in white too: a colour variant of its black part.
     r = await async_client.post(
         f"{API}/products",
         json={
-            "name": "Kit tappi",
-            "parts": [{"component_code": black["code"], "quantity": 4}],
+            "name": "Tappo – Nero",
+            "parts": [{"component_code": black["code"], "quantity": 2}],
             "variants": [{"skus": ["KIT-W"], "color": "Bianco"}],
         },
     )
     assert r.status_code == 200, r.text
-    files = await product_files(db_session, [*pids, r.json()["project_id"]], 3)
+    files = await product_files(db_session, [r.json()["project_id"]], 3)
     for file_id, (model, pieces) in zip(files, [("A1", 15), ("P1S", 20), ("K1", 10)], strict=True):
         plate = FarmPlate(library_file_id=file_id, plate_index=1, printer_model=model, materials=["PLA"])
         plate.status = "confirmed"
@@ -88,8 +83,8 @@ async def test_most_urgent_first_and_best_plate_first(async_client, farm):
     unknown, black, white = body["components"]
     assert (unknown["known"], unknown["plates"]) == (False, [])
     assert (black["color"], black["color_hex"], black["shape"], black["missing"]) == ("Nero", "111111", "Sopra", 30)
-    assert [(p["name"], p["has_cover"]) for p in black["products"]] == [("Kit tappi", False), ("Tappo – Nero", False)]
-    assert [p["name"] for p in white["products"]] == ["Kit tappi"]  # through the white variant
+    assert [(p["name"], p["has_cover"]) for p in black["products"]] == [("Tappo – Nero", False)]
+    assert [p["name"] for p in white["products"]] == ["Tappo – Nero"]  # through the white variant
     assert unknown["products"] == []
     # A1 has a free printer with black PLA; P1S is free but white; K1 can't tell what it has loaded.
     assert [(o["printer_model"], o["score"], o["yield"]) for o in black["plates"]] == [
@@ -107,39 +102,39 @@ async def test_most_urgent_first_and_best_plate_first(async_client, farm):
 
 
 @pytest.mark.asyncio
-async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, farm):
-    shape = next(s for s in (await async_client.get(f"{API}/shapes")).json() if s["name"] == "Sopra")
+async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, db_session, farm):
+    pid = (await async_client.post(f"{API}/products", json={"name": "Tappo – Rosso"})).json()["project_id"]
+    shape = (await async_client.post(f"{API}/shapes", json={"name": "Sopra", "project_id": pid})).json()
+    assert shape["project_id"] == pid  # its own "Sopra": the black product's is another product's piece
     red = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Rosso"})).json()
-    r = await async_client.post(
-        f"{API}/products",
-        json={
-            "name": "Tappo – Rosso",
-            "parts": [{"component_code": red["code"], "quantity": 2}, {"component_code": farm["black"]}],
-        },
+    r = await async_client.put(
+        f"{API}/products/{pid}", json={"name": "Tappo – Rosso", "parts": [{"component_code": red["code"], "quantity": 2}]}
     )
-    pid = r.json()["project_id"]
-    folder = (await async_client.get(f"/api/v1/library/files/{farm['files'][0]}")).json()["folder_id"]
-    await async_client.put(f"{API}/products/{pid}/folders/{folder}", json={"linked": True})  # the same 3MFs
+    assert r.status_code == 200, r.text
+    [file_id] = await product_files(db_session, [pid])
+    plate = FarmPlate(library_file_id=file_id, plate_index=1, printer_model="A1", materials=["PLA"], status="confirmed")
+    plate.yields = [FarmPlateYield(object_name="sopra", quantity=8, shape_id=shape["id"])]
+    db_session.add(plate)
+    await db_session.commit()
 
     body = (await async_client.get(f"{API}/plan/products/{pid}")).json()
     rows = [(c["code"], c["name"], c["to_print"], c["missing"], len(c["plates"])) for c in body["components"]]
-    assert rows == [(red["code"], red["name"], 0, 0, 3), (farm["black"], "Sopra – Nero", 30, 30, 3)]  # product order
+    assert rows == [(red["code"], red["name"], 0, 0, 1)]
     assert body["components"][0]["color_hex"] == "d32f2f"
     assert red["code"] not in [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
+    tappo = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["name"] == "Tappo – Nero")
+    body = (await async_client.get(f"{API}/plan/products/{tappo['project_id']}")).json()
+    assert [(c["code"], c["to_print"], len(c["plates"])) for c in body["components"]] == [(farm["black"], 30, 3)]
     assert (await async_client.get(f"{API}/plan/products/9999")).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_disabled_products_leave_what_to_print(async_client, farm):
     products = {p["name"]: p for p in (await async_client.get(f"{API}/products")).json()["products"]}
-    one, kit = products["Tappo – Nero"]["project_id"], products["Kit tappi"]["project_id"]
+    one = products["Tappo – Nero"]["project_id"]
 
     r = await async_client.put(f"{API}/products/{one}/active", json={"active": False})
     assert r.json() == {"project_id": one, "disabled": True}
-    codes = [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
-    assert farm["black"] in codes  # the kit, still active, uses it too
-
-    await async_client.put(f"{API}/products/{kit}/active", json={"active": False})
     codes = [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
     assert farm["black"] not in codes
     assert farm["white"] in codes  # no product uses the white component: Seller Hub's ask stands

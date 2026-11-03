@@ -386,7 +386,7 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     other = await async_client.post(
         f"{API}/products", json={"name": "Solo DX", "parts": [{"component_code": comps[1]}]}
     )
-    assert other.status_code == 200
+    assert other.status_code == 409  # products never share a component
 
     assert (await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})).status_code == 200
     view = (await async_client.get(f"{API}/products/{pid}/view")).json()
@@ -395,7 +395,7 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     recipe = sorted((r["shape_id"], r["quantity"]) for r in view["parts"][0]["recipe"])
     assert recipe == [(shapes[0], 1), (shapes[1], 1)]
     status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
-    assert status[comps[1]] is False  # still used by "Solo DX"
+    assert status[comps[1]] is True  # it left the product, which was the only one using it
     # Two of a piece per unit: its stock counts pieces, not sets, so the set gets a new code.
     cap = (await async_client.post(f"{API}/shapes", json={"name": "Tappo"})).json()["id"]
     caps = (await async_client.post(f"{API}/components", json={"shape_id": cap, "color": "Nero"})).json()["code"]
@@ -407,19 +407,17 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     view = (await async_client.get(f"{API}/products/{two}/view")).json()
     assert view["parts"][0]["code"] != caps
     assert [(r["shape_id"], r["quantity"]) for r in view["parts"][0]["recipe"]] == [(cap, 2)]
-    # Kit parts from the product page: add, change, take out (retired when nobody else uses it).
+    # Kit parts from the product page: add, change, take out (always retired: no other product has it).
     kit = (await async_client.post(f"{API}/products", json={"name": "Kit"})).json()["project_id"]
     loose = (await async_client.post(f"{API}/components", json={"name": "Vite"})).json()["code"]
     assert (await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 4})).status_code == 200
-    assert (await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 1})).status_code == 200
+    r = await async_client.put(f"{API}/products/{kit}/parts/{comps[0]}", json={"quantity": 1})
+    assert r.status_code == 409  # the set of "Coppia": another product's
     view = (await async_client.get(f"{API}/products/{kit}/view")).json()
-    assert [(p["code"], p["quantity"]) for p in view["parts"]] == [(loose, 4), (comps[1], 1)]
-    # The DX is also in "Solo DX": taking it out of the kit keeps it.
-    assert [u["name"] for u in view["parts"][1]["used_by"]] == ["Solo DX"]
+    assert [(p["code"], p["quantity"]) for p in view["parts"]] == [(loose, 4)]
     await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 0})
-    await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 0})
     status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
-    assert (status[loose], status[comps[1]]) == (True, False)  # the DX is still in "Solo DX"
+    assert status[loose] is True
     r = await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 1})
     assert r.status_code == 409  # retired
 
@@ -632,9 +630,11 @@ async def test_two_versions_of_a_piece_merge_into_one_shape(async_client, tmp_pa
 async def test_saving_a_piece_reuses_a_shape_by_name_only_with_the_same_geometry(async_client, tmp_path):
     """Every CAD calls its object "Assemblaggio": Audi hooks and Land Rover gutters must not share a shape."""
     nas = tmp_path / "nas"
-    make_mesh_project(nas / "Audi" / "audi.3mf", {1: [("Assemblaggio", box(10, 20, 5), None)]})
-    make_mesh_project(nas / "Gutters" / "gutters.3mf", {1: [("Assemblaggio", box(30, 30, 2), None)]})
-    make_mesh_project(nas / "Audi2" / "audi-k1.3mf", {1: [("Assemblaggio", box(10, 20, 5), None)]})
+    make_mesh_project(
+        nas / "Audi" / "audi.3mf",
+        {1: [("Assemblaggio", box(10, 20, 5), None)], 2: [("Assemblaggio 1", box(5, 5, 40), None)]},
+    )
+    make_mesh_project(nas / "Gutters" / "gutters.3mf", {1: [("Assemblaggio", box(10, 20, 5), None)]})
     folder = await add_external(async_client, nas)
     await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
     await scan(async_client, folder)
@@ -642,20 +642,25 @@ async def test_saving_a_piece_reuses_a_shape_by_name_only_with_the_same_geometry
         Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
     }
 
-    async def save(name, file):
+    async def product(name, file):
         fid = (await async_client.get(f"/api/v1/library/files/{files[file]}")).json()["folder_id"]
         pid = (await async_client.post(f"{API}/products", json={"name": name})).json()["project_id"]
         await async_client.put(f"{API}/products/{pid}/folders/{fid}", json={"linked": True})
-        [piece] = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+        return pid, (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+
+    async def save(pid, piece):
         return await async_client.put(
             f"{API}/products/{pid}/pieces",
             json={"yield_ids": piece["yield_ids"], "quantity": 1, "shape_name": "Assemblaggio"},
         )
 
-    audi = await save("Audi", "audi.3mf")
-    assert audi.status_code == 200
-    gutters = await save("Gutters", "gutters.3mf")
-    assert gutters.status_code == 409  # other geometry: it needs its own name
-    assert "Assemblaggio" in gutters.json()["detail"]
-    again = await save("Audi K1", "audi-k1.3mf")
-    assert again.json()["shape_id"] == audi.json()["shape_id"]  # same geometry: the same piece
+    audi, pieces = await product("Audi", "audi.3mf")
+    first = await save(audi, pieces[0])
+    assert first.status_code == 200
+    other = await save(audi, pieces[1])
+    assert other.status_code == 409  # other geometry in the same product: it needs its own name
+    assert "Assemblaggio" in other.json()["detail"]
+    gutters, [piece] = await product("Gutters", "gutters.3mf")
+    own = await save(gutters, piece)  # another product: its own "Assemblaggio", even with the same geometry
+    assert own.status_code == 200
+    assert own.json()["shape_id"] != first.json()["shape_id"]
