@@ -412,3 +412,29 @@ async def test_job_waits_without_a_tray_of_the_component_colour(async_client, db
     assert await service.dispatch_once(db_session) == 1
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     assert (json.loads(item.ams_mapping), item.manual_start) == ([-1, -1, 2], False)
+
+
+@pytest.mark.asyncio
+async def test_completed_jobs_for_seller_hub_however_old(async_client, db_session, farm):
+    from datetime import datetime
+
+    done = await accoda(async_client, farm["code"], farm["plates"])
+    still = await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 2
+    item = await db_session.get(PrintQueueItem, (await db_session.get(FarmPrintJob, done["id"])).queue_item_id)
+    item.status, item.completed_at = "completed", datetime(2026, 1, 1, 9, 30)  # long before the 2-day window
+    await db_session.commit()
+
+    completed = (await async_client.get(f"{API}/jobs", params={"state": "completed"})).json()
+    assert [(j["id"], j["state"], j["finished_at"]) for j in completed] == [
+        (done["id"], "completed", "2026-01-01T09:30:00")
+    ]
+    later = {"state": "completed", "since": "2026-01-01T10:31:00+01:00"}  # 09:31 UTC: after it
+    assert (await async_client.get(f"{API}/jobs", params=later)).json() == []
+    earlier = {"state": "completed", "since": "2026-01-01T09:30:00Z"}
+    assert [j["id"] for j in (await async_client.get(f"{API}/jobs", params=earlier)).json()] == [done["id"]]
+
+    # Without parameters it is the same list as before, now with finished_at.
+    default = {j["id"]: j for j in (await async_client.get(f"{API}/jobs")).json()}
+    assert default[still["id"]]["finished_at"] is None
+    assert (await async_client.get(f"{API}/jobs", params={"state": "printing"})).status_code == 422
