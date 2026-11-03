@@ -108,7 +108,8 @@ async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, 
     assert shape["project_id"] == pid  # its own "Sopra": the black product's is another product's piece
     red = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Rosso"})).json()
     r = await async_client.put(
-        f"{API}/products/{pid}", json={"name": "Tappo – Rosso", "parts": [{"component_code": red["code"], "quantity": 2}]}
+        f"{API}/products/{pid}",
+        json={"name": "Tappo – Rosso", "parts": [{"component_code": red["code"], "quantity": 2}]},
     )
     assert r.status_code == 200, r.text
     [file_id] = await product_files(db_session, [pid])
@@ -120,9 +121,12 @@ async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, 
     body = (await async_client.get(f"{API}/plan/products/{pid}")).json()
     rows = [(c["code"], c["name"], c["to_print"], c["missing"], len(c["plates"])) for c in body["components"]]
     assert rows == [(red["code"], red["name"], 0, 0, 1)]
+    assert body["components"][0]["kit_quantity"] == 2  # two of them in one product
     assert body["components"][0]["color_hex"] == "d32f2f"
     assert red["code"] not in [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
-    tappo = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["name"] == "Tappo – Nero")
+    tappo = next(
+        p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["name"] == "Tappo – Nero"
+    )
     body = (await async_client.get(f"{API}/plan/products/{tappo['project_id']}")).json()
     assert [(c["code"], c["to_print"], len(c["plates"])) for c in body["components"]] == [(farm["black"], 30, 3)]
     assert (await async_client.get(f"{API}/plan/products/9999")).status_code == 404

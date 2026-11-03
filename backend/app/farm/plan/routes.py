@@ -38,22 +38,30 @@ async def get_plan(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/plan/products/{project_id}", dependencies=[_read])
 async def get_product_plan(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
-    """The parts of a product with their plates, to print it by hand whatever Seller Hub asks."""
+    """The parts of a product with their plates, to print it by hand whatever Seller Hub asks.
+
+    Each part also says how many go in one product (``kit_quantity``): stock / quantity is how many sets it makes.
+    """
     from backend.app.farm.jobs.service import queued_pieces
     from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
 
     if await db.get(FarmProduct, project_id) is None:
         raise HTTPException(404, "Not a product")
     # shortcut: the parts in the product's own colour; offer its colour variants if they are printed by hand too.
-    codes = (
-        await db.execute(
-            select(FarmComponent.code)
-            .join(FarmProductPart, FarmProductPart.component_id == FarmComponent.id)
-            .where(FarmProductPart.project_id == project_id, FarmComponent.retired_at.is_(None))
-            .order_by(FarmProductPart.sort_order)
-        )
-    ).scalars()
-    return await service.build_plan(db, queued=await queued_pieces(db), codes=list(codes))
+    quantities = dict(
+        (
+            await db.execute(
+                select(FarmComponent.code, FarmProductPart.quantity)
+                .join(FarmProductPart, FarmProductPart.component_id == FarmComponent.id)
+                .where(FarmProductPart.project_id == project_id, FarmComponent.retired_at.is_(None))
+                .order_by(FarmProductPart.sort_order)
+            )
+        ).all()
+    )
+    plan = await service.build_plan(db, queued=await queued_pieces(db), codes=list(quantities))
+    for row in plan["components"]:
+        row["kit_quantity"] = quantities.get(row["code"]) or 1
+    return plan
 
 
 @router.get("/plan/settings", dependencies=[_read])
