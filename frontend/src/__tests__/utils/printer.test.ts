@@ -132,9 +132,18 @@ describe('getPrinterImage', () => {
       expect(getPrinterImage('Creality K1')).toBe('/img/printers/creality-k1.png');
       expect(getPrinterImage('Creality K1C')).toBe('/img/printers/creality-k1c.png');
       expect(getPrinterImage('Creality K2 Plus')).toBe('/img/printers/creality-k2-plus.png');
+      expect(getPrinterImage('Creality K2 Pro')).toBe('/img/printers/creality-k2-pro.png');
       expect(getPrinterImage('Creality K10')).toBe('/img/printers/default.png');
       expect(getPrinterImage('Snapmaker U1')).toBe('/img/printers/snapmaker-u1.png');
       expect(getPrinterImage('Snapmaker U2')).toBe('/img/printers/default.png');
+    });
+
+    it('maps the short model names Klipper printers are saved with', () => {
+      expect(getPrinterImage('K1')).toBe('/img/printers/creality-k1.png');
+      expect(getPrinterImage('K2')).toBe('/img/printers/creality-k2-pro.png');
+      expect(getPrinterImage('SV08')).toBe('/img/printers/sovol-sv08.png');
+      expect(getPrinterImage('Sovol SV08')).toBe('/img/printers/sovol-sv08.png');
+      expect(getPrinterImage('Sovol Zero')).toBe('/img/printers/sovol-zero.png');
     });
 
     it('uses the Home Assistant ingress base for static printer images', () => {
