@@ -160,14 +160,15 @@ async def isolate(db: AsyncSession) -> dict:
                 }
             )
 
-    def own(comp: FarmComponent, pid: int, source: FarmComponent) -> None:
+    def own(comp: FarmComponent, pid: int, shape_id: int | None, recipe: list | None) -> None:
+        """``comp`` belongs to ``pid``, printed as that product's copies of the old shapes."""
         comp.project_id = pid
-        if source.shape_id:
-            comp.shape_id = shape_for.get((pid, source.shape_id), source.shape_id)
-        if source.recipe is not None:
+        if shape_id:
+            comp.shape_id = shape_for.get((pid, shape_id), shape_id)
+        if recipe is not None:
             comp.recipe = [
                 {"shape_id": shape_for.get((pid, r["shape_id"]), r["shape_id"]), "quantity": r["quantity"]}
-                for r in source.recipe
+                for r in recipe
             ]
 
     assigned, split, retired = 0, [], []
@@ -181,14 +182,17 @@ async def isolate(db: AsyncSession) -> dict:
                 comp.retired_at = now
                 retired.append({"code": comp.code, "name": comp.name})
             continue
-        own(comp, holders[0], comp)
+        # The old shapes, read before the kept component is moved to its product's copies: each split
+        # component maps them to its own product's copies.
+        shape_id, recipe = comp.shape_id, comp.recipe
+        own(comp, holders[0], shape_id, recipe)
         assigned += 1
         new = []
         for pid in holders[1:]:
             twin = FarmComponent(
                 code=await products._next_code(db), name=comp.name, color=comp.color, retired_at=comp.retired_at
             )
-            own(twin, pid, comp)
+            own(twin, pid, shape_id, recipe)
             db.add(twin)
             await db.flush()
             for part in parts:
