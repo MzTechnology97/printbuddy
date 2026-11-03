@@ -360,6 +360,14 @@ export const farmApi = {
       `/products/${projectId}/pieces`,
       { method: 'PUT', body: JSON.stringify(data) },
     ),
+  componentImageUrl: (code: string, colorHex?: string | null) =>
+    // the colour in the URL only refreshes the browser's copy when the component changes colour
+    withStreamToken(`/api/v1/farm/components/${code}/image${colorHex ? `?c=${colorHex}` : ''}`),
+  setPart: (projectId: number, code: string, quantity: number) =>
+    farmRequest<{ project_id: number; component_code: string; quantity: number }>(
+      `/products/${projectId}/parts/${code}`,
+      { method: 'PUT', body: JSON.stringify({ quantity }) },
+    ),
   pieceImageUrl: (yieldId: number, colorHex?: string | null) =>
     withStreamToken(`/api/v1/farm/pieces/${yieldId}/image${colorHex ? `?color=${colorHex}` : ''}`),
   linkPiece: (yieldIds: number[], shapeId: number | null) =>

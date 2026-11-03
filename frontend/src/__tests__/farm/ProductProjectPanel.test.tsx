@@ -307,6 +307,50 @@ describe('FarmProductGate', () => {
     await waitFor(() => expect(sent).toEqual({ excluded: true }));
   });
 
+  it('edits the components of a kit: picture, colour, quantity, add and remove', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json({ ...view, kind: 'kit' })),
+      http.get('/api/v1/farm/components', () =>
+        HttpResponse.json([
+          { code: 'C-0200', name: 'Vite M3', shape_id: null, shape: null, color: null, retired: false },
+          { code: 'C-0118', name: 'Tappo Bouchon porte – Nero', shape_id: 1, shape: null, color: 'Nero', retired: false },
+        ]),
+      ),
+      http.patch('/api/v1/farm/components/C-0118', async ({ request }) => {
+        sent.push(['patch', await request.json()]);
+        return HttpResponse.json({});
+      }),
+      http.put('/api/v1/farm/products/65/parts/:code', async ({ request, params }) => {
+        sent.push([params.code, await request.json()]);
+        return HttpResponse.json({});
+      }),
+    );
+    sheet(65);
+    const picture = await screen.findByRole('img', { name: 'Tappo Bouchon porte – Nero' });
+    await waitFor(() => expect(picture.getAttribute('src')).toContain('/farm/components/C-0118/image?c=111111'));
+    await user.selectOptions(screen.getByLabelText('Colour C-0118'), 'Bianco');
+    const qty = screen.getByLabelText('Per unit C-0119');
+    await user.clear(qty);
+    await user.type(qty, '4');
+    await user.tab();
+    await user.click(screen.getAllByRole('button', { name: 'Remove' })[0]);
+    await user.selectOptions(screen.getByLabelText('Add component'), 'C-0200'); // C-0118 is already in
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() =>
+      expect(sent).toEqual([
+        ['patch', { color: 'Bianco' }],
+        ['C-0119', { quantity: 4 }],
+        ['C-0118', { quantity: 0 }],
+        ['C-0200', { quantity: 1 }],
+      ]),
+    );
+    expect(screen.queryByRole('option', { name: /C-0118 Tappo/ })).not.toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
   it('keeps the upstream panels for normal projects', async () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),

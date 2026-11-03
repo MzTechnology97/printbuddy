@@ -3,12 +3,14 @@
 All meshes are generated here (boxes and an irregular tetrahedron); none come from a real farm.
 """
 
+import io
 import json
 import zipfile
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from backend.app.api.routes import library
 from backend.app.farm.plates.geometry import fingerprint, group, same_piece
@@ -319,6 +321,16 @@ async def test_product_printed_as_a_set(async_client, tmp_path):
     assert contract["kind"] == "set"
     assert sorted(x["yield"] for x in contract["parts"][0]["plates"]) == [3, 4]
 
+    # The set's picture: both pieces side by side, in its colour; the same picture next time.
+    first = await async_client.get(f"{API}/components/{code}/image")
+    assert (first.status_code, first.content[:4]) == (200, b"\x89PNG")
+    assert Image.open(io.BytesIO(first.content)).size == (512, 256)
+    assert (await async_client.get(f"{API}/components/{code}/image")).content == first.content
+    # The set takes no second component.
+    other = (await async_client.post(f"{API}/components", json={"name": "Scatola"})).json()["code"]
+    assert (await async_client.put(f"{API}/products/{pid}/parts/{other}", json={"quantity": 1})).status_code == 409
+    assert (await async_client.get(f"{API}/components/{other}/image")).status_code == 404  # nothing to draw
+
     # Two tops per set: plate 1 gives 2 sets, plate 2 gives 2.
     r = await async_client.put(
         f"{API}/products/{pid}/pieces", json={"yield_ids": pieces["Top"]["yield_ids"], "quantity": 2}
@@ -364,6 +376,20 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     view = (await async_client.get(f"{API}/products/{two}/view")).json()
     assert view["parts"][0]["code"] != caps
     assert [(r["shape_id"], r["quantity"]) for r in view["parts"][0]["recipe"]] == [(cap, 2)]
+    # Kit parts from the product page: add, change, take out (retired when nobody else uses it).
+    kit = (await async_client.post(f"{API}/products", json={"name": "Kit"})).json()["project_id"]
+    loose = (await async_client.post(f"{API}/components", json={"name": "Vite"})).json()["code"]
+    assert (await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 4})).status_code == 200
+    assert (await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 1})).status_code == 200
+    view = (await async_client.get(f"{API}/products/{kit}/view")).json()
+    assert [(p["code"], p["quantity"]) for p in view["parts"]] == [(loose, 4), (comps[1], 1)]
+    await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 0})
+    await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 0})
+    status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+    assert (status[loose], status[comps[1]]) == (True, False)  # the DX is still in "Solo DX"
+    r = await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 1})
+    assert r.status_code == 409  # retired
+
     # A component Seller Hub knows can't be given a single shape back by mistake.
     r = await async_client.patch(f"{API}/components/{comps[0]}", json={"shape_id": shapes[0]})
     assert r.status_code == 422

@@ -10,12 +10,169 @@ import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmPlanComponent, type FarmProductView } from './api';
+
+type Part = FarmProductView['parts'][number];
+const INPUT =
+  'bg-bambu-dark border border-bambu-dark-tertiary rounded px-2 py-1 text-sm text-white placeholder-bambu-gray focus:outline-none focus:border-bambu-green';
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 import { AccodaSummary } from './PrintPlanPage';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import './i18n';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** Picture of the component from its 3MF pieces; an old whole-product component shows the product's photo. */
+function ComponentPicture({ part, view, hex }: { part: Part; view: FarmProductView; hex: string | null }) {
+  const [failed, setFailed] = useState(false);
+  const whole = !part.shape_id && !part.recipe?.length;
+  return (
+    <div className="w-24 h-24 shrink-0 rounded bg-gray-300 flex items-center justify-center overflow-hidden">
+      {!failed ? (
+        <img src={farmApi.componentImageUrl(part.code, hex)} alt={part.name} loading="lazy"
+          className="w-full h-full object-contain" onError={() => setFailed(true)} />
+      ) : whole && view.has_cover ? (
+        <img src={api.getProjectCoverImageUrl(view.project_id)} alt={part.name} className="w-full h-full object-cover" />
+      ) : (
+        <span className="text-xs font-mono text-bambu-dark">{part.code}</span>
+      )}
+    </div>
+  );
+}
+
+/** One component of the product: picture, name, colour, per-unit quantity (kits), plates. */
+function PartRow({ part, view, colors }: { part: Part; view: FarmProductView; colors: Record<string, string> }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(part.name);
+  const [quantity, setQuantity] = useState(String(part.quantity));
+  const done = {
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  };
+  const update = useMutation({
+    mutationFn: (data: { name?: string; color?: string | null }) => farmApi.updateComponent(part.code, data),
+    ...done,
+  });
+  const setQty = useMutation({ mutationFn: (q: number) => farmApi.setPart(view.project_id, part.code, q), ...done });
+  const isSet = part.recipe != null;
+  const hex = part.color ? colors[part.color.toLowerCase()] ?? null : null;
+  return (
+    <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
+      <ComponentPicture part={part} view={view} hex={hex} />
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-bambu-green">{part.code}</span>
+          <input aria-label={`${t('farm.project.componentName')} ${part.code}`} className={`${INPUT} flex-1 min-w-48`}
+            value={name} onChange={(e) => setName(e.target.value)}
+            onBlur={() => name.trim() && name.trim() !== part.name && update.mutate({ name: name.trim() })} />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-bambu-gray">
+          <label className="flex items-center gap-1">
+            {t('farm.project.componentColor')}
+            <select aria-label={`${t('farm.project.componentColor')} ${part.code}`} className={INPUT}
+              value={part.color ? capitalize(part.color.toLowerCase()) : ''}
+              onChange={(e) => update.mutate({ color: e.target.value || null })}>
+              <option value="">{t('farm.project.noColor')}</option>
+              {Object.keys(colors).map((c) => (
+                <option key={c} value={capitalize(c)}>{capitalize(c)}</option>
+              ))}
+            </select>
+          </label>
+          {!isSet && (
+            <>
+              <label className="flex items-center gap-1">
+                {t('farm.project.perUnit')}
+                <input type="number" min={1} max={1000} aria-label={`${t('farm.project.perUnit')} ${part.code}`}
+                  className={`${INPUT} w-20`} value={quantity} onChange={(e) => setQuantity(e.target.value)}
+                  onBlur={() => Number(quantity) >= 1 && Number(quantity) !== part.quantity && setQty.mutate(Number(quantity))} />
+              </label>
+              <Button size="sm" variant="secondary" disabled={setQty.isPending}
+                onClick={() => window.confirm(t('farm.project.removeConfirm', { code: part.code })) && setQty.mutate(0)}>
+                {t('farm.project.removePart')}
+              </Button>
+            </>
+          )}
+        </div>
+        {isSet && part.recipe!.length > 0 && (
+          <p className="text-xs text-bambu-gray">
+            {t('farm.project.perSet', {
+              pieces: part.recipe!.map((r) => `${r.quantity}× ${r.shape ?? r.shape_id}`).join(' + '),
+            })}
+          </p>
+        )}
+        {part.plates.length === 0 ? (
+          <p className="text-xs text-amber-400 flex items-center gap-1">
+            <AlertTriangle className="w-3.5 h-3.5" /> {t('farm.components.noPlateYet')}
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {part.plates.map((p) => (
+              <li key={p.plate_id} className="text-xs text-bambu-gray break-all">
+                <span className="text-white">{fileName(p.file)}</span> ·{' '}
+                {t('farm.plates.plate', { index: p.plate })} ·{' '}
+                {[
+                  p.printer_model,
+                  p.material,
+                  t('farm.project.yield', { count: p.yield }),
+                  duration(p.print_time_seconds),
+                  p.filament_grams ? `${Math.round(p.filament_grams)} g` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                {!p.sliced && <span className="text-amber-400"> · {t('farm.project.notSliced')}</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** Add an existing component, or a new one by name, to a kit. */
+function AddPart({ view }: { view: FarmProductView }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
+  const [code, setCode] = useState('');
+  const [name, setName] = useState('');
+  const add = useMutation({
+    mutationFn: async () => {
+      const chosen = code || (await farmApi.createComponent({ name: name.trim() })).code;
+      return farmApi.setPart(view.project_id, chosen, 1);
+    },
+    onSuccess: () => {
+      setCode('');
+      setName('');
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const mine = new Set(view.parts.map((p) => p.code));
+  const choices = (components.data || []).filter((c) => !c.retired && !mine.has(c.code));
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <span className="text-bambu-gray">{t('farm.project.addPart')}</span>
+      <select aria-label={t('farm.project.addPart')} className={`${INPUT} max-w-full`} value={code}
+        onChange={(e) => setCode(e.target.value)}>
+        <option value="">{t('farm.project.pickComponent')}</option>
+        {choices.map((c) => (
+          <option key={c.code} value={c.code}>{c.code} {c.name}</option>
+        ))}
+      </select>
+      {!code && (
+        <input aria-label={t('farm.project.newComponentName')} placeholder={t('farm.project.newComponentName')}
+          className={INPUT} value={name} onChange={(e) => setName(e.target.value)} />
+      )}
+      <Button size="sm" disabled={(!code && !name.trim()) || add.isPending} onClick={() => add.mutate()}>
+        {t('farm.project.add')}
+      </Button>
+    </div>
+  );
+}
 
 /** Set or kit, and what is still missing before the product can be printed. */
 function ProductStatus({ view }: { view: FarmProductView }) {
@@ -76,6 +233,7 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [printing, setPrinting] = useState<FarmPlanComponent[] | null>(null);
+  const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
   const plan = useMutation({
     mutationFn: () => farmApi.getProductPlan(view.project_id),
     onSuccess: (p) => setPrinting(p.components),
@@ -117,11 +275,9 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
 
         <ProductStatus view={view} />
 
-        <ProductPiecesPanel projectId={view.project_id} />
-
         <section className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-white">{t('farm.project.parts')}</h3>
+            <h3 className="text-sm font-semibold text-white">{t('farm.project.components')}</h3>
             <Button size="sm" disabled={view.parts.length === 0 || plan.isPending} title={t('farm.project.printNowHint')}
               onClick={() => plan.mutate()}>
               {plan.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ListPlus className="w-4 h-4" />}
@@ -134,45 +290,14 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
           {view.parts.length === 0 && <p className="text-sm text-bambu-gray">{t('farm.products.noParts')}</p>}
           <ul className="space-y-3">
             {view.parts.map((part) => (
-              <li key={part.code} className="bg-bambu-dark rounded-lg p-3 space-y-2">
-                <p className="text-white">
-                  {part.quantity}× <span className="font-mono text-bambu-green">{part.code}</span> {part.name}
-                </p>
-                {part.recipe && part.recipe.length > 0 && (
-                  <p className="text-xs text-bambu-gray">
-                    {t('farm.project.perSet', {
-                      pieces: part.recipe.map((r) => `${r.quantity}× ${r.shape ?? r.shape_id}`).join(' + '),
-                    })}
-                  </p>
-                )}
-                {part.plates.length === 0 ? (
-                  <p className="text-xs text-amber-400 flex items-center gap-1">
-                    <AlertTriangle className="w-3.5 h-3.5" /> {t('farm.components.noPlateYet')}
-                  </p>
-                ) : (
-                  <ul className="space-y-1">
-                    {part.plates.map((p) => (
-                      <li key={p.plate_id} className="text-xs text-bambu-gray break-all">
-                        <span className="text-white">{fileName(p.file)}</span> ·{' '}
-                        {t('farm.plates.plate', { index: p.plate })} ·{' '}
-                        {[
-                          p.printer_model,
-                          p.material,
-                          t('farm.project.yield', { count: p.yield }),
-                          duration(p.print_time_seconds),
-                          p.filament_grams ? `${Math.round(p.filament_grams)} g` : null,
-                        ]
-                          .filter(Boolean)
-                          .join(' · ')}
-                        {!p.sliced && <span className="text-amber-400"> · {t('farm.project.notSliced')}</span>}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
+              <PartRow key={`${part.code}-${part.name}-${part.quantity}`} part={part} view={view}
+                colors={settings.data?.colors || {}} />
             ))}
           </ul>
+          {view.kind !== 'set' && <AddPart view={view} />}
         </section>
+
+        <ProductPiecesPanel projectId={view.project_id} />
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold text-white">{t('farm.project.files')}</h3>
