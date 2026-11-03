@@ -163,6 +163,48 @@ describe('FarmProductGate', () => {
     ]);
   });
 
+  it('prints the product now, also a part Seller Hub does not ask for', async () => {
+    const user = userEvent.setup();
+    let sent: unknown;
+    const plate = {
+      plate_id: 4,
+      library_file_id: 9,
+      file: 'Stampa 3D/Caps/P1S-Caps-PETG.3mf',
+      plate: 1,
+      printer_model: 'P1S',
+      material: 'PETG',
+      yield: 8,
+      print_time_seconds: 5400,
+      filament_grams: 60,
+      sliced: true,
+      score: 1,
+      printers: [{ id: 3, name: 'P1S', idle: true, material_ok: true, color_ok: false }],
+    };
+    const row = (code: string, name: string, plates: (typeof plate)[]) => ({
+      code, name, status: null, to_print: 0, stock: null, need: null, days_left: null, color: 'Nero',
+      color_hex: '111111', shape: null, shape_id: null, known: true, products: [], in_queue: 0, missing: 0, plates,
+    });
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)),
+      http.get('/api/v1/farm/plan/products/65', () =>
+        HttpResponse.json({
+          fetched_at: null, error: null, tolerance: 80,
+          components: [row('C-0118', 'Tappo Bouchon porte – Nero', [plate]), row('C-0119', 'Tappo kapi kolu – Nero', [])],
+        }),
+      ),
+      http.post('/api/v1/farm/jobs', async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json([]);
+      }),
+    );
+    render(<Page id={65} />);
+    await user.click(await screen.findByRole('button', { name: 'Print now' }));
+    expect(await screen.findByText(/^One print: 8 pieces with the proposed plate ·/)).toBeInTheDocument();
+    expect(screen.getByText('Components without a confirmed plate are left out.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() => expect(sent).toEqual({ jobs: [{ component_code: 'C-0118', plate_ids: [4] }] }));
+  });
+
   it('excludes a 3MF of the linked folders and shows the excluded ones in grey', async () => {
     const user = userEvent.setup();
     let sent: unknown;

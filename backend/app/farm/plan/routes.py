@@ -35,6 +35,26 @@ async def get_plan(db: AsyncSession = Depends(get_db)) -> dict:
     return await service.build_plan(db, queued=await queued_pieces(db))
 
 
+@router.get("/plan/products/{project_id}", dependencies=[_read])
+async def get_product_plan(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """The parts of a product with their plates, to print it by hand whatever Seller Hub asks."""
+    from backend.app.farm.jobs.service import queued_pieces
+    from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
+
+    if await db.get(FarmProduct, project_id) is None:
+        raise HTTPException(404, "Not a product")
+    # shortcut: the parts in the product's own colour; offer its colour variants if they are printed by hand too.
+    codes = (
+        await db.execute(
+            select(FarmComponent.code)
+            .join(FarmProductPart, FarmProductPart.component_id == FarmComponent.id)
+            .where(FarmProductPart.project_id == project_id, FarmComponent.retired_at.is_(None))
+            .order_by(FarmProductPart.sort_order)
+        )
+    ).scalars()
+    return await service.build_plan(db, queued=await queued_pieces(db), codes=list(codes))
+
+
 @router.get("/plan/settings", dependencies=[_read])
 async def get_plan_settings(db: AsyncSession = Depends(get_db)) -> dict:
     return {**await service.load_config(db), "default_colors": service.DEFAULT_COLORS}

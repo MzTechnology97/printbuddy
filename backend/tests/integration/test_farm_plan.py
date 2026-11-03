@@ -104,6 +104,27 @@ async def test_most_urgent_first_and_best_plate_first(async_client, farm):
 
 
 @pytest.mark.asyncio
+async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, farm):
+    shape = next(s for s in (await async_client.get(f"{API}/shapes")).json() if s["name"] == "Sopra")
+    red = (await async_client.post(f"{API}/components", json={"shape_id": shape["id"], "color": "Rosso"})).json()
+    r = await async_client.post(
+        f"{API}/products",
+        json={
+            "name": "Tappo – Rosso",
+            "parts": [{"component_code": red["code"], "quantity": 2}, {"component_code": farm["black"]}],
+        },
+    )
+    pid = r.json()["project_id"]
+
+    body = (await async_client.get(f"{API}/plan/products/{pid}")).json()
+    rows = [(c["code"], c["name"], c["to_print"], c["missing"], len(c["plates"])) for c in body["components"]]
+    assert rows == [(red["code"], red["name"], 0, 0, 3), (farm["black"], "Sopra – Nero", 30, 30, 3)]  # product order
+    assert body["components"][0]["color_hex"] == "d32f2f"
+    assert red["code"] not in [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
+    assert (await async_client.get(f"{API}/plan/products/9999")).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_seller_hub_down_uses_last_answer(async_client, farm, monkeypatch):
     first = (await async_client.get(f"{API}/plan")).json()
 

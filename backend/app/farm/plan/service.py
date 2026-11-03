@@ -202,14 +202,19 @@ async def _confirmed_plates(db: AsyncSession, shape_ids: set[int], codes: set[st
     return list((await db.execute(query)).scalars())
 
 
-async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> dict:
+async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, codes: list[str] | None = None) -> dict:
     """Components to print (``to_print > 0``), most urgent first, each with its ranked plates.
 
     ``queued``: pieces per component code already in the queue or printing (from Accoda).
+    ``codes``: these components instead, whatever Seller Hub asks (printing a product by hand).
     """
     config = await load_config(db)
     components, fetched_at, error = await fetch_components(db, config["url"])
-    wanted = [c for c in components if isinstance(c.get("to_print"), int) and c["to_print"] > 0]
+    if codes is None:
+        wanted = [c for c in components if isinstance(c.get("to_print"), int) and c["to_print"] > 0]
+    else:
+        hub = {c.get("code"): c for c in components}
+        wanted = [hub.get(code) or {"code": code} for code in dict.fromkeys(codes)]
     ours = {
         c.code: c
         for c in (await db.execute(select(FarmComponent).where(FarmComponent.code.in_([w["code"] for w in wanted]))))
@@ -253,6 +258,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
     rows = []
     for c in wanted:
         comp = ours.get(c["code"])
+        c = {**c, "name": c.get("name") or (comp.name if comp else c["code"]), "to_print": c.get("to_print") or 0}
         color_hex = config["colors"].get((comp.color or "").lower()) if comp and comp.color else None
         options = []
         for plate in plates:
@@ -308,5 +314,8 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
                 "plates": options,
             }
         )
-    rows.sort(key=lambda r: (URGENCY.get(r["status"], 9), r["days_left"] if r["days_left"] is not None else math.inf))
+    if codes is None:  # by hand the product's order stays
+        rows.sort(
+            key=lambda r: (URGENCY.get(r["status"], 9), r["days_left"] if r["days_left"] is not None else math.inf)
+        )
     return {"fetched_at": fetched_at, "error": error, "tolerance": config["tolerance"], "components": rows}

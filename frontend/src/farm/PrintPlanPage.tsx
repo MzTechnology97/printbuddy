@@ -218,15 +218,17 @@ function SettingsCard({ settings, onClose }: { settings: FarmPlanSettings; onClo
   );
 }
 
-function AccodaSummary({ components, onClose, onDone }: {
+/** ``byHand``: printing a product whatever Seller Hub asks, so components already covered are kept. */
+export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
   components: FarmPlanComponent[];
   onClose: () => void;
   onDone: () => void;
+  byHand?: boolean;
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
-  const usable = components.filter((c) => c.plates.length > 0 && c.missing > 0);
+  const usable = components.filter((c) => c.plates.length > 0 && (byHand || c.missing > 0));
   const [chosen, setChosen] = useState<Record<string, number>>({}); // component -> printer; none: first free
   const [chosenPlate, setChosenPlate] = useState<Record<string, number>>({}); // none: the loaded material decides
   const platesFor = (c: FarmPlanComponent) =>
@@ -272,7 +274,9 @@ function AccodaSummary({ components, onClose, onDone }: {
                   <span className="font-mono text-bambu-green">{c.code}</span> {c.name}
                 </p>
                 <p className="text-xs text-bambu-gray">
-                  {t('farm.jobs.onePrint', { pieces: best.yield, missing: c.missing })}
+                  {byHand
+                    ? t('farm.jobs.onePrintByHand', { pieces: best.yield })
+                    : t('farm.jobs.onePrint', { pieces: best.yield, missing: c.missing })}
                   {best.print_time_seconds ? ` · ${duration(best.print_time_seconds)}` : ''}
                   {best.filament_grams ? ` · ${Math.round(best.filament_grams)} g` : ''}
                 </p>
@@ -315,7 +319,9 @@ function AccodaSummary({ components, onClose, onDone }: {
               </section>
             );
           })}
-          {usable.length < components.length && <p className="text-xs text-amber-400">{t('farm.jobs.skipped')}</p>}
+          {usable.length < components.length && (
+            <p className="text-xs text-amber-400">{t(byHand ? 'farm.jobs.skippedByHand' : 'farm.jobs.skipped')}</p>
+          )}
         </div>
         <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>

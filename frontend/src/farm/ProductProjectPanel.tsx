@@ -1,14 +1,15 @@
 // Printfarm (fork): on the project page of a product, the farm view replaces upstream's
 // Production Plan and BOM (which list every file as a part and have no quantities for products).
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, FileBox, Package } from 'lucide-react';
+import { AlertTriangle, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
 import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
 import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmProductView } from './api';
+import { farmApi, type FarmPlanComponent, type FarmProductView } from './api';
+import { AccodaSummary } from './PrintPlanPage';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import './i18n';
 
@@ -19,6 +20,12 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const [printing, setPrinting] = useState<FarmPlanComponent[] | null>(null);
+  const plan = useMutation({
+    mutationFn: () => farmApi.getProductPlan(view.project_id),
+    onSuccess: (p) => setPrinting(p.components),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
   const exclude = useMutation({
     mutationFn: ({ id, excluded }: { id: number; excluded: boolean }) =>
       farmApi.setFileExcluded(view.project_id, id, excluded),
@@ -46,7 +53,17 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
         <ProductPiecesPanel projectId={view.project_id} />
 
         <section className="space-y-2">
-          <h3 className="text-sm font-semibold text-white">{t('farm.project.parts')}</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-white">{t('farm.project.parts')}</h3>
+            <Button size="sm" disabled={view.parts.length === 0 || plan.isPending} title={t('farm.project.printNowHint')}
+              onClick={() => plan.mutate()}>
+              {plan.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ListPlus className="w-4 h-4" />}
+              {t('farm.project.printNow')}
+            </Button>
+          </div>
+          {printing && (
+            <AccodaSummary components={printing} byHand onClose={() => setPrinting(null)} onDone={() => undefined} />
+          )}
           {view.parts.length === 0 && <p className="text-sm text-bambu-gray">{t('farm.products.noParts')}</p>}
           <ul className="space-y-3">
             {view.parts.map((part) => (
