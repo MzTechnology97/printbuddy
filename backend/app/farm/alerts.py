@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core import database
 from backend.app.farm import notify
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.plan import service as plan
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 URGENT_EVERY_SECONDS = 10 * 60
 URGENT = ("esaurito", "urgente")
 _last_urgent_check = -float(URGENT_EVERY_SECONDS)
+_running: asyncio.Task | None = None
 
 
 def _label(job: FarmPrintJob) -> str:
@@ -82,8 +85,9 @@ async def urgent_components(db: AsyncSession) -> None:
     from backend.app.farm.jobs.service import queued_pieces
 
     found = await plan.build_plan(db, await queued_pieces(db))
-    if found["fetched_at"] is None:
-        return  # Seller Hub never answered: nothing to judge
+    if found["error"] or found["fetched_at"] is None:
+        return  # Seller Hub didn't answer now: an old copy is not judged
+    stuck_codes = set()
     for row in found["components"]:
         stuck = (
             row["status"] in URGENT
@@ -91,8 +95,8 @@ async def urgent_components(db: AsyncSession) -> None:
             and not any(f["idle"] and f["material_ok"] and f["color_ok"] for o in row["plates"] for f in o["printers"])
         )
         if not stuck:
-            notify.forget(notify.COMPONENT_URGENT, row["code"])
             continue
+        stuck_codes.add(row["code"])
         notify.notify(
             notify.COMPONENT_URGENT,
             row["code"],
@@ -103,6 +107,25 @@ async def urgent_components(db: AsyncSession) -> None:
             material=" / ".join(dict.fromkeys(o["material"] for o in row["plates"] if o["material"])) or "il materiale",
             color=row["color"],
         )
+    # Not stuck any more, or gone from the plan (nothing left to print): if it comes back, notify at once.
+    notify.forget_others(notify.COMPONENT_URGENT, stuck_codes)
+
+
+def start_check() -> None:
+    """``check`` in its own task and session, one at a time: a slow Seller Hub never holds the dispatcher."""
+    global _running
+    if _running is None or _running.done():
+        _running = asyncio.create_task(_check_alone(), name="farm-alerts")
+
+
+def stop_check() -> None:
+    if _running is not None:
+        _running.cancel()
+
+
+async def _check_alone() -> None:
+    async with database.async_session() as db:
+        await check(db)
 
 
 async def check(db: AsyncSession) -> None:

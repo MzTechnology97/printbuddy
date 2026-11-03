@@ -31,20 +31,23 @@ AUTO_RESLICE = "Re-slice automatico"
 
 REPEAT_SECONDS = 12 * 3600
 # shortcut: in memory, so a restart may send a pending event once more; persist it if that is noisy.
-_sent: dict[tuple[str, Hashable], float] = {}  # (event, key) -> when it was sent
+_sent: dict[tuple[str, Hashable], float] = {}  # (event, key) -> when a provider got it
+_sending: set[tuple[str, Hashable]] = set()  # (event, key) being sent now
 _tasks: set[asyncio.Task] = set()
 
 
 def notify(
     event: str, key: Hashable, *, printer_id: int | None = None, printer_name: str | None = None, **variables
 ) -> asyncio.Task | None:
-    """Send ``event`` to the providers that want it, unless it went out for ``key`` lately; never raises."""
-    now = time.monotonic()
-    if now - _sent.get((event, key), -REPEAT_SECONDS) < REPEAT_SECONDS:
+    """Send ``event`` to the providers that want it, unless it reached one for ``key`` lately; never raises.
+
+    Only a delivery counts: with the event off everywhere, or a failed send, the next call tries again.
+    """
+    if (event, key) in _sending or time.monotonic() - _sent.get((event, key), -REPEAT_SECONDS) < REPEAT_SECONDS:
         return None
-    _sent[(event, key)] = now
+    _sending.add((event, key))
     values = {name: "" if value is None else str(value) for name, value in variables.items()}
-    task = asyncio.create_task(_send(event, values, printer_id, printer_name), name=f"farm-notify-{event}")
+    task = asyncio.create_task(_deliver(event, key, values, printer_id, printer_name), name=f"farm-notify-{event}")
     _tasks.add(task)  # keep a reference until it ends
     task.add_done_callback(_tasks.discard)
     return task
@@ -53,6 +56,26 @@ def notify(
 def forget(event: str, key: Hashable) -> None:
     """The condition is over: the next time it happens is notified at once."""
     _sent.pop((event, key), None)
+
+
+def forget_others(event: str, keep: set) -> None:
+    """``forget`` every key of ``event`` not in ``keep`` (conditions no longer found)."""
+    for sent_event, key in [k for k in _sent if k[0] == event and k[1] not in keep]:
+        _sent.pop((sent_event, key), None)
+
+
+async def _deliver(event: str, key: Hashable, values: dict[str, str], printer_id, printer_name) -> None:
+    try:
+        if await _send(event, values, printer_id, printer_name):
+            _sent[(event, key)] = time.monotonic()
+    finally:
+        _sending.discard((event, key))
+
+
+def cancel_pending() -> None:
+    """At shutdown: sends still running are dropped."""
+    for task in list(_tasks):
+        task.cancel()
 
 
 def slicing_done(file_id: int, filename: str, plate: int | None, colour: str | None, source: str, error=None) -> None:
@@ -65,13 +88,15 @@ def slicing_done(file_id: int, filename: str, plate: int | None, colour: str | N
     notify(SLICING_FAILED, key, filename=filename, plate=plate or 1, color=colour, source=source, reason=reason)
 
 
-async def _send(event: str, variables: dict[str, str], printer_id: int | None, printer_name: str | None) -> None:
+async def _send(event: str, variables: dict[str, str], printer_id: int | None, printer_name: str | None) -> bool:
+    """True when at least one provider got it (or is retrying it)."""
     from backend.app.services.notification_service import notification_service
 
     try:
         async with database.async_session() as db:
-            await notification_service.on_farm_event(
+            return await notification_service.on_farm_event(
                 event, variables, db, printer_id=printer_id, printer_name=printer_name
             )
     except Exception:
         logger.exception("Farm notification %s could not be sent", event)
+        return False

@@ -4,6 +4,7 @@ Nothing is sent: the autouse ``farm_notifications`` fixture records the events, 
 is mocked, and the printers' live state is stubbed. Data is made up.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
@@ -29,6 +30,8 @@ async def test_same_event_is_sent_once_until_forgotten(farm_notifications):
     assert notify.notify(notify.PLATE_TO_CLEAR, 1, printer="X1C", waiting="C0001") is not None
     assert notify.notify(notify.PLATE_TO_CLEAR, 1, printer="X1C", waiting="C0001") is None
     assert notify.notify(notify.PLATE_TO_CLEAR, 2, printer="A1", waiting=None) is not None
+    await _settle()
+    assert notify.notify(notify.PLATE_TO_CLEAR, 1, printer="X1C", waiting="C0001") is None  # delivered
     notify.forget(notify.PLATE_TO_CLEAR, 1)
     assert notify.notify(notify.PLATE_TO_CLEAR, 1, printer="X1C", waiting="C0002") is not None
     await _settle()
@@ -40,6 +43,8 @@ async def test_slicing_failure_once_per_plate_and_colour_and_cleared_by_a_succes
     notify.slicing_done(5, "Box.3mf", 2, "Nero", notify.AUTO_RESLICE, error)
     notify.slicing_done(5, "Box.3mf", 2, "nero ", notify.AUTO_RESLICE, error)  # same variant
     notify.slicing_done(5, "Box.3mf", 2, None, notify.QUEUE_SLICE, RuntimeError("sidecar down"))
+    await _settle()
+    notify.slicing_done(5, "Box.3mf", 2, "Nero", notify.AUTO_RESLICE, error)  # delivered: not again
     notify.slicing_done(5, "Box.3mf", 2, "Nero", notify.AUTO_RESLICE)  # works now
     notify.slicing_done(5, "Box.3mf", 2, "Nero", notify.AUTO_RESLICE, error)
     await _settle()
@@ -213,3 +218,109 @@ def test_every_farm_event_has_a_toggle_and_a_template(event):
     assert hasattr(NotificationProvider, f"on_{event}")
     assert event in {t["event_type"] for t in DEFAULT_TEMPLATES}
     assert event in EVENT_NAMES and event in EVENT_VARIABLES and event in SAMPLE_DATA
+
+
+async def test_an_undelivered_event_is_tried_again_and_one_in_flight_is_not_doubled(monkeypatch):
+    delivered = []
+    gate = asyncio.Event()
+
+    async def send(event, variables, printer_id, printer_name):
+        await gate.wait()
+        delivered.append(variables["waiting"])
+        return variables["waiting"] != "off"  # "off": no provider has the event on
+
+    monkeypatch.setattr(notify, "_send", send)
+    assert notify.notify(notify.PLATE_TO_CLEAR, 1, waiting="off") is not None
+    assert notify.notify(notify.PLATE_TO_CLEAR, 1, waiting="off") is None  # still being sent
+    gate.set()
+    await _settle()
+    assert notify.notify(notify.PLATE_TO_CLEAR, 1, waiting="on") is not None  # nobody got the first
+    await _settle()
+    assert notify.notify(notify.PLATE_TO_CLEAR, 1, waiting="again") is None  # delivered: 12 h
+    assert delivered == ["off", "on"]
+
+
+def _plan_row(code, status="urgente", stuck=True):
+    printer = {"idle": True, "material_ok": True, "color_ok": not stuck}
+    return {
+        "code": code,
+        "name": code,
+        "status": status,
+        "to_print": 5,
+        "color": "Nero",
+        "plates": [{"material": "PLA", "printers": [printer]}],
+    }
+
+
+async def test_urgent_component_leaving_the_plan_is_forgotten(db_session, monkeypatch, farm_notifications):
+    plan_answer = {"fetched_at": "2026-01-01T00:00:00Z", "error": None, "components": [_plan_row("C0001")]}
+
+    async def fake_plan(db, queued=None, codes=None):
+        return plan_answer
+
+    monkeypatch.setattr(alerts.plan, "build_plan", fake_plan)
+    monkeypatch.setattr("backend.app.farm.jobs.service.queued_pieces", AsyncMock(return_value={}))
+    await alerts.urgent_components(db_session)
+    await _settle()
+    plan_answer["components"] = []  # printed enough: out of the plan
+    await alerts.urgent_components(db_session)
+    plan_answer["components"] = [_plan_row("C0001")]  # urgent again: notified at once
+    await alerts.urgent_components(db_session)
+    await _settle()
+    assert [v["component"] for _, v in farm_notifications] == ["C0001", "C0001"]
+
+
+async def test_an_old_copy_of_the_plan_is_not_judged(db_session, monkeypatch, farm_notifications):
+    async def fake_plan(db, queued=None, codes=None):
+        return {
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "error": "Seller Hub did not answer",
+            "components": [_plan_row("C1")],
+        }
+
+    monkeypatch.setattr(alerts.plan, "build_plan", fake_plan)
+    monkeypatch.setattr("backend.app.farm.jobs.service.queued_pieces", AsyncMock(return_value={}))
+    await alerts.urgent_components(db_session)
+    await _settle()
+    assert farm_notifications == []
+
+
+async def test_the_check_runs_in_its_own_task_one_at_a_time(monkeypatch):
+    gate, runs = asyncio.Event(), []
+
+    async def slow_check(db):
+        runs.append(1)
+        await gate.wait()
+
+    monkeypatch.setattr(alerts, "check", slow_check)
+    monkeypatch.setattr(alerts, "_running", None)
+    alerts.start_check()  # returns at once: the dispatcher doesn't wait for Seller Hub
+    await asyncio.sleep(0.05)
+    alerts.start_check()  # still running: not a second one
+    await asyncio.sleep(0.05)
+    assert runs == [1]
+    alerts.stop_check()
+    await asyncio.gather(alerts._running, return_exceptions=True)
+    assert alerts._running.cancelled()
+
+
+async def test_unexpected_auto_reslice_error_is_notified(db_session, monkeypatch, farm_notifications):
+    from backend.app.farm import reslice
+    from backend.app.farm.models import FarmLibraryFile
+
+    project = LibraryFile(filename="Box.3mf", file_path="/x/Box.3mf", file_type="3mf", file_size=1)
+    db_session.add(project)
+    await db_session.flush()
+    db_session.add(
+        FarmLibraryFile(watch_folder_id=1, library_file_id=project.id, path="/x", mtime=1, size=1, sha256="v1")
+    )
+    await db_session.commit()
+    monkeypatch.setattr("backend.app.farm.plates.service.refresh_plates", AsyncMock())
+    monkeypatch.setattr("backend.app.farm.slicing.slice_embedded", AsyncMock(side_effect=RuntimeError("disk full")))
+
+    with pytest.raises(RuntimeError):
+        await reslice._reslice(db_session, project.id, [(1, None)], job_id=1)
+    await _settle()
+    assert [(e, v["reason"], v["source"]) for e, v in farm_notifications] == [
+        (notify.SLICING_FAILED, "RuntimeError: disk full", notify.AUTO_RESLICE)
+    ]

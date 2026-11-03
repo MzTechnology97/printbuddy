@@ -90,9 +90,11 @@ def farm_notifications(monkeypatch):
 
     async def record(event, variables, printer_id, printer_name):
         sent.append((event, variables))
+        return True  # delivered
 
     monkeypatch.setattr(notify, "_send", record)
     monkeypatch.setattr(notify, "_sent", {})
+    monkeypatch.setattr(notify, "_sending", set())
     return sent
 
 
