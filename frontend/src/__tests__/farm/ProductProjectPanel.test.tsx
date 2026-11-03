@@ -634,13 +634,13 @@ describe('FarmProductGate', () => {
     sheet(65);
     expect(await screen.findByText('Coppia tappi')).toBeInTheDocument();
     expect(screen.getByText('×3 per unit')).toBeInTheDocument();
-    expect(screen.getByText('C-0118: 3 in the groups, 2 in the product')).toBeInTheDocument();
+    expect(screen.getByText('C-0118: 3 in the groups, only 2 in the product')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /New group/ }));
     await user.type(screen.getByLabelText('Group name'), 'Perni');
     await user.clear(screen.getByLabelText('Groups per unit'));
     await user.type(screen.getByLabelText('Groups per unit'), '2');
-    await user.click(screen.getByRole('checkbox', { name: /C-0120/ })); // the only part in no group
+    await user.click(screen.getByRole('checkbox', { name: /C-0120/ }));
     await user.click(screen.getByRole('button', { name: 'Save group' }));
     await waitFor(() =>
       expect(sent).toEqual({

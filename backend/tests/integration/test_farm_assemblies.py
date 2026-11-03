@@ -67,7 +67,10 @@ async def test_groups_to_assemble_on_the_sheet_and_for_seller_hub(async_client, 
     body = await ok(await save(async_client, pid, [pin]))
     assert [g["key"] for g in body["assemblies"]] == ["A3"]
 
-    # Quantities that do not add up are saved, with a warning on the sheet.
+    # Fewer pieces in groups than in the product: the rest is packed directly, no warning.
+    body = await ok(await save(async_client, pid, [{**half, "per_unit": 1}]))
+    assert body["assemblies"][0]["warnings"] == []
+    # More pieces in groups than in the product: saved, with a warning on the sheet.
     body = await ok(await save(async_client, pid, [{**half, "per_unit": 3}]))
     assert body["assemblies"][0]["warnings"] == [
         {"component_code": codes["Mezza luna 1"], "expected": 3, "quantity": 2},
@@ -88,11 +91,16 @@ async def test_a_group_holds_only_the_products_own_parts_once(async_client, hand
 
     r = await save(async_client, pid, [{"name": "G", "parts": [{"component_code": other}]}])
     assert r.status_code == 422  # another product's component: never in this product's groups
-    twice = [
-        {"name": "G1", "parts": [{"component_code": codes["Perno"]}]},
-        {"name": "G2", "parts": [{"component_code": codes["Perno"]}]},
+    # A part may close into two groups: the warning counts both against the product's 2 pins.
+    two = [
+        {"name": "G1", "per_unit": 1, "parts": [{"component_code": codes["Perno"]}]},
+        {"name": "G2", "per_unit": 2, "parts": [{"component_code": codes["Perno"]}]},
     ]
-    assert (await save(async_client, pid, twice)).status_code == 422  # one group per part
+    body = await ok(await save(async_client, pid, two))
+    pin = {"component_code": codes["Perno"], "expected": 3, "quantity": 2}
+    assert [g["warnings"] for g in body["assemblies"]] == [[pin], [pin]]
+    twice = [{"name": "G", "parts": [{"component_code": codes["Perno"]}, {"component_code": codes["Perno"]}]}]
+    assert (await save(async_client, pid, twice)).status_code == 422  # pieces per group, not the part twice
     await ok(await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"}))
     r = await save(async_client, pid, [{"name": "G", "parts": [{"component_code": codes["Perno"]}]}])
     assert r.status_code == 422  # a set is one component

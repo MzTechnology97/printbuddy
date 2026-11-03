@@ -1,5 +1,5 @@
 // Printfarm (fork): a kit's groups of parts assembled together before the product (e.g. the two
-// halves of a handle). Only the product's own parts, each in one group at most.
+// halves of a handle). Only the product's own parts; the parts stay the full bill of materials.
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -25,8 +25,6 @@ export function AssembliesPanel({ view }: { view: FarmProductView }) {
   const queryClient = useQueryClient();
   const groups = view.assemblies || [];
   const names = new Map(view.parts.map((p) => [p.code, p.name]));
-  const grouped = new Set(groups.flatMap((g) => g.parts.map((p) => p.component_code)));
-  const free = view.parts.filter((p) => !grouped.has(p.code));
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
   const [perUnit, setPerUnit] = useState('1');
@@ -80,7 +78,7 @@ export function AssembliesPanel({ view }: { view: FarmProductView }) {
         </ul>
       )}
       {!adding ? (
-        free.length > 0 && (
+        view.parts.length > 0 && (
           <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
             <Plus className="w-4 h-4" /> {t('farm.assemblies.add')}
           </Button>
@@ -97,7 +95,7 @@ export function AssembliesPanel({ view }: { view: FarmProductView }) {
             </label>
           </div>
           <ul className="space-y-1">
-            {free.map((p) => (
+            {view.parts.map((p) => (
               <li key={p.code} className="flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-2 flex-1 min-w-0">
                   <input type="checkbox" checked={p.code in chosen}
