@@ -279,7 +279,8 @@ class TestShapeProposals:
         await db_session.commit()
 
         listed = (await async_client.get(f"{API}/plates?status=proposed")).json()
-        assert listed[0]["yields"][0]["suggested_shape_id"] == top["id"]
+        # File 43 belongs to no product: no proposal by name (see test_a_name_proposes_only_shapes_of_the_same_product).
+        assert listed[0]["yields"][0]["suggested_shape_id"] is None
 
         body = {"yields": [{"object_name": "Trurffle_sopra k2", "quantity": 4, "shape_id": 999}]}
         assert (await async_client.put(f"{API}/plates/{draft.id}", json=body)).status_code == 422

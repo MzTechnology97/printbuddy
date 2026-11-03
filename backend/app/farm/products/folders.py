@@ -114,16 +114,10 @@ async def excluded_by(db: AsyncSession, project_id: int) -> set[int]:
     return set((await db.execute(query)).scalars())
 
 
-async def excluded_files(db: AsyncSession) -> set[int]:
-    """Library file ids no product uses: every product whose linked folders hold the file excludes it."""
-    from backend.app.farm.models import FarmLibraryFile
+async def _product_holders(db: AsyncSession):
+    """``holders(folder_id)``: the products linking that folder or one above it."""
     from backend.app.farm.products.models import FarmProduct
 
-    excluded: dict[str, set[int]] = {}
-    for project_id, path in (await db.execute(select(FarmExcludedFile.project_id, FarmExcludedFile.path))).all():
-        excluded.setdefault(path, set()).add(project_id)
-    if not excluded:
-        return set()
     products = set((await db.execute(select(FarmProduct.project_id))).scalars())
     folders = {
         fid: (parent, pid)
@@ -135,7 +129,7 @@ async def excluded_files(db: AsyncSession) -> set[int]:
     for fid, pid in (await db.execute(select(FarmFolderLink.folder_id, FarmFolderLink.project_id))).all():
         links.setdefault(fid, set()).add(pid)
 
-    def holders(fid: int | None) -> set[int]:  # products linking the folder or one above it
+    def holders(fid: int | None) -> set[int]:
         seen, out = set(), set()
         while fid in folders and fid not in seen:
             seen.add(fid)
@@ -144,6 +138,43 @@ async def excluded_files(db: AsyncSession) -> set[int]:
             fid = parent
         return out & products
 
+    return holders
+
+
+async def _excluded_paths(db: AsyncSession) -> dict[str, set[int]]:
+    excluded: dict[str, set[int]] = {}
+    for project_id, path in (await db.execute(select(FarmExcludedFile.project_id, FarmExcludedFile.path))).all():
+        excluded.setdefault(path, set()).add(project_id)
+    return excluded
+
+
+async def file_products(db: AsyncSession) -> dict[int, set[int]]:
+    """The products each 3MF project belongs to (its folder linked to them, not excluded by them)."""
+    from backend.app.farm.models import FarmLibraryFile
+
+    holders = await _product_holders(db)
+    excluded = await _excluded_paths(db)
+    rows = await db.execute(
+        select(LibraryFile.id, LibraryFile.folder_id, FarmLibraryFile.path)
+        .outerjoin(FarmLibraryFile, FarmLibraryFile.library_file_id == LibraryFile.id)
+        .where(LibraryFile.deleted_at.is_(None), LibraryFile.filename.ilike("%.3mf"))
+    )
+    out = {}
+    for file_id, folder_id, path in rows.all():
+        users = holders(folder_id) - excluded.get(path, set())
+        if users:
+            out[file_id] = users
+    return out
+
+
+async def excluded_files(db: AsyncSession) -> set[int]:
+    """Library file ids no product uses: every product whose linked folders hold the file excludes it."""
+    from backend.app.farm.models import FarmLibraryFile
+
+    excluded = await _excluded_paths(db)
+    if not excluded:
+        return set()
+    holders = await _product_holders(db)
     rows = await db.execute(
         select(FarmLibraryFile.library_file_id, FarmLibraryFile.path, LibraryFile.folder_id)
         .join(LibraryFile, LibraryFile.id == FarmLibraryFile.library_file_id)
