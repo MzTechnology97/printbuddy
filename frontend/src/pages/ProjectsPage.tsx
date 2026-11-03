@@ -31,6 +31,7 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { useToast } from '../contexts/ToastContext';
 import { useAuth } from '../contexts/AuthContext';
 import { getCurrencySymbol } from '../utils/currency';
+import { useFarmProductIds } from '../farm/useFarmProductIds'; // fork: printfarm products
 
 const PROJECT_COLORS = [
   '#ef4444', // red
@@ -857,10 +858,13 @@ export function ProjectsPage() {
 
   const currencySymbol = getCurrencySymbol(settings?.currency || 'USD');
 
-  const { data: projects, isLoading } = useQuery({
+  const { data: allProjects, isLoading } = useQuery({
     queryKey: ['projects', statusFilter === 'all' ? undefined : statusFilter],
     queryFn: () => api.getProjects(statusFilter === 'all' ? undefined : statusFilter),
   });
+  // fork: products live on the Products page (printfarm); the list shows the other projects.
+  const productIds = useFarmProductIds();
+  const projects = allProjects?.filter((p) => !productIds.has(p.id));
 
   const createMutation = useMutation({
     mutationFn: (data: ProjectCreate) => api.createProject(data),

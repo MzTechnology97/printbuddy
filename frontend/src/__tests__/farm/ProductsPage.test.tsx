@@ -77,7 +77,7 @@ describe('ProductsPage', () => {
     expect(screen.getByText(/PX-01 · PX-02/)).toBeInTheDocument();
     expect(screen.getByText(/Queued 3/)).toBeInTheDocument();
     expect(screen.getByText(/Printed in 7 days 12/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Prints and queue' })).toHaveAttribute('href', '/projects/7');
+    expect(screen.getByRole('link', { name: 'Prints and queue' })).toHaveAttribute('href', '/projects/7?view=project');
     // Components live on their own tab now.
     expect(screen.getByRole('tab', { name: 'Components' })).toHaveAttribute('aria-selected', 'false');
   });

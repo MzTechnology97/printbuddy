@@ -272,6 +272,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     product = await db.get(FarmProduct, project_id)
     if product is None:
         raise HTTPException(404, "Not a product")
+    project = await db.get(Project, project_id)
     parts = (
         await db.execute(
             select(FarmProductPart, FarmComponent)
@@ -353,6 +354,8 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
 
     return {
         "project_id": project_id,
+        "name": project.name,
+        "has_cover": bool(project.cover_image_filename),
         "kind": product.kind,
         "skus": product.skus or [],
         "asins": product.asins or [],

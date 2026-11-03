@@ -1,10 +1,11 @@
 // Printfarm (fork): on the project page of a product, the farm view replaces upstream's
 // Production Plan and BOM (which list every file as a part and have no quantities for products).
 import { useState, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
+import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
 import { useToast } from '../contexts/ToastContext';
@@ -89,13 +90,23 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
   return (
     <Card>
       <CardContent className="p-4 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-            <Package className="w-5 h-5 text-bambu-green" /> {t('farm.project.title')}
-          </h2>
-          <Link to="/farm/products" className="text-sm text-bambu-green hover:underline">
-            {t('farm.project.openProducts')}
-          </Link>
+        <div className="flex flex-wrap items-start gap-4">
+          <div className="w-24 h-24 shrink-0 rounded bg-bambu-dark overflow-hidden flex items-center justify-center">
+            {view.has_cover ? (
+              <img alt="" className="w-full h-full object-cover" src={api.getProjectCoverImageUrl(view.project_id)} />
+            ) : (
+              <Package className="w-10 h-10 text-bambu-gray/50" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <h1 className="text-xl font-semibold text-white break-words">{view.name}</h1>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              <Link to="/farm/products" className="text-bambu-green hover:underline">{t('farm.project.allProducts')}</Link>
+              <Link to={`/projects/${view.project_id}?view=project`} className="text-bambu-green hover:underline">
+                {t('farm.project.projectPage')}
+              </Link>
+            </div>
+          </div>
         </div>
         {(view.skus.length > 0 || view.asins.length > 0) && (
           <p className="text-xs text-bambu-gray break-words">
@@ -210,18 +221,57 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
   );
 }
 
-/** Renders ``children`` (upstream panels) for normal projects; for a product, the farm view (``panel``) or nothing. */
+function useProductView(projectId: number) {
+  return useQuery({
+    queryKey: ['farm', 'product-view', projectId],
+    queryFn: () => farmApi.getProductView(projectId).catch(() => null), // 404: not a product
+    enabled: projectId > 0,
+  });
+}
+
+/** Everything about one product on one page: ``/farm/products/:id``. */
+export function ProductPage() {
+  const { t } = useTranslation();
+  const projectId = Number(useParams<{ id: string }>().id) || 0;
+  const view = useProductView(projectId);
+  return (
+    <div className="p-4 md:p-8">
+      {view.isLoading ? (
+        <Loader2 className="w-8 h-8 animate-spin text-bambu-green" />
+      ) : view.data ? (
+        <FarmProductPanel view={view.data} />
+      ) : (
+        <p className="text-bambu-gray">
+          {t('farm.project.notProduct')}{' '}
+          <Link to={`/projects/${projectId}`} className="text-bambu-green hover:underline">{`/projects/${projectId}`}</Link>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Renders ``children`` (upstream panels) for normal projects. A product's project page opens its
+ * product sheet; with ``?view=project`` (photo, notes, print history) it stays, with a link back. */
 export function FarmProductGate({ projectId, panel = false, children }: {
   projectId: number;
   panel?: boolean;
   children: ReactNode;
 }) {
-  const view = useQuery({
-    queryKey: ['farm', 'product-view', projectId],
-    queryFn: () => farmApi.getProductView(projectId).catch(() => null), // 404: not a product
-    enabled: projectId > 0,
-  });
+  const { t } = useTranslation();
+  const [params] = useSearchParams();
+  const view = useProductView(projectId);
   if (view.isLoading) return null;
   if (!view.data) return <>{children}</>;
-  return panel ? <FarmProductPanel view={view.data} /> : null;
+  if (!panel) return null;
+  if (params.get('view') !== 'project') return <Navigate to={`/farm/products/${projectId}`} replace />;
+  return (
+    <Card>
+      <CardContent className="p-4 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-bambu-gray">{t('farm.project.openSheet')}</p>
+        <Link to={`/farm/products/${projectId}`} className="text-sm text-bambu-green hover:underline">
+          {t('farm.project.openSheetLink')}
+        </Link>
+      </CardContent>
+    </Card>
+  );
 }

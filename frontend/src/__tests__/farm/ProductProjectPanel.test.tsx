@@ -9,11 +9,14 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
-import { FarmProductGate } from '../../farm/ProductProjectPanel';
+import { Route, Routes } from 'react-router-dom';
+import { FarmProductGate, ProductPage } from '../../farm/ProductProjectPanel';
 
 const part = { shape_id: 1, color: 'Nero', retired: false, quantity: 2 };
 const view = {
   project_id: 65,
+  name: 'Tappi Paraspifferi AMI',
+  has_cover: false,
   skus: ['TP-01'],
   asins: ['B0TEST0065'],
   parts: [
@@ -81,18 +84,32 @@ const piece = (over: object) => ({
   ...over,
 });
 
+// The project page of a project (upstream panels behind the gate), or the product sheet.
 function Page({ id }: { id: number }) {
   return (
-    <>
-      <FarmProductGate projectId={id} panel>
-        <p>Upstream production plan</p>
-      </FarmProductGate>
-      <FarmProductGate projectId={id}>
-        <p>Upstream BOM</p>
-      </FarmProductGate>
-    </>
+    <Routes>
+      <Route path="/farm/products/:id" element={<ProductPage />} />
+      <Route
+        path="*"
+        element={
+          <>
+            <FarmProductGate projectId={id} panel>
+              <p>Upstream production plan</p>
+            </FarmProductGate>
+            <FarmProductGate projectId={id}>
+              <p>Upstream BOM</p>
+            </FarmProductGate>
+          </>
+        }
+      />
+    </Routes>
   );
 }
+
+const sheet = (id: number) => {
+  window.history.pushState({}, '', `/farm/products/${id}`);
+  return render(<Page id={id} />);
+};
 
 describe('FarmProductGate', () => {
   let savedPiece: unknown;
@@ -132,7 +149,7 @@ describe('FarmProductGate', () => {
   it('maps a piece of the product in one save, with its picture in the colour', async () => {
     const user = userEvent.setup();
     server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
-    render(<Page id={65} />);
+    sheet(65);
     const name = await screen.findByLabelText('Piece name Tappo porte (1)');
     expect(name).toHaveValue('Tappo porte'); // the slicer's copy number is dropped
     expect(screen.getByText('1 to decide · 1 in the product')).toBeInTheDocument();
@@ -146,12 +163,31 @@ describe('FarmProductGate', () => {
     );
   });
 
-  it('shows the product parts, plates and files instead of the upstream panels', async () => {
+  it('opens the product sheet from the project page of a product', async () => {
     server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
+    window.history.pushState({}, '', '/projects/65');
     render(<Page id={65} />);
-    expect(await screen.findByText('Product')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Tappi Paraspifferi AMI' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/farm/products/65');
     expect(screen.queryByText('Upstream production plan')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Photo, notes and print history' })).toHaveAttribute(
+      'href',
+      '/projects/65?view=project',
+    );
+  });
+
+  it('keeps the project page of a product with ?view=project, linking back to the sheet', async () => {
+    server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
+    window.history.pushState({}, '', '/projects/65?view=project');
+    render(<Page id={65} />);
+    expect(await screen.findByRole('link', { name: 'Open the product sheet' })).toHaveAttribute('href', '/farm/products/65');
     expect(screen.queryByText('Upstream BOM')).not.toBeInTheDocument();
+  });
+
+  it('shows the product parts, plates and files on its sheet', async () => {
+    server.use(http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)));
+    sheet(65);
+    expect(await screen.findByRole('heading', { name: 'Tappi Paraspifferi AMI' })).toBeInTheDocument();
     expect(screen.getByText(/TP-01 — ASIN B0TEST0065/)).toBeInTheDocument();
     expect(screen.getByText(/P1S · PETG · 8 pieces · 1h 30m · 60 g/)).toBeInTheDocument();
     expect(screen.getByText(/to slice/)).toBeInTheDocument();
@@ -174,7 +210,7 @@ describe('FarmProductGate', () => {
         return HttpResponse.json({ project_id: 65, kind: 'set' });
       }),
     );
-    render(<Page id={65} />);
+    sheet(65);
     expect(await screen.findByText('Choose set or kit')).toBeInTheDocument();
     expect(await screen.findByText('1 piece to decide')).toBeInTheDocument();
     expect(screen.getByText('C-0119 has no confirmed plate')).toBeInTheDocument();
@@ -203,7 +239,7 @@ describe('FarmProductGate', () => {
         }),
       ),
     );
-    render(<Page id={65} />);
+    sheet(65);
     expect(await screen.findByText('Per set: 2× Tappo Bouchon porte + 1× Tappo kapi kolu')).toBeInTheDocument();
     expect(await screen.findByLabelText('Per set Tappo porte')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Set printed together' })).toHaveAttribute('aria-pressed', 'true');
@@ -243,7 +279,7 @@ describe('FarmProductGate', () => {
         return HttpResponse.json([]);
       }),
     );
-    render(<Page id={65} />);
+    sheet(65);
     await user.click(await screen.findByRole('button', { name: 'Print now' }));
     expect(await screen.findByText(/^One print: 8 pieces with the proposed plate ·/)).toBeInTheDocument();
     expect(screen.getByText('Components without a confirmed plate are left out.')).toBeInTheDocument();
@@ -263,7 +299,7 @@ describe('FarmProductGate', () => {
         return HttpResponse.json({ library_file_id: 9, path: 'x', excluded: true });
       }),
     );
-    render(<Page id={65} />);
+    sheet(65);
     const include = await screen.findByRole('button', { name: 'Include K1-Caps.3mf' });
     expect(include.closest('li')).toHaveClass('opacity-50');
     expect(screen.getByText('excluded')).toBeInTheDocument();
@@ -275,6 +311,7 @@ describe('FarmProductGate', () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),
     );
+    window.history.pushState({}, '', '/projects/7');
     render(<Page id={7} />);
     expect(await screen.findByText('Upstream production plan')).toBeInTheDocument();
     expect(screen.getByText('Upstream BOM')).toBeInTheDocument();
