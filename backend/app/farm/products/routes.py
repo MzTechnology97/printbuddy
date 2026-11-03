@@ -248,7 +248,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     from backend.app.farm.models import FarmLibraryFile
     from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
     from backend.app.farm.plates.printer_map import PrinterModelResolver
-    from backend.app.farm.products.folders import project_folders
+    from backend.app.farm.products.folders import excluded_by, excluded_files, project_folders
 
     product = await db.get(FarmProduct, project_id)
     if product is None:
@@ -276,6 +276,9 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
             )
         ).scalars()
     )
+    own = await excluded_by(db, project_id)
+    hidden = own | await excluded_files(db)
+    plates = [p for p in plates if p.library_file_id not in hidden]
     folders = await project_folders(db, project_id)
     files = list(
         (
@@ -353,10 +356,44 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
                 "folder": folders.get(f.folder_id, ""),
                 **counts.get(f.id, {"proposed": 0, "confirmed": 0}),
                 "opened": f.id in counts,
+                "excluded": f.id in own,
             }
             for f in files
         ],
     }
+
+
+class FileExclusionIn(BaseModel):
+    excluded: bool
+
+
+@router.put("/products/{project_id}/files/{library_file_id}", dependencies=[_update])
+async def set_file_excluded(
+    project_id: int, library_file_id: int, body: FileExclusionIn, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Leave a 3MF project of the product's folders out (no plates, pieces, plan or Accoda), or take it back."""
+    from backend.app.farm.models import FarmLibraryFile
+    from backend.app.farm.products.folders import FarmExcludedFile, project_folders
+
+    if await db.get(FarmProduct, project_id) is None:
+        raise HTTPException(404, "Not a product")
+    lib_file = await db.scalar(
+        LibraryFile.active().where(
+            LibraryFile.id == library_file_id, LibraryFile.folder_id.in_(await project_folders(db, project_id))
+        )
+    )
+    if lib_file is None:
+        raise HTTPException(404, "File not in the product's folders")
+    path = await db.scalar(select(FarmLibraryFile.path).where(FarmLibraryFile.library_file_id == library_file_id))
+    if path is None:
+        raise HTTPException(422, "Only files of watched NAS folders can be excluded")
+    row = await db.get(FarmExcludedFile, (project_id, path))
+    if body.excluded and row is None:
+        db.add(FarmExcludedFile(project_id=project_id, path=path))
+    elif not body.excluded and row is not None:
+        await db.delete(row)
+    await db.commit()
+    return {"library_file_id": library_file_id, "path": path, "excluded": body.excluded}
 
 
 @router.get("/products/overview", dependencies=[_read])

@@ -14,6 +14,10 @@ const en = {
     yield_one: '{{count}} piece',
     yield_other: '{{count}} pieces',
     notSliced: 'to slice',
+    exclude: 'Exclude',
+    include: 'Include',
+    excluded: 'excluded',
+    excludeHint: 'Excluded: no plates, pieces, plan or Accoda from this 3MF for this product',
   },
   productPieces: {
     title: 'Pieces of the product',
@@ -249,6 +253,10 @@ const it: typeof en = {
     yield_one: '{{count}} pezzo',
     yield_other: '{{count}} pezzi',
     notSliced: 'da slicare',
+    exclude: 'Escludi',
+    include: 'Includi',
+    excluded: 'escluso',
+    excludeHint: 'Escluso: nessun piatto, pezzo, piano o Accoda da questo 3MF per questo prodotto',
   },
   productPieces: {
     title: 'Pezzi del prodotto',

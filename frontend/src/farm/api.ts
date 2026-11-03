@@ -112,6 +112,7 @@ export interface FarmProductView {
     proposed: number;
     confirmed: number;
     opened: boolean;
+    excluded: boolean;
   }[];
 }
 
@@ -331,6 +332,11 @@ export const farmApi = {
     }),
   createShape: (name: string) => farmRequest<FarmShape>('/shapes', { method: 'POST', body: JSON.stringify({ name }) }),
   getPieces: () => farmRequest<FarmPiece[]>('/pieces'),
+  setFileExcluded: (projectId: number, libraryFileId: number, excluded: boolean) =>
+    farmRequest<{ library_file_id: number; path: string; excluded: boolean }>(
+      `/products/${projectId}/files/${libraryFileId}`,
+      { method: 'PUT', body: JSON.stringify({ excluded }) },
+    ),
   getProductPieces: (projectId: number) => farmRequest<FarmProductPieces>(`/products/${projectId}/pieces`),
   setProductPiece: (projectId: number, data: FarmProductPieceInput) =>
     farmRequest<{ shape_id: number | null; component_code: string | null; quantity: number; plates_confirmed: number }>(

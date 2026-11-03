@@ -48,6 +48,7 @@ const view = {
       proposed: 1,
       confirmed: 1,
       opened: true,
+      excluded: false,
     },
     {
       library_file_id: 10,
@@ -57,6 +58,7 @@ const view = {
       proposed: 0,
       confirmed: 0,
       opened: false,
+      excluded: false,
     },
   ],
 };
@@ -159,6 +161,26 @@ describe('FarmProductGate', () => {
       '/farm/products?tab=plates&q=P1S-Caps-PETG.3mf',
       '/farm/products?tab=plates&q=K1-Caps.3mf',
     ]);
+  });
+
+  it('excludes a 3MF of the linked folders and shows the excluded ones in grey', async () => {
+    const user = userEvent.setup();
+    let sent: unknown;
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () =>
+        HttpResponse.json({ ...view, files: [view.files[0], { ...view.files[1], excluded: true }] }),
+      ),
+      http.put('/api/v1/farm/products/65/files/9', async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ library_file_id: 9, path: 'x', excluded: true });
+      }),
+    );
+    render(<Page id={65} />);
+    const include = await screen.findByRole('button', { name: 'Include K1-Caps.3mf' });
+    expect(include.closest('li')).toHaveClass('opacity-50');
+    expect(screen.getByText('excluded')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Exclude P1S-Caps-PETG.3mf' }));
+    await waitFor(() => expect(sent).toEqual({ excluded: true }));
   });
 
   it('keeps the upstream panels for normal projects', async () => {

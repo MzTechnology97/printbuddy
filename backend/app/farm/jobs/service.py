@@ -36,6 +36,7 @@ from backend.app.farm.plan import service as plan
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.service import _latest_slices
+from backend.app.farm.products.folders import excluded_files
 from backend.app.farm.products.models import FarmComponent
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
@@ -106,6 +107,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
     With ``printer_id`` only the plates of that printer's model are kept.
     """
     resolver = await PrinterModelResolver.load(db)
+    excluded = await excluded_files(db)
     jobs = []
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
@@ -116,6 +118,8 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             plate = await db.get(FarmPlate, plate_id)
             if plate is None or plate.status != "confirmed" or not _pieces(plate, comp):
                 raise HTTPException(422, f"Plate {plate_id} is not a confirmed plate of {comp.code}")
+            if plate.library_file_id in excluded:
+                raise HTTPException(422, f"Plate {plate_id} is in a 3MF excluded from its products")
             plates.append(plate)
         printer_id = req.get("printer_id")
         if printer_id is not None:
@@ -251,6 +255,7 @@ async def dispatch_once(db: AsyncSession) -> int:
         p.id: p for p in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all()
     }
     snapshot = await plan.with_spools_set_by_hand(db, plan.printer_snapshot(list(printers_by_id.values())))
+    excluded = await excluded_files(db)
     busy = set(
         (
             await db.execute(
@@ -277,7 +282,7 @@ async def dispatch_once(db: AsyncSession) -> int:
                 break
             for plate_id in job.plate_ids:
                 plate = await db.get(FarmPlate, plate_id)
-                if plate is None or plate.status != "confirmed":
+                if plate is None or plate.status != "confirmed" or plate.library_file_id in excluded:
                     continue
                 sliced = await sliced_file(db, plate)
                 if sliced is None:

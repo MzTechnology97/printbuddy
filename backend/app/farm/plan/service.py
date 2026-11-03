@@ -23,6 +23,7 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
+from backend.app.farm.products.folders import excluded_files
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.printer import Printer
 from backend.app.models.project import Project
@@ -196,6 +197,7 @@ async def _confirmed_plates(db: AsyncSession, shape_ids: set[int], codes: set[st
     query = select(FarmPlate).where(
         FarmPlate.status == "confirmed",
         FarmPlate.yields.any(FarmPlateYield.shape_id.in_(shape_ids) | FarmPlateYield.component_code.in_(codes)),
+        FarmPlate.library_file_id.notin_(await excluded_files(db)),
     )
     return list((await db.execute(query)).scalars())
 

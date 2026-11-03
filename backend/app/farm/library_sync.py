@@ -38,6 +38,7 @@ from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
 from backend.app.farm.nas.access import library_path, run as access_run
 from backend.app.farm.plates.service import PlateReadError, refresh_plates
+from backend.app.farm.products.folders import excluded_files
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 logger = logging.getLogger(__name__)
@@ -467,9 +468,10 @@ async def _propose_plates(db: AsyncSession, folder_id: int) -> None:
             )
         )
     ).all()
+    excluded = await excluded_files(db)
     for lib_file, state in rows:
         key = (lib_file.id, state.sha256)
-        if key in _plates_checked:
+        if key in _plates_checked or lib_file.id in excluded:  # included again: proposed next scan
             continue
         _plates_checked.add(key)
         try:

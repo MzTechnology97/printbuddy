@@ -213,3 +213,59 @@ async def test_product_pieces_mapped_from_the_product_page(async_client, tmp_pat
     product = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["project_id"] == pid)
     assert [part["component_code"] for part in product["parts"]] == [whole["code"]]
     assert (await async_client.get(f"{API}/products/9999/pieces")).status_code == 404
+
+
+async def test_product_leaves_a_3mf_out(async_client, tmp_path):
+    """An excluded 3MF keeps its plates hidden and unchanged; including it again brings them back."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Kit" / "kit.3mf", {1: [("Hook", box(10, 20, 5), None)]})
+    old = make_mesh_project(nas / "Kit" / "old.3mf", {1: [("Lid", box(30, 30, 2), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
+    }
+    kit_folder = (await async_client.get(f"/api/v1/library/files/{files['kit.3mf']}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Kit"})).json()["project_id"]
+    await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid]})
+    lid = next(
+        p for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"] if p["names"] == ["Lid"]
+    )
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces", json={"yield_ids": lid["yield_ids"], "quantity": 1, "shape_name": "Coperchio"}
+    )
+    lid_code = r.json()["component_code"]
+    lid_plates = [
+        p["id"] for p in (await async_client.get(f"{API}/plates")).json() if p["library_file_id"] == files["old.3mf"]
+    ]
+
+    r = await async_client.put(f"{API}/products/{pid}/files/{files['old.3mf']}", json={"excluded": True})
+    assert r.status_code == 200, r.text
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert {f["filename"]: f["excluded"] for f in view["files"]} == {"kit.3mf": False, "old.3mf": True}
+    assert next(p for p in view["parts"] if p["code"] == lid_code)["plates"] == []
+    pieces = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    assert [p["names"] for p in pieces] == [["Hook"]]
+    assert all(p["library_file_id"] != files["old.3mf"] for p in (await async_client.get(f"{API}/plates")).json())
+    assert all(p["names"] != ["Lid"] for p in (await async_client.get(f"{API}/pieces")).json())
+    assert (await async_client.get(f"{API}/library/files/{files['old.3mf']}/plates")).json() == []
+    r = await async_client.post(f"{API}/jobs", json={"jobs": [{"component_code": lid_code, "plate_ids": lid_plates}]})
+    assert r.status_code == 422
+
+    # Saved again while excluded: not read (no new plates, no geometry).
+    make_mesh_project(old, {1: [("Spring", tetra(), None)]})
+    await scan(async_client, folder)
+
+    # Another product using the same folder still sees it.
+    other = (await async_client.post(f"{API}/products", json={"name": "Kit bis"})).json()["project_id"]
+    await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid, other]})
+    assert any(p["library_file_id"] == files["old.3mf"] for p in (await async_client.get(f"{API}/plates")).json())
+    await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid]})
+
+    r = await async_client.put(f"{API}/products/{pid}/files/{files['old.3mf']}", json={"excluded": False})
+    assert r.status_code == 200
+    back = [p for p in (await async_client.get(f"{API}/plates")).json() if p["library_file_id"] == files["old.3mf"]]
+    assert [p["id"] for p in back] == lid_plates  # kept, as they were before the exclusion
+    assert [y["object_name"] for y in back[0]["yields"]] == ["Lid"]
+    assert (await async_client.put(f"{API}/products/{pid}/files/999999", json={"excluded": True})).status_code == 404
