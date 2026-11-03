@@ -1726,7 +1726,9 @@ class MoonrakerPrinterClient:
             raise ValueError("This printer has no chamber heater")
         limit = self._chamber_max_temp(heater)
         if target < 0 or (limit and target > limit):
-            raise ValueError(f"Chamber temperature must be 0-{limit:g}°C")
+            raise ValueError(
+                f"Chamber temperature must be 0-{limit:g}°C" if limit else "Chamber temperature must be ≥ 0°C"
+            )
         # The printer's own M141 also drives the chamber fans (K2, K1, Zero); plain Klipper has only the heater.
         if any(name.lower() == "gcode_macro m141" for name in available):
             return self.send_gcode(f"M141 S{int(target)}")

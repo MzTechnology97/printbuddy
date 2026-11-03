@@ -3087,7 +3087,7 @@ export interface ExternalLinkUpdate {
 
 // Permission type - all available permissions
 export type Permission =
-  | 'printers:read' | 'printers:create' | 'printers:update' | 'printers:delete' | 'printers:control' | 'printers:files' | 'printers:ams_rfid' | 'printers:clear_plate'
+  | 'printers:read' | 'printers:create' | 'printers:update' | 'printers:delete' | 'printers:control' | 'printers:files' | 'printers:ams_rfid' | 'printers:clear_plate' | 'printers:console'
   | 'archives:read' | 'archives:create'
   | 'archives:update_own' | 'archives:update_all' | 'archives:delete_own' | 'archives:delete_all'
   | 'archives:reprint_own' | 'archives:reprint_all' | 'archives:purge'
@@ -3826,10 +3826,11 @@ export const api = {
     request<{ lines: { message: string; time: number; type: 'command' | 'response' }[] }>(
       `/printers/${printerId}/klipper/console?count=${count}`
     ),
-  klipperConsoleSend: (printerId: number, script: string) =>
+  // confirm: send FIRMWARE_RESTART / RESTART / SAVE_CONFIG / M112 during a print (409 otherwise)
+  klipperConsoleSend: (printerId: number, script: string, confirm = false) =>
     request<{ success: boolean }>(`/printers/${printerId}/klipper/console`, {
       method: 'POST',
-      body: JSON.stringify({ script }),
+      body: JSON.stringify({ script, confirm }),
     }),
 
   // Chamber Light Control

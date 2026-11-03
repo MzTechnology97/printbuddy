@@ -3646,8 +3646,14 @@ class TestPrinterCustomImage:
 class _FakeKlipperClient:
     """The Moonraker client's control methods, recording what the routes send."""
 
-    def __init__(self):
+    def __init__(self, state="IDLE"):
+        from types import SimpleNamespace
+
         self.sent: list[str] = []
+        self.state = SimpleNamespace(state=state, connected=True)
+
+    def check_staleness(self):
+        return False
 
     def send_gcode(self, script):
         self.sent.append(script)
@@ -3711,3 +3717,93 @@ async def test_klipper_macros_and_console_are_refused_for_other_providers(async_
         assert (await async_client.get(f"{base}/klipper/macros")).status_code == 400
         assert (await async_client.post(f"{base}/klipper/console", json={"script": "M115"})).status_code == 400
         assert (await async_client.post(f"{base}/temperature/chamber?target=40")).status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_console_sends_one_command_and_confirms_restarts_while_printing(
+    async_client: AsyncClient, printer_factory
+):
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="K2", provider="klipper", api_url="http://k2.local:7125")
+    client = _FakeKlipperClient(state="RUNNING")
+    url = f"/api/v1/printers/{printer.id}/klipper/console"
+    with patch.dict(printer_manager._clients, {printer.id: client}):
+        for script in ("G28\nM112", "G28\rM112", "   ", "; only a comment"):
+            assert (await async_client.post(url, json={"script": script})).status_code == 400, script
+
+        for script in ("FIRMWARE_RESTART", "restart", "SAVE_CONFIG", "M112 ; stop", "m112"):
+            refused = await async_client.post(url, json={"script": script})
+            assert refused.status_code == 409, script
+            assert refused.json()["detail"]["code"] == "console_confirm_while_printing"
+        assert client.sent == []
+
+        assert (await async_client.post(url, json={"script": "M112", "confirm": True})).status_code == 200
+        assert (await async_client.post(url, json={"script": "M117 hello"})).status_code == 200
+        client.state.state = "IDLE"
+        assert (await async_client.post(url, json={"script": "FIRMWARE_RESTART"})).status_code == 200
+
+    assert client.sent == ["M112", "M117 hello", "FIRMWARE_RESTART"]
+
+
+async def _user_token(username: str, permissions: list[str]) -> str:
+    """A JWT for a user whose only group has ``permissions``."""
+    from sqlalchemy import text
+
+    from backend.app.core.auth import create_access_token, get_password_hash
+    from backend.app.core.database import async_session
+    from backend.app.models.group import Group
+    from backend.app.models.user import User
+
+    async with async_session() as db:
+        group = Group(name=f"{username}-group", permissions=permissions)
+        user = User(username=username, password_hash=get_password_hash("testpass123"), role="user")
+        db.add_all([group, user])
+        await db.commit()
+        await db.execute(
+            text("INSERT INTO user_groups (user_id, group_id) VALUES (:uid, :gid)"), {"uid": user.id, "gid": group.id}
+        )
+        await db.commit()
+    return create_access_token(data={"sub": username})
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_control_posts_need_their_permissions_with_auth_enabled(
+    async_client: AsyncClient, db_session, printer_factory
+):
+    from backend.app.core.auth import generate_api_key
+    from backend.app.models.api_key import APIKey
+    from backend.app.models.settings import Settings
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="K2", provider="klipper", api_url="http://k2.local:7125")
+    full_key, key_hash, key_prefix = generate_api_key()
+    db_session.add(APIKey(name="ha", key_hash=key_hash, key_prefix=key_prefix, can_control_printer=True, enabled=True))
+    db_session.add(Settings(key="auth_enabled", value="true"))
+    await db_session.commit()
+    viewer = await _user_token("klipperviewer", ["printers:read"])
+    operator = await _user_token("klipperoperator", ["printers:read", "printers:control"])
+    console_user = await _user_token("klipperconsole", ["printers:read", "printers:console"])
+
+    base = f"/api/v1/printers/{printer.id}"
+    posts = {
+        "chamber": lambda h: async_client.post(f"{base}/temperature/chamber?target=40", headers=h),
+        "macro": lambda h: async_client.post(f"{base}/klipper/macros/START_PRINT", headers=h),
+        "console": lambda h: async_client.post(f"{base}/klipper/console", json={"script": "M115"}, headers=h),
+    }
+    bearer = lambda token: {"Authorization": f"Bearer {token}"}  # noqa: E731
+    client = _FakeKlipperClient()
+    with patch.dict(printer_manager._clients, {printer.id: client}):
+        for name, post in posts.items():
+            assert (await post({})).status_code == 401, name
+            assert (await post(bearer(viewer))).status_code == 403, name
+        # printers:control runs the chamber and macros, not the console; nor does an API key.
+        assert (await posts["chamber"](bearer(operator))).status_code == 200
+        assert (await posts["macro"](bearer(operator))).status_code == 200
+        assert (await posts["console"](bearer(operator))).status_code == 403
+        assert (await posts["console"]({"X-API-Key": full_key})).status_code == 403
+        assert (await posts["console"](bearer(console_user))).status_code == 200
+
+    assert client.sent == ["M141 S40", "START_PRINT", "M115"]

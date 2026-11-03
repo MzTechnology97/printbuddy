@@ -4753,16 +4753,37 @@ async def klipper_console(
         raise HTTPException(502, "Could not read the printer's console") from exc
 
 
+# Commands that stop or restart Klipper (and the print with it): sent during a print only when confirmed.
+_CONSOLE_CONFIRM_WHILE_PRINTING = frozenset({"FIRMWARE_RESTART", "RESTART", "SAVE_CONFIG", "M112"})
+
+
 @router.post("/{printer_id}/klipper/console")
 async def klipper_console_send(
     printer_id: int,
-    script: str = Body(..., embed=True, min_length=1, max_length=2000),
-    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    script: str = Body(..., embed=True, min_length=1, max_length=500),
+    confirm: bool = Body(False, embed=True),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONSOLE),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send a G-code command from the console; its responses appear in the console lines."""
+    """Send one G-code command from the console; its responses appear in the console lines."""
+    if "\n" in script or "\r" in script:
+        raise HTTPException(400, "One command per request: no line breaks")
+    words = script.split(";", 1)[0].split()  # Klipper ignores what follows ';'
+    if not words:
+        raise HTTPException(400, "Empty command")
     await _klipper_client(db, printer_id, "gcode_store")
     send_gcode = _require_send_gcode(printer_id)
+    command = words[0].upper()
+    state = printer_manager.get_status(printer_id)
+    printing = state is not None and state.state in ("RUNNING", "PAUSE")
+    if command in _CONSOLE_CONFIRM_WHILE_PRINTING and printing and not confirm:
+        raise HTTPException(
+            409,
+            {
+                "code": "console_confirm_while_printing",
+                "message": f"{command} stops or restarts the printer during the print: confirm to send it",
+            },
+        )
     try:
         ok = await asyncio.to_thread(send_gcode, script)
     except httpx.HTTPStatusError as exc:

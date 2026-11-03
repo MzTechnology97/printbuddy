@@ -23,6 +23,7 @@ class Permission(StrEnum):
     PRINTERS_FILES = "printers:files"  # Send files to printer
     PRINTERS_AMS_RFID = "printers:ams_rfid"  # Re-read AMS RFID tags
     PRINTERS_CLEAR_PLATE = "printers:clear_plate"  # Confirm plate cleared for next print
+    PRINTERS_CONSOLE = "printers:console"  # Send raw G-code from the Klipper console (admins only by default)
 
     # Archives
     ARCHIVES_READ = "archives:read"
@@ -184,6 +185,7 @@ PERMISSION_CATEGORIES = {
         Permission.PRINTERS_FILES,
         Permission.PRINTERS_AMS_RFID,
         Permission.PRINTERS_CLEAR_PLATE,
+        Permission.PRINTERS_CONSOLE,
     ],
     "Archives": [
         Permission.ARCHIVES_READ,
