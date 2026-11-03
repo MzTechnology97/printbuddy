@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, PlainSerializer, model_validator
+from pydantic import BaseModel, PlainSerializer, field_validator, model_validator
 
 
 # Custom serializer to ensure UTC datetimes have Z suffix
@@ -13,6 +13,37 @@ def serialize_utc_datetime(dt: datetime | None) -> str | None:
 
 
 UTCDatetime = Annotated[datetime | None, PlainSerializer(serialize_utc_datetime)]
+
+QueueStatus = Literal["pending", "printing", "completed", "failed", "skipped", "cancelled"]
+QUEUE_STATUSES = ("pending", "printing", "completed", "failed", "skipped", "cancelled")
+# Words printers and providers use for the end of a print (Klipper "stopped", MQTT "aborted"...)
+_STATUS_ALIASES = {
+    "aborted": "cancelled",
+    "stopped": "cancelled",
+    "canceled": "cancelled",
+    "cancel": "cancelled",
+    "finish": "completed",
+    "finished": "completed",
+    "complete": "completed",
+    "success": "completed",
+    "done": "completed",
+    "error": "failed",
+    "failure": "failed",
+    "fail": "failed",
+    "running": "printing",
+    "started": "printing",
+    "paused": "printing",
+    "queued": "pending",
+    "waiting": "pending",
+}
+
+
+def normalize_queue_status(value: object) -> str:
+    """The queue status closest to ``value``; an unknown word counts as ``failed`` (ended, look at it)."""
+    status = str(value or "").strip().lower()
+    if status in QUEUE_STATUSES:
+        return status
+    return _STATUS_ALIASES.get(status, "failed")
 
 
 class PrintQueueItemCreate(BaseModel):
@@ -105,7 +136,7 @@ class PrintQueueItemResponse(BaseModel):
     layer_inspect: bool = False
     timelapse: bool = False
     use_ams: bool = True
-    status: Literal["pending", "printing", "completed", "failed", "skipped", "cancelled"]
+    status: QueueStatus
     started_at: UTCDatetime
     completed_at: UTCDatetime
     error_message: str | None
@@ -145,6 +176,9 @@ class PrintQueueItemResponse(BaseModel):
 
     # Auto-print G-code injection
     gcode_injection: bool = False
+
+    # A status stored before it was normalised (a Klipper "stopped") must not break the whole list.
+    _tolerant_status = field_validator("status", mode="before")(normalize_queue_status)
 
     class Config:
         from_attributes = True

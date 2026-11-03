@@ -4292,11 +4292,11 @@ async def on_print_complete(printer_id: int, data: dict):
                 )
             item = printing_items[0] if printing_items else None
             if item:
-                queue_status = data.get("status", "completed")
-                # MQTT sends "aborted" for cancelled prints; normalise to
-                # "cancelled" so it matches the queue schema Literal.
-                if queue_status == "aborted":
-                    queue_status = "cancelled"
+                # MQTT sends "aborted", Klipper "stopped" for cancelled prints: the queue keeps
+                # only the statuses of its schema Literal ("cancelled" for both).
+                from backend.app.schemas.print_queue import normalize_queue_status
+
+                queue_status = normalize_queue_status(data.get("status", "completed"))
                 item.status = queue_status
                 item.completed_at = datetime.now(timezone.utc)
                 if queue_status == "failed" and not item.error_message:
