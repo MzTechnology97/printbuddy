@@ -267,6 +267,9 @@ class TelegramConfig(BaseModel):
     allowed_chat_ids: str | None = Field(
         default=None, description="Chats whose commands are answered, comma-separated; empty: chat_id"
     )
+    allowed_user_ids: str | None = Field(
+        default=None, description="Users (from.id) whose commands are answered; empty: the private chats allowed"
+    )
 
 
 class EmailConfig(BaseModel):
