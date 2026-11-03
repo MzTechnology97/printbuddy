@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint, delete, event, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, UniqueConstraint, delete, event, func, inspect, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -11,13 +11,56 @@ from backend.app.models.project import Project
 
 
 class FarmShape(Base):
-    """A geometric piece ("Tartufo sopra"): plates yield shapes, the same plate for every colour."""
+    """A geometric piece ("Tartufo sopra"): plates yield shapes, the same plate for every colour.
+
+    Each belongs to one product (``project_id``, see ``isolation``): the Set di 2 and the Set di 5
+    each have their own "Tartufo sopra", so names repeat across products.
+    """
 
     __tablename__ = "farm_shapes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Its pieces in the product's 3MFs, by geometry: [fingerprint, ...]; by name the objects without a mesh.
+    fingerprints: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    object_names: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+add_columns("farm_shapes", {"project_id": "INTEGER", "fingerprints": "JSON", "object_names": "JSON"})
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _shape_names_per_product(target, connection, **kw) -> None:
+    """Shape names were unique overall: drop that constraint (SQLite only by rebuilding the table)."""
+    insp = inspect(connection)
+    if not insp.has_table("farm_shapes"):
+        return
+    unique = [u for u in insp.get_unique_constraints("farm_shapes") if u["column_names"] == ["name"]]
+    if not unique:
+        return
+    if connection.dialect.name != "sqlite":
+        for u in unique:
+            connection.execute(text(f'ALTER TABLE farm_shapes DROP CONSTRAINT "{u["name"]}"'))
+        return
+    have = {c["name"] for c in insp.get_columns("farm_shapes")}
+    columns = ", ".join(
+        c for c in ("id", "name", "created_at", "project_id", "fingerprints", "object_names") if c in have
+    )
+    connection.execute(
+        text(
+            "CREATE TABLE farm_shapes_new (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR(200) NOT NULL,"
+            " created_at DATETIME DEFAULT (CURRENT_TIMESTAMP), project_id INTEGER, fingerprints JSON,"
+            " object_names JSON)"
+        )
+    )
+    connection.execute(text(f"INSERT INTO farm_shapes_new ({columns}) SELECT {columns} FROM farm_shapes"))
+    connection.execute(text("DROP TABLE farm_shapes"))
+    connection.execute(text("ALTER TABLE farm_shapes_new RENAME TO farm_shapes"))
+    connection.execute(text("CREATE INDEX ix_farm_shapes_project_id ON farm_shapes (project_id)"))
 
 
 class FarmComponent(Base):
@@ -37,13 +80,23 @@ class FarmComponent(Base):
     shape_id: Mapped[int | None] = mapped_column(ForeignKey("farm_shapes.id"), nullable=True, index=True)
     color: Mapped[str | None] = mapped_column(String(50), nullable=True)
     recipe: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{"shape_id", "quantity"}]; then no shape_id
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )  # its product
     retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 add_columns(
-    "farm_components", {"shape_id": "INTEGER", "color": "VARCHAR(50)", "retired_at": "DATETIME", "recipe": "JSON"}
+    "farm_components",
+    {
+        "shape_id": "INTEGER",
+        "color": "VARCHAR(50)",
+        "retired_at": "DATETIME",
+        "recipe": "JSON",
+        "project_id": "INTEGER",
+    },
 )
 
 

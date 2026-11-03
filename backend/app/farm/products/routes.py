@@ -904,6 +904,10 @@ from backend.app.farm.products.pieces import router as pieces_router  # noqa: E4
 
 router.include_router(pieces_router)
 
+from backend.app.farm.products.isolation import router as isolation_router  # noqa: E402
+
+router.include_router(isolation_router)
+
 
 # ---------------------------------------------------------------- one-off import from Seller Hub
 
