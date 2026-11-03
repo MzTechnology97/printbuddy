@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -43,7 +44,9 @@ class JobsIn(BaseModel):
     jobs: list[JobIn] = Field(min_length=1, max_length=100)
 
 
-def _job_dict(job: FarmPrintJob, item_status: str | None, printer: str | None) -> dict:
+def _job_dict(
+    job: FarmPrintJob, item_status: str | None, printer: str | None, finished_at: datetime | None = None
+) -> dict:
     return {
         "id": job.id,
         "component_code": job.component_code,
@@ -59,6 +62,7 @@ def _job_dict(job: FarmPrintJob, item_status: str | None, printer: str | None) -
         "pieces": job.pieces if job.pieces is not None else job.expected_pieces,
         "scheduled_time": (job.queue_options or {}).get("scheduled_time"),
         "created_at": job.created_at,
+        "finished_at": finished_at,  # the queue item's end, UTC
     }
 
 
@@ -82,23 +86,35 @@ async def plate_filaments(plate_id: int, color: str | None = None, db: AsyncSess
 
 
 @router.get("/jobs", dependencies=[_read])
-async def list_jobs(db: AsyncSession = Depends(get_db)) -> list[dict]:
-    """Jobs still waiting or in the queue, plus those of the last two days."""
-    since = datetime.now(timezone.utc).replace(tzinfo=None) - RECENT
-    rows = await db.execute(
-        select(FarmPrintJob, PrintQueueItem.status, Printer.name)
+async def list_jobs(
+    state: Literal["completed"] | None = None, since: datetime | None = None, db: AsyncSession = Depends(get_db)
+) -> list[dict]:
+    """Jobs still waiting or in the queue, plus those of the last two days.
+
+    ``state=completed``: only the jobs printed to the end (at or after ``since``), however old, oldest first:
+    Seller Hub's batches to check before they go to stock.
+    """
+    query = (
+        select(FarmPrintJob, PrintQueueItem.status, Printer.name, PrintQueueItem.completed_at)
         .outerjoin(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
         .outerjoin(Printer, Printer.id == FarmPrintJob.printer_id)
-        .where(
+    )
+    if state == "completed":
+        query = query.where(FarmPrintJob.status == "queued", PrintQueueItem.status == "completed")
+        if since is not None:
+            query = query.where(PrintQueueItem.completed_at >= service._utc(since))
+        query = query.order_by(PrintQueueItem.completed_at, FarmPrintJob.id)
+    else:
+        recent = datetime.now(timezone.utc).replace(tzinfo=None) - RECENT
+        query = query.where(
             or_(
                 FarmPrintJob.status == "waiting",
                 PrintQueueItem.status.in_(service.ACTIVE_QUEUE),
-                FarmPrintJob.updated_at >= since,
+                FarmPrintJob.updated_at >= recent,
             )
-        )
-        .order_by(FarmPrintJob.id.desc())
-    )
-    return [_job_dict(job, status, printer) for job, status, printer in rows.all()]
+        ).order_by(FarmPrintJob.id.desc())
+    rows = await db.execute(query)
+    return [_job_dict(job, status, printer, finished) for job, status, printer, finished in rows.all()]
 
 
 @router.delete("/jobs/{job_id}", dependencies=[_delete])
