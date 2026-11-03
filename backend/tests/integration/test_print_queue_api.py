@@ -1496,8 +1496,9 @@ class TestAbortedStatusNormalisation:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_on_print_complete_normalises_aborted_to_cancelled(self, queue_item_factory, db_session):
-        """Verify the completion handler maps 'aborted' → 'cancelled' for queue items."""
+    @pytest.mark.parametrize("reported", ["aborted", "stopped"])  # MQTT, Klipper
+    async def test_on_print_complete_normalises_aborted_to_cancelled(self, queue_item_factory, db_session, reported):
+        """Verify the completion handler maps 'aborted' and 'stopped' → 'cancelled' for queue items."""
         import asyncio
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1537,7 +1538,7 @@ class TestAbortedStatusNormalisation:
             await on_print_complete(
                 item.printer_id,
                 {
-                    "status": "aborted",
+                    "status": reported,
                     "filename": "test.gcode",
                     "subtask_name": "Test",
                     "timelapse_was_active": False,
@@ -1554,6 +1555,30 @@ class TestAbortedStatusNormalisation:
 
         # The item status should be normalised to 'cancelled', not 'aborted'
         assert item.status == "cancelled"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_queue_list_reads_a_stored_unknown_status(self, async_client: AsyncClient, queue_item_factory):
+        """A 'stopped' row saved before the fix (or any new word) no longer breaks the whole list."""
+        stopped = await queue_item_factory(status="stopped")
+        odd = await queue_item_factory(status="exploded")
+        pending = await queue_item_factory(status="pending")
+
+        response = await async_client.get("/api/v1/queue/", params={"status": None})
+        assert response.status_code == 200, response.text
+        listed = {item["id"]: item["status"] for item in response.json()}
+        assert listed.get(pending.id) == "pending"
+        detail = await async_client.get(f"/api/v1/queue/{stopped.id}")
+        assert detail.status_code == 200 and detail.json()["status"] == "cancelled"
+        assert (await async_client.get(f"/api/v1/queue/{odd.id}")).json()["status"] == "failed"
+
+    def test_normalize_queue_status(self):
+        from backend.app.schemas.print_queue import QUEUE_STATUSES, normalize_queue_status
+
+        assert [normalize_queue_status(s) for s in QUEUE_STATUSES] == list(QUEUE_STATUSES)
+        assert normalize_queue_status("Stopped") == normalize_queue_status("aborted") == "cancelled"
+        assert normalize_queue_status("finish") == "completed"
+        assert normalize_queue_status(None) == normalize_queue_status("whatever") == "failed"
 
     @pytest.mark.asyncio
     @pytest.mark.integration
