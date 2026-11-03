@@ -627,3 +627,35 @@ async def test_two_versions_of_a_piece_merge_into_one_shape(async_client, tmp_pa
     assert "Base" not in {s["name"] for s in (await async_client.get(f"{API}/shapes")).json()}
     retired = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
     assert retired[codes["Base"]] is True
+
+
+async def test_saving_a_piece_reuses_a_shape_by_name_only_with_the_same_geometry(async_client, tmp_path):
+    """Every CAD calls its object "Assemblaggio": Audi hooks and Land Rover gutters must not share a shape."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Audi" / "audi.3mf", {1: [("Assemblaggio", box(10, 20, 5), None)]})
+    make_mesh_project(nas / "Gutters" / "gutters.3mf", {1: [("Assemblaggio", box(30, 30, 2), None)]})
+    make_mesh_project(nas / "Audi2" / "audi-k1.3mf", {1: [("Assemblaggio", box(10, 20, 5), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
+    }
+
+    async def save(name, file):
+        fid = (await async_client.get(f"/api/v1/library/files/{files[file]}")).json()["folder_id"]
+        pid = (await async_client.post(f"{API}/products", json={"name": name})).json()["project_id"]
+        await async_client.put(f"{API}/products/{pid}/folders/{fid}", json={"linked": True})
+        [piece] = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+        return await async_client.put(
+            f"{API}/products/{pid}/pieces",
+            json={"yield_ids": piece["yield_ids"], "quantity": 1, "shape_name": "Assemblaggio"},
+        )
+
+    audi = await save("Audi", "audi.3mf")
+    assert audi.status_code == 200
+    gutters = await save("Gutters", "gutters.3mf")
+    assert gutters.status_code == 409  # other geometry: it needs its own name
+    assert "Assemblaggio" in gutters.json()["detail"]
+    again = await save("Audi K1", "audi-k1.3mf")
+    assert again.json()["shape_id"] == audi.json()["shape_id"]  # same geometry: the same piece
