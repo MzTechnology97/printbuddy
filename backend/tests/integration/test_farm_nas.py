@@ -441,6 +441,34 @@ class TestNasSlicing:
 
 @pytest.mark.integration
 class TestNasUpload:
+
+    async def test_a_plate_gone_from_the_project_is_not_resliced(self, async_client, db_session, share, sidecar):
+        """Saved again with fewer plates: the output of a vanished plate is left alone, not re-sliced."""
+        import asyncio
+
+        from backend.app.farm import reslice
+        from backend.app.services.slice_dispatch import slice_dispatch
+
+        reslice._running.clear()
+        await configure(async_client)
+        await sync(async_client)
+        hook_id = (await files_by_name(async_client))["hook.3mf"]["library_file_id"]
+        await slice_now(db_session, hook_id, plate=2)
+
+        make_project(share / SUB / "Hook" / "hook.3mf", {1: TWO_PLATES[1]}, printer_model="Bambu Lab X1 Carbon")
+        age(share / SUB / "Hook" / "hook.3mf", 120)
+        assert (await sync(async_client))["updated"] == 1
+
+        for _ in range(200):
+            jobs = [j for j in slice_dispatch._jobs.values() if j.source_id == hook_id]
+            if jobs and all(j.status in ("completed", "failed") for j in jobs):
+                break
+            await asyncio.sleep(0.05)
+        assert {j.status for j in jobs} == {"completed"}  # nothing to slice, nothing failed
+        assert len(sidecar) == 1  # only the first slice: plate 2 is gone
+        plates = (await async_client.get(f"/api/v1/farm/library/files/{hook_id}/plates")).json()
+        assert [p["plate_index"] for p in plates] == [1]
+
     async def _folder_id(self, db_session, name):
         from backend.app.models.library import LibraryFolder
 
