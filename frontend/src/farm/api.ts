@@ -188,6 +188,7 @@ export interface FarmPrinterSpool {
   color_name: string | null;
   color: string | null;
   updated_at: string | null;
+  materials?: string[]; // filament types of this model in the slicer profiles
 }
 
 export interface FarmPlanSettings {

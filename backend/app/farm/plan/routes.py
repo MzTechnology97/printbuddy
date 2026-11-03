@@ -10,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
-from backend.app.farm.plan import service
+from backend.app.farm.plan import filaments, service
 from backend.app.farm.plan.models import FarmPrinterSpool
+from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.models.printer import Printer
 from backend.app.services.printer_providers.factory import normalize_provider
 
@@ -86,6 +87,7 @@ async def list_printer_spools(db: AsyncSession = Depends(get_db)) -> list[dict]:
     spools = {s.printer_id: s for s in (await db.execute(select(FarmPrinterSpool))).scalars()}
     out = []
     ids = {p.id for p in printers}
+    resolver = await PrinterModelResolver.load(db)
     for p in service.printer_snapshot(printers):
         if p["id"] not in ids or p["loaded"]:
             continue  # reads its own spools (K2 with CFS)
@@ -99,8 +101,28 @@ async def list_printer_spools(db: AsyncSession = Depends(get_db)) -> list[dict]:
                 "color_name": spool.color_name if spool else None,
                 "color": spool.color if spool else None,
                 "updated_at": spool.updated_at if spool else None,
+                "materials": filaments.materials(p["model"], resolver),
             }
         )
+    return out
+
+
+@router.get("/filament-catalog", dependencies=[_read])
+async def get_filament_catalog(model: str | None = None, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Filaments (vendor, name, type, compatible printer presets) per printer model, from the slicer profiles.
+
+    ``model`` keeps one Printbuddy printer model ("P1S", "K2"); ``printer_model`` is the Printbuddy model
+    each catalog model maps to, null when no printer of the farm has it.
+    """
+    resolver = await PrinterModelResolver.load(db)
+    keep = filaments.catalog_model(model, resolver) if model else None
+    if model and keep is None:
+        raise HTTPException(404, f"No filament catalog for printer model '{model}'")
+    out = []
+    for key, entries in filaments.catalog().items():
+        if keep in (None, key):
+            target = resolver.resolve(key).target_model
+            out.append({"model": key, "printer_model": target, "filaments": entries})
     return out
 
 
