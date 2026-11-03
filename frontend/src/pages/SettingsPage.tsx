@@ -1122,7 +1122,6 @@ export function SettingsPage() {
       (settings.default_timelapse ?? false) !== (localSettings.default_timelapse ?? false) ||
       (settings.stagger_group_size ?? 2) !== (localSettings.stagger_group_size ?? 2) ||
       (settings.stagger_interval_minutes ?? 5) !== (localSettings.stagger_interval_minutes ?? 5) ||
-      (settings.require_plate_clear ?? false) !== (localSettings.require_plate_clear ?? false) ||
       (settings.print_farm_monitor_refresh_interval ?? 15) !== (localSettings.print_farm_monitor_refresh_interval ?? 15);
 
     if (!hasChanges) {
@@ -1211,7 +1210,8 @@ export function SettingsPage() {
         default_timelapse: localSettings.default_timelapse,
         stagger_group_size: localSettings.stagger_group_size,
         stagger_interval_minutes: localSettings.stagger_interval_minutes,
-        require_plate_clear: localSettings.require_plate_clear,
+        // fork (printfarm): require_plate_clear is not sent: always on, and saving another setting must never
+        // write the schema default back over it (it turned the plate-clear gate off in production).
         print_farm_monitor_refresh_interval: localSettings.print_farm_monitor_refresh_interval,
       };
       updateMutation.mutate(settingsToSave);

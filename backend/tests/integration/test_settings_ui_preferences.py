@@ -70,6 +70,15 @@ class TestUiPreferencesEndpoint:
         assert isinstance(data["require_plate_clear"], bool)
 
     @pytest.mark.asyncio
+    async def test_plate_clear_is_on_when_never_saved(self, async_client: AsyncClient):
+        """Fork (printfarm): never saved, it reads True, as the scheduler does; the settings page used to get
+        False here and write it back on any other change, which turned the plate-clear gate off."""
+        for url in ("/api/v1/settings/ui-preferences", "/api/v1/settings/"):
+            response = await async_client.get(url)
+            assert response.status_code == 200
+            assert response.json()["require_plate_clear"] is True
+
+    @pytest.mark.asyncio
     async def test_returns_expected_field_set(self, async_client: AsyncClient):
         """Pin the exact set of fields the endpoint exposes — adding a sensitive
         field to _UI_PREFERENCE_FIELDS by accident should fail this assert and
