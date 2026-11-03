@@ -180,6 +180,16 @@ class TestProducts:
         assert await db_session.get(Project, pid) is not None
 
     @pytest.mark.asyncio
+    async def test_removing_a_product_retires_its_own_components(self, async_client):
+        own, shared = await component(async_client, "Solo suo"), await component(async_client, "Condiviso")
+        pid = await product(async_client, name="X", parts=[{"component_code": own}, {"component_code": shared}])
+        await product(async_client, name="Y", parts=[{"component_code": shared}])
+        r = await async_client.delete(f"{API}/products/{pid}")
+        assert r.json() == {"project_id": pid, "retired": [own]}
+        retired = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+        assert (retired[own], retired[shared]) == (True, False)
+
+    @pytest.mark.asyncio
     async def test_deleting_project_drops_product_rows(self, async_client, db_session):
         a = await component(async_client, "A")
         pid = await product(async_client, name="X", parts=[{"component_code": a}])

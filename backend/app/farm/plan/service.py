@@ -209,6 +209,19 @@ async def _confirmed_plates(db: AsyncSession, shape_ids: set[int], codes: set[st
     return list((await db.execute(query)).scalars())
 
 
+async def _disabled_only(db: AsyncSession) -> set[str]:
+    """Codes of the components that only disabled products use."""
+    rows = await db.execute(
+        select(FarmComponent.code, FarmProduct.disabled_at)
+        .join(FarmProductPart, FarmProductPart.component_id == FarmComponent.id)
+        .join(FarmProduct, FarmProduct.project_id == FarmProductPart.project_id)
+    )
+    active, disabled = set(), set()
+    for code, disabled_at in rows.all():
+        (disabled if disabled_at else active).add(code)
+    return disabled - active
+
+
 async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, codes: list[str] | None = None) -> dict:
     """Components to print (``to_print > 0``), most urgent first, each with its ranked plates.
 
@@ -219,6 +232,9 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
     components, fetched_at, error = await fetch_components(db, config["url"])
     if codes is None:
         wanted = [c for c in components if isinstance(c.get("to_print"), int) and c["to_print"] > 0]
+        # Components only disabled products use are not proposed (by hand they still are, below).
+        disabled = await _disabled_only(db)
+        wanted = [c for c in wanted if c.get("code") not in disabled]
     else:
         hub = {c.get("code"): c for c in components}
         wanted = [hub.get(code) or {"code": code} for code in dict.fromkeys(codes)]

@@ -223,6 +223,7 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "skus": product.skus or [],
                 "asins": product.asins or [],
                 "kind": product.kind,
+                "disabled": product.disabled_at is not None,
                 "updated_at": serialize_utc_datetime(max(product.updated_at, project.updated_at)),
                 "parts": [line(c, q) for c, q in own],
                 "variants": variants,
@@ -371,6 +372,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         "name": project.name,
         "has_cover": bool(project.cover_image_filename),
         "kind": product.kind,
+        "disabled": product.disabled_at is not None,
         "skus": product.skus or [],
         "asins": product.asins or [],
         "parts": [
@@ -584,17 +586,54 @@ async def update_product(project_id: int, data: ProductIn, db: AsyncSession = De
     return {"project_id": project_id}
 
 
-@router.delete("/products/{project_id}", dependencies=[_update])
-async def unmark_product(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
-    """Stop treating the project as a product; the project itself and its prints stay."""
+class ActiveIn(BaseModel):
+    active: bool
+
+
+@router.put("/products/{project_id}/active", dependencies=[_update])
+async def set_product_active(project_id: int, data: ActiveIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Disable a product (kept with its data, left out of what to print) or enable it again."""
     product = await db.get(FarmProduct, project_id)
     if product is None:
         raise HTTPException(404, "Product not found")
-    for part in (await db.execute(select(FarmProductPart).where(FarmProductPart.project_id == project_id))).scalars():
+    product.disabled_at = None if data.active else (product.disabled_at or _now())
+    product.updated_at = _now()
+    await db.commit()
+    return {"project_id": project_id, "disabled": product.disabled_at is not None}
+
+
+@router.delete("/products/{project_id}", dependencies=[_update])
+async def unmark_product(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Stop treating the project as a product; the project itself and its prints stay.
+
+    Its components no other product uses are retired, so Seller Hub stops counting them
+    (codes are never deleted).
+    """
+    product = await db.get(FarmProduct, project_id)
+    if product is None:
+        raise HTTPException(404, "Product not found")
+    parts = list((await db.execute(select(FarmProductPart).where(FarmProductPart.project_id == project_id))).scalars())
+    for part in parts:
         await db.delete(part)
     await db.delete(product)
+    await db.flush()
+    still_used = set(
+        (
+            await db.execute(
+                select(FarmProductPart.component_id).where(
+                    FarmProductPart.component_id.in_([p.component_id for p in parts])
+                )
+            )
+        ).scalars()
+    )
+    retired = []
+    for part in parts:
+        comp = await db.get(FarmComponent, part.component_id)
+        if comp is not None and comp.id not in still_used and comp.retired_at is None:
+            comp.retired_at = _now()
+            retired.append(comp.code)
     await db.commit()
-    return {"project_id": project_id}
+    return {"project_id": project_id, "retired": retired}
 
 
 async def _next_code(db: AsyncSession) -> str:

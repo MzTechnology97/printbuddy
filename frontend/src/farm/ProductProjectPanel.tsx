@@ -1,7 +1,7 @@
 // Printfarm (fork): on the project page of a product, the farm view replaces upstream's
 // Production Plan and BOM (which list every file as a part and have no quantities for products).
 import { useState, type ReactNode } from 'react';
-import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
@@ -389,6 +389,20 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
   const queryClient = useQueryClient();
   const [printing, setPrinting] = useState<FarmPlanComponent[] | null>(null);
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
+  const navigate = useNavigate();
+  const active = useMutation({
+    mutationFn: (on: boolean) => farmApi.setProductActive(view.project_id, on),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const remove = useMutation({
+    mutationFn: () => farmApi.unmarkProduct(view.project_id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+      navigate('/farm/products');
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
   const plan = useMutation({
     mutationFn: () => farmApi.getProductPlan(view.project_id),
     onSuccess: (p) => setPrinting(p.components),
@@ -420,7 +434,17 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
               </Link>
             </div>
           </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="secondary" disabled={active.isPending} onClick={() => active.mutate(view.disabled)}>
+              {t(view.disabled ? 'farm.project.enable' : 'farm.project.disable')}
+            </Button>
+            <Button size="sm" variant="danger" disabled={remove.isPending}
+              onClick={() => window.confirm(t('farm.project.removeProductConfirm', { name: view.name })) && remove.mutate()}>
+              {t('farm.project.removeProduct')}
+            </Button>
+          </div>
         </div>
+        {view.disabled && <p className="text-sm text-amber-400">{t('farm.project.disabledNote')}</p>}
         {(view.skus.length > 0 || view.asins.length > 0) && (
           <p className="text-xs text-bambu-gray break-words">
             {view.skus.join(' · ')}

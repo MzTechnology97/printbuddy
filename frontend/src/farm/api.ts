@@ -23,6 +23,7 @@ export interface FarmProduct {
   asins: string[];
   updated_at: string;
   kind?: FarmProductKind;
+  disabled?: boolean;
   parts: FarmPart[];
   variants?: FarmVariant[];
 }
@@ -94,6 +95,7 @@ export interface FarmProductView {
   name: string;
   has_cover: boolean;
   kind: FarmProductKind;
+  disabled: boolean;
   skus: string[];
   asins: string[];
   parts: (FarmComponent & {
@@ -293,7 +295,13 @@ export const farmApi = {
     farmRequest<{ project_id: number }>('/products', { method: 'POST', body: JSON.stringify(data) }),
   updateProduct: (id: number, data: FarmProductInput) =>
     farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  unmarkProduct: (id: number) => farmRequest<{ project_id: number }>(`/products/${id}`, { method: 'DELETE' }),
+  unmarkProduct: (id: number) =>
+    farmRequest<{ project_id: number; retired: string[] }>(`/products/${id}`, { method: 'DELETE' }),
+  setProductActive: (id: number, active: boolean) =>
+    farmRequest<{ project_id: number; disabled: boolean }>(`/products/${id}/active`, {
+      method: 'PUT',
+      body: JSON.stringify({ active }),
+    }),
   createComponent: (data: { name?: string; shape_id?: number; color?: string }) =>
     farmRequest<FarmComponent>('/components', { method: 'POST', body: JSON.stringify(data) }),
   updateComponent: (

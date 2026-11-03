@@ -104,6 +104,19 @@ describe('ProductsPage', () => {
     expect(screen.getByText('Portaoggetti X')).toBeInTheDocument(); // no type chosen yet
   });
 
+  it('marks disabled products and lists them last', async () => {
+    const off = { ...products[0], project_id: 10, name: 'Fuori produzione', disabled: true };
+    server.use(
+      http.get('/api/v1/farm/products', () =>
+        HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products: [off, ...products] }),
+      ),
+    );
+    render(<ProductsPage />);
+    expect(await screen.findByText('disabled')).toBeInTheDocument();
+    const names = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(names[names.length - 1]).toContain('Fuori produzione');
+  });
+
   it('filters products by name, SKU, ASIN or component', async () => {
     const lamp = {
       ...products[0],
