@@ -6059,6 +6059,7 @@ async def lifespan(app: FastAPI):
     await background_dispatch.stop()
     smart_plug_manager.stop_scheduler()
     notification_service.stop_digest_scheduler()
+    notification_service.stop_retries()
     notify_live_activity_service.stop_scheduler()
     github_backup_service.stop_scheduler()
     local_backup_service.stop_scheduler()

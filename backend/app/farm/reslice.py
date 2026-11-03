@@ -84,6 +84,9 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple[int | N
                     exc.detail,
                 )
                 error = exc
+            except Exception as exc:  # unexpected: notified, then the job fails as before
+                notify.slicing_done(project_id, lib_file.filename, plate, colour, notify.AUTO_RESLICE, exc)
+                raise
         await db.refresh(state)  # saved again while slicing? then slice the newest version too
         if state.sha256 == version:
             break

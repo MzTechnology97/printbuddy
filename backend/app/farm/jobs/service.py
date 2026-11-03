@@ -648,9 +648,13 @@ class FarmJobDispatcher:
             self._task = asyncio.create_task(self._loop(), name="farm-job-dispatcher")
 
     def stop(self) -> None:
+        from backend.app.farm import alerts
+
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        alerts.stop_check()
+        notify.cancel_pending()
 
     async def _loop(self) -> None:
         from backend.app.farm import alerts, printer_files
@@ -663,7 +667,7 @@ class FarmJobDispatcher:
                 await asyncio.sleep(TICK_SECONDS)
                 async with database.async_session() as db:
                     await dispatch_once(db)
-                    await alerts.check(db)  # never raises
+                    alerts.start_check()  # its own task: Seller Hub's speed never delays the dispatch
                     # Each on its own: one failing never stops the dispatch or the others.
                     await _guarded(db, "colour sampling", record_used_colors)
                     await _guarded(db, "prints outside the queue", outside.scan_archives)

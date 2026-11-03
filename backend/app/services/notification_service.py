@@ -22,13 +22,16 @@ from backend.app.services.notify_live_activity_service import notify_live_activi
 
 logger = logging.getLogger(__name__)
 
-# Seconds before each new try after a network error (timeout, refused connection); the tries run in the
+# Seconds before each new try when the provider could not be reached; the tries run in the
 # background, so the event that sent the notification doesn't wait for them.
 RETRY_DELAYS = (5, 20)
+# Only errors raised before the request reached the provider are retried: after a read timeout the
+# message may have been delivered already, and sending it again could make a duplicate.
+RETRYABLE = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 class NotificationNetworkError(Exception):
-    """The provider could not be reached (timeout, connection error): worth another try."""
+    """The provider could not be reached (no connection): worth another try."""
 
 
 def _endpoint(exc: httpx.TransportError) -> str:
@@ -715,8 +718,8 @@ class NotificationService:
     ) -> tuple[bool, str]:
         """Send notification to a specific provider.
 
-        A network error (timeout, connection) comes back as a failure saying what failed, where
-        and after how long; with ``raise_network`` it raises ``NotificationNetworkError`` instead.
+        A network error comes back as a failure saying what failed, where and after how long; with
+        ``raise_network`` a connection error (``RETRYABLE``) raises ``NotificationNetworkError`` instead.
         """
         # Check quiet hours
         if self._is_in_quiet_hours(provider):
@@ -752,7 +755,7 @@ class NotificationService:
         except httpx.TransportError as e:
             # str() of a timeout is empty: name it, and where and when it happened (not the URL: tokens).
             error = f"{type(e).__name__} from {_endpoint(e)} after {time.monotonic() - started:.1f}s"
-            if raise_network:
+            if raise_network and isinstance(e, RETRYABLE):
                 raise NotificationNetworkError(error) from e
             logger.warning("Error sending notification via %s: %s", provider.name, error)
             return False, error
@@ -761,9 +764,22 @@ class NotificationService:
             return False, str(e) or type(e).__name__
 
     def _retry_later(self, provider_id: int, title: str, message: str, **send: Any) -> None:
-        task = asyncio.create_task(self._retry(provider_id, title, message, **send))
+        task = asyncio.create_task(self._retry_guarded(provider_id, title, message, **send))
         self._retry_tasks.add(task)  # keep a reference until it ends
         task.add_done_callback(self._retry_tasks.discard)
+
+    def stop_retries(self) -> None:
+        """At shutdown: retries still waiting are dropped."""
+        for task in list(self._retry_tasks):
+            task.cancel()
+
+    async def _retry_guarded(self, provider_id: int, title: str, message: str, **send: Any) -> None:
+        try:
+            await self._retry(provider_id, title, message, **send)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Retry of a notification to provider %s failed", provider_id)
 
     async def _retry(
         self,
@@ -904,12 +920,14 @@ class NotificationService:
         force_immediate: bool = False,
         image_data: bytes | None = None,
         variables: dict | None = None,
-    ):
+    ) -> int:
         """Send notification to multiple providers and log the results.
 
         All notifications are always sent immediately. If digest mode is enabled,
         the notification is ALSO queued for the daily digest summary.
+        Returns how many providers got it, or are retrying it.
         """
+        delivered = 0
         for provider in providers:
             try:
                 # Always send notification immediately
@@ -936,6 +954,8 @@ class NotificationService:
                         image_data=image_data,
                         variables=variables,
                     )
+                    delivered += 1  # being retried: not "undelivered" yet
+                delivered += success
 
                 # Also queue for digest if enabled (digest is a summary, not a queue)
                 if provider.daily_digest_enabled and provider.daily_digest_time:
@@ -978,6 +998,7 @@ class NotificationService:
                     printer_id=printer_id,
                     printer_name=printer_name,
                 )
+        return delivered
 
     async def on_print_start(
         self,
@@ -2030,15 +2051,19 @@ class NotificationService:
         db: AsyncSession,
         printer_id: int | None = None,
         printer_name: str | None = None,
-    ):
-        """A farm event (``farm.notify``): to the providers with ``on_<event_type>`` set, with its template."""
+    ) -> bool:
+        """A farm event (``farm.notify``): to the providers with ``on_<event_type>`` set, with its template.
+
+        True when at least one of them got it (or is retrying it).
+        """
         providers = await self._get_providers_for_event(db, f"on_{event_type}", printer_id)
         if not providers:
-            return
+            return False
         title, message = await self._build_message_from_template(db, event_type, dict(variables))
-        await self._send_to_providers(
+        delivered = await self._send_to_providers(
             providers, title, message, db, event_type, printer_id, printer_name, variables=variables
         )
+        return delivered > 0
 
     async def _queue_for_digest(
         self,

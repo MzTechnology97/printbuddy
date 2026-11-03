@@ -3,6 +3,7 @@
 No request leaves the test: the HTTP client, the sleeps and the database are mocked.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,8 +50,16 @@ async def test_timeout_is_reported_with_its_type_endpoint_and_duration():
         assert error.startswith("ReadTimeout from api.telegram.org/sendMessage after ")
         assert TOKEN not in error
 
-        with pytest.raises(NotificationNetworkError):
-            await service._send_to_provider(_telegram_provider(), "Title", "Body", raise_network=True)
+        # Telegram may have delivered it already: a read timeout is reported, never retried.
+        success, error = await service._send_to_provider(_telegram_provider(), "Title", "Body", raise_network=True)
+        assert not success and error.startswith("ReadTimeout")
+
+        # The request never reached Telegram: worth another try.
+        refused = httpx.ConnectError("refused", request=httpx.Request("POST", f"https://api.telegram.org/bot{TOKEN}/x"))
+        for exc in (refused, httpx.ConnectTimeout("", request=refused.request)):
+            client.post = AsyncMock(side_effect=exc)
+            with pytest.raises(NotificationNetworkError):
+                await service._send_to_provider(_telegram_provider(), "Title", "Body", raise_network=True)
 
 
 @pytest.mark.asyncio
@@ -63,10 +72,11 @@ async def test_network_error_is_logged_and_retried_in_the_background():
         patch.object(service, "_update_provider_status", AsyncMock()) as status,
         patch.object(service, "_log_notification", AsyncMock()) as log,
     ):
-        await service._send_to_providers([provider], "Title", "Body", AsyncMock(), event_type="print_start")
+        delivered = await service._send_to_providers([provider], "Title", "Body", AsyncMock(), event_type="print_start")
 
     retry_later.assert_called_once()
     assert retry_later.call_args.args[0] == provider.id
+    assert delivered == 1  # being retried counts, so farm events are not sent again meanwhile
     error = status.call_args.args[3]
     assert error == f"ReadTimeout x (attempt 1/3); retrying in {ns.RETRY_DELAYS[0]}s"
     assert log.call_args.kwargs["error_message"] == error
@@ -111,3 +121,29 @@ async def test_retry_waits_longer_each_time_and_logs_the_outcome_once(outcomes, 
     log.assert_called_once()
     if not success:
         assert log.call_args.kwargs["error_message"] == "ReadTimeout x (attempt 3/3)"
+
+
+@pytest.mark.asyncio
+async def test_retry_task_never_raises_and_is_cancelled_at_shutdown(caplog):
+    service = NotificationService()
+    with patch.object(service, "_retry", AsyncMock(side_effect=RuntimeError("db gone"))):
+        service._retry_later(
+            7, "Title", "Body", event_type="x", printer_id=None, printer_name=None, image_data=None, variables=None
+        )
+        await asyncio.gather(*service._retry_tasks)
+    assert "Retry of a notification to provider 7 failed" in caplog.text
+
+    waiting = asyncio.Event()
+
+    async def wait_forever(*args, **kwargs):
+        await waiting.wait()
+
+    with patch.object(service, "_retry", wait_forever):
+        service._retry_later(
+            7, "Title", "Body", event_type="x", printer_id=None, printer_name=None, image_data=None, variables=None
+        )
+        task = next(iter(service._retry_tasks))
+        await asyncio.sleep(0)
+        service.stop_retries()
+        await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
