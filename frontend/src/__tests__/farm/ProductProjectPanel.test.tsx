@@ -17,6 +17,7 @@ const view = {
   project_id: 65,
   name: 'Tappi Paraspifferi AMI',
   has_cover: false,
+  disabled: false,
   folders: [{ folder_id: 3, name: 'Caps' }],
   skus: ['TP-01'],
   asins: ['B0TEST0065'],
@@ -419,6 +420,34 @@ describe('FarmProductGate', () => {
     await user.selectOptions(pick, 'Specchietto');
     await user.click(within(section).getByRole('button', { name: 'Unlink' }));
     await waitFor(() => expect(sent).toEqual([['5', { linked: true }], ['3', { linked: false }]]));
+    confirm.mockRestore();
+  });
+
+  it('disables, enables and removes the product from its sheet', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () =>
+        sent.length > 1
+          ? HttpResponse.json({ detail: 'Not a product' }, { status: 404 }) // removed
+          : HttpResponse.json({ ...view, disabled: true }),
+      ),
+      http.put('/api/v1/farm/products/65/active', async ({ request }) => {
+        sent.push(['active', await request.json()]);
+        return HttpResponse.json({ project_id: 65, disabled: false });
+      }),
+      http.delete('/api/v1/farm/products/65', () => {
+        sent.push(['delete']);
+        return HttpResponse.json({ project_id: 65, retired: [] });
+      }),
+    );
+    sheet(65);
+    expect(await screen.findByText(/Disabled: kept with its data/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Enable again' }));
+    await user.click(screen.getByRole('button', { name: 'Remove product' }));
+    await waitFor(() => expect(sent).toEqual([['active', { active: true }], ['delete']]));
+    await waitFor(() => expect(window.location.pathname).toBe('/farm/products'));
     confirm.mockRestore();
   });
 

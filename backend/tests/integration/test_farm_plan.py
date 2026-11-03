@@ -125,6 +125,30 @@ async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_disabled_products_leave_what_to_print(async_client, farm):
+    products = {p["name"]: p for p in (await async_client.get(f"{API}/products")).json()["products"]}
+    one, kit = products["Tappo – Nero"]["project_id"], products["Kit tappi"]["project_id"]
+
+    r = await async_client.put(f"{API}/products/{one}/active", json={"active": False})
+    assert r.json() == {"project_id": one, "disabled": True}
+    codes = [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
+    assert farm["black"] in codes  # the kit, still active, uses it too
+
+    await async_client.put(f"{API}/products/{kit}/active", json={"active": False})
+    codes = [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
+    assert farm["black"] not in codes
+    assert farm["white"] in codes  # no product uses the white component: Seller Hub's ask stands
+    by_hand = (await async_client.get(f"{API}/plan/products/{one}")).json()["components"]
+    assert [c["code"] for c in by_hand] == [farm["black"]]  # printing it by hand still works
+    view = (await async_client.get(f"{API}/products/{one}/view")).json()
+    assert view["disabled"] is True
+
+    await async_client.put(f"{API}/products/{one}/active", json={"active": True})
+    codes = [c["code"] for c in (await async_client.get(f"{API}/plan")).json()["components"]]
+    assert farm["black"] in codes
+
+
+@pytest.mark.asyncio
 async def test_seller_hub_down_uses_last_answer(async_client, farm, monkeypatch):
     first = (await async_client.get(f"{API}/plan")).json()
 

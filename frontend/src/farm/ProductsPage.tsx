@@ -290,8 +290,11 @@ export function ProductsPage() {
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
   const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
-  const todo = (p: FarmProduct) => !p.kind || p.parts.length === 0 || p.parts.some((x) => x.plates.length === 0);
-  const shown = (products.data?.products || []).filter((p) => matches(p, query.trim()) && (!onlyTodo || todo(p)));
+  const todo = (p: FarmProduct) =>
+    !p.disabled && (!p.kind || p.parts.length === 0 || p.parts.some((x) => x.plates.length === 0));
+  const shown = (products.data?.products || [])
+    .filter((p) => matches(p, query.trim()) && (!onlyTodo || todo(p)))
+    .sort((a, b) => Number(!!a.disabled) - Number(!!b.disabled)); // disabled ones last
 
   return (
     <div className="p-4 md:p-8 space-y-6">
@@ -357,7 +360,8 @@ export function ProductsPage() {
           {shown.map((p) => {
             const s = stats.get(p.project_id);
             return (
-              <li key={p.project_id} className="flex gap-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4">
+              <li key={p.project_id}
+                className={`flex gap-4 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4 ${p.disabled ? 'opacity-60' : ''}`}>
                 <div className="w-20 h-20 shrink-0 rounded bg-bambu-dark overflow-hidden flex items-center justify-center">
                   {s?.has_cover ? (
                     <img alt="" loading="lazy" decoding="async" className="w-full h-full object-cover"
@@ -371,8 +375,8 @@ export function ProductsPage() {
                     <h2 className="text-white font-semibold truncate">
                       <Link to={`/farm/products/${p.project_id}`} className="hover:text-bambu-green">{p.name}</Link>
                     </h2>
-                    <span className={`text-xs shrink-0 ${todo(p) ? 'text-amber-400' : 'text-bambu-green'}`}>
-                      {t(todo(p) ? 'farm.project.todo' : 'farm.project.readyBadge')}
+                    <span className={`text-xs shrink-0 ${p.disabled ? 'text-bambu-gray' : todo(p) ? 'text-amber-400' : 'text-bambu-green'}`}>
+                      {t(p.disabled ? 'farm.project.disabledBadge' : todo(p) ? 'farm.project.todo' : 'farm.project.readyBadge')}
                     </span>
                     <Button variant="ghost" size="sm" onClick={() => setEditing(draftOf(p))}>{t('farm.products.edit')}</Button>
                   </div>

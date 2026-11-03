@@ -85,11 +85,13 @@ class FarmProduct(Base):
     variants: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # "set": printed and sold together, one component (a set of pieces); "kit": parts printed apart; None: not said.
     kind: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Not made any more for now: kept with its data, left out of what to print.
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)"})
+add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME"})
 
 
 class FarmProductPart(Base):
