@@ -1,4 +1,4 @@
-"""Farm API: Accoda (phase 4) jobs."""
+"""Farm API: Accoda (phase 4) jobs, and the prints done outside the queue (``outside``)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
-from backend.app.farm.jobs import service
+from backend.app.farm.jobs import outside, service
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.models.print_queue import PrintQueueItem
@@ -44,15 +44,33 @@ class JobsIn(BaseModel):
     jobs: list[JobIn] = Field(min_length=1, max_length=100)
 
 
+class AssignPartIn(BaseModel):
+    component_code: str = Field(min_length=1, max_length=12)
+    pieces: int = Field(ge=1, le=10000)
+
+
+class AssignIn(BaseModel):
+    parts: list[AssignPartIn] = Field(default_factory=list, max_length=50)
+    not_production: bool = False
+
+
+def _state(job: FarmPrintJob, item_status: str | None) -> str:
+    if job.status == "queued":
+        return item_status or "removed"
+    return "completed" if job.status == "outside" else job.status
+
+
 def _job_dict(
     job: FarmPrintJob, item_status: str | None, printer: str | None, finished_at: datetime | None = None
 ) -> dict:
+    state = _state(job, item_status)
     return {
         "id": job.id,
         "component_code": job.component_code,
         "color": job.color,
-        # waiting -> pending (in the queue, waiting for the plate-clear OK) -> printing -> completed/failed
-        "state": job.status if job.status != "queued" else (item_status or "removed"),
+        # waiting -> pending (in the queue, waiting for the plate-clear OK) -> printing -> completed/failed;
+        # outside the queue: to_assign -> completed, or not_production
+        "state": state,
         "note": job.note,
         "plate_ids": job.plate_ids,
         "plate_id": job.plate_id,
@@ -62,7 +80,12 @@ def _job_dict(
         "pieces": job.pieces if job.pieces is not None else job.expected_pieces,
         "scheduled_time": (job.queue_options or {}).get("scheduled_time"),
         "created_at": job.created_at,
-        "finished_at": finished_at,  # the queue item's end, UTC
+        "finished_at": finished_at or job.finished_at,  # the print's end, UTC
+        # A batch since: the end of a queue print; when recognised or assigned for one outside the queue
+        "listed_at": (job.listed_at if job.source else finished_at) if state == "completed" else None,
+        "outside_queue": job.source is not None,
+        "print_name": job.outside_name,  # outside the queue: the file it printed
+        "proposal": job.proposal,  # to_assign: the components its name suggests
     }
 
 
@@ -89,10 +112,12 @@ async def plate_filaments(plate_id: int, color: str | None = None, db: AsyncSess
 async def list_jobs(
     state: Literal["completed"] | None = None, since: datetime | None = None, db: AsyncSession = Depends(get_db)
 ) -> list[dict]:
-    """Jobs still waiting or in the queue, plus those of the last two days.
+    """Jobs still waiting or in the queue, prints outside the queue still to assign, plus those of the last two days.
 
-    ``state=completed``: only the jobs printed to the end (at or after ``since``), however old, oldest first:
-    Seller Hub's batches to check before they go to stock.
+    ``state=completed``: only the jobs printed to the end, however old, oldest first: Seller Hub's batches to
+    check before they go to stock. Prints outside the queue come too (``outside_queue``) once their components
+    are known, those to assign only after. ``since`` and the order go by ``listed_at``: a print assigned today
+    is a batch of today, whenever it ended.
     """
     query = (
         select(FarmPrintJob, PrintQueueItem.status, Printer.name, PrintQueueItem.completed_at)
@@ -100,21 +125,34 @@ async def list_jobs(
         .outerjoin(Printer, Printer.id == FarmPrintJob.printer_id)
     )
     if state == "completed":
-        query = query.where(FarmPrintJob.status == "queued", PrintQueueItem.status == "completed")
+        queued = query.where(FarmPrintJob.status == "queued", PrintQueueItem.status == "completed")
+        printed = query.where(FarmPrintJob.status == "outside")
         if since is not None:
-            query = query.where(PrintQueueItem.completed_at >= service._utc(since))
-        query = query.order_by(PrintQueueItem.completed_at, FarmPrintJob.id)
-    else:
-        recent = datetime.now(timezone.utc).replace(tzinfo=None) - RECENT
-        query = query.where(
-            or_(
-                FarmPrintJob.status == "waiting",
-                PrintQueueItem.status.in_(service.ACTIVE_QUEUE),
-                FarmPrintJob.updated_at >= recent,
-            )
-        ).order_by(FarmPrintJob.id.desc())
+            queued = queued.where(PrintQueueItem.completed_at >= service._utc(since))
+            printed = printed.where(FarmPrintJob.listed_at >= service._utc(since))
+        jobs = [_job_dict(*row) for q in (queued, printed) for row in (await db.execute(q)).all()]
+        return sorted(jobs, key=lambda j: (j["listed_at"] or datetime.min, j["id"]))
+    recent = datetime.now(timezone.utc).replace(tzinfo=None) - RECENT
+    query = query.where(
+        or_(
+            FarmPrintJob.status.in_(("waiting", "to_assign")),
+            PrintQueueItem.status.in_(service.ACTIVE_QUEUE),
+            FarmPrintJob.updated_at >= recent,
+        )
+    ).order_by(FarmPrintJob.id.desc())
     rows = await db.execute(query)
     return [_job_dict(job, status, printer, finished) for job, status, printer, finished in rows.all()]
+
+
+@router.post("/jobs/{job_id}/assign", dependencies=[_create])
+async def assign_job(job_id: int, data: AssignIn, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """A print outside the queue: the components and pieces it printed, or ``not_production``."""
+    job = await db.get(FarmPrintJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    jobs = await outside.assign(db, job, [p.model_dump() for p in data.parts], data.not_production)
+    printer = await db.get(Printer, job.printer_id) if job.printer_id else None
+    return [_job_dict(j, None, printer.name if printer else None) for j in jobs]
 
 
 @router.delete("/jobs/{job_id}", dependencies=[_delete])

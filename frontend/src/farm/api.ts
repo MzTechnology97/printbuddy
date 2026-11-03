@@ -185,9 +185,19 @@ export interface FarmPlanComponent {
 
 export interface FarmJob {
   id: number;
-  component_code: string;
+  component_code: string; // '' while a print outside the queue is to assign
   color: string | null;
-  state: 'waiting' | 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled' | 'skipped' | 'removed';
+  state:
+    | 'waiting'
+    | 'pending'
+    | 'printing'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'skipped'
+    | 'removed'
+    | 'to_assign'
+    | 'not_production';
   note: string | null;
   plate_ids: number[];
   plate_id: number | null;
@@ -197,6 +207,18 @@ export interface FarmJob {
   pieces: number;
   scheduled_time: string | null; // UTC
   created_at: string;
+  finished_at?: string | null; // UTC
+  outside_queue?: boolean; // printed outside Accoda (display, slicer, Mainsail...)
+  print_name?: string | null; // outside the queue: the file it printed
+  proposal?: FarmJobProposal[] | null; // to_assign: what its name suggests
+}
+
+export interface FarmJobProposal {
+  component_code: string;
+  name: string;
+  pieces: number;
+  color: string | null;
+  plate_id: number;
 }
 
 /** One print of a component, with upstream's queue options as its print dialog sets them. */
@@ -373,6 +395,8 @@ export const farmApi = {
       used_grams: number; used_meters?: number; nozzle_id?: number }[] }>(
       `/plates/${plateId}/filaments${color ? `?color=${encodeURIComponent(color)}` : ''}`),
   cancelJob: (id: number) => farmRequest<{ id: number; state: string }>(`/jobs/${id}`, { method: 'DELETE' }),
+  assignJob: (id: number, body: { parts?: { component_code: string; pieces: number }[]; not_production?: boolean }) =>
+    farmRequest<FarmJob[]>(`/jobs/${id}/assign`, { method: 'POST', body: JSON.stringify(body) }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
   savePlanSettings: (data: FarmPlanSettings) =>
     farmRequest<FarmPlanSettings>('/plan/settings', { method: 'PUT', body: JSON.stringify(data) }),

@@ -18,6 +18,7 @@ import {
   type FarmPlanSettings,
   type FarmPrinterSpool,
 } from './api';
+import { OutsidePrints } from './OutsidePrints';
 import { PlateThumb } from './PlatesPanel';
 import { PrinterSlots } from './PrinterSlots';
 import { kitUnits, suggestPrints } from './suggest';
@@ -545,27 +546,36 @@ function JobsList() {
     onError: (e: Error) => showToast(e.message, 'error'),
   });
   if (!jobs.data?.length) return null;
+  const listed = jobs.data.filter((j) => j.state !== 'to_assign'); // those have their own section
   return (
-    <section className="space-y-2">
-      <h2 className="text-lg font-semibold text-white">{t('farm.jobs.title')}</h2>
-      <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
-        {jobs.data.map((j: FarmJob) => (
-          <li key={j.id} className="p-3 flex flex-wrap items-center gap-3 text-sm">
-            <span className="font-mono text-bambu-green">{j.component_code}</span>
-            <span className="text-white">{j.color}</span>
-            <span className="text-bambu-gray">{t('farm.plan.yield', { count: j.pieces })}</span>
-            <span className="text-white">{t(`farm.jobs.state.${j.state}`, { defaultValue: j.state })}</span>
-            {j.printer && <span className="text-bambu-gray">· {j.printer}</span>}
-            {j.state === 'waiting' && j.note && <span className="text-xs text-amber-400 break-words min-w-0 flex-1">{j.note}</span>}
-            {(j.state === 'waiting' || j.state === 'pending') && (
-              <Button size="sm" variant="ghost" className="ml-auto" onClick={() => cancel.mutate(j.id)}>
-                {t('farm.jobs.cancel')}
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
-    </section>
+    <>
+      <OutsidePrints jobs={jobs.data} />
+      {listed.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-lg font-semibold text-white">{t('farm.jobs.title')}</h2>
+          <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
+            {listed.map((j: FarmJob) => (
+              <li key={j.id} className="p-3 flex flex-wrap items-center gap-3 text-sm">
+                <span className="font-mono text-bambu-green">{j.component_code}</span>
+                <span className="text-white">{j.color}</span>
+                <span className="text-bambu-gray">{t('farm.plan.yield', { count: j.pieces })}</span>
+                <span className="text-white">{t(`farm.jobs.state.${j.state}`, { defaultValue: j.state })}</span>
+                {j.printer && <span className="text-bambu-gray">· {j.printer}</span>}
+                {j.outside_queue && (
+                  <span className="text-xs text-bambu-gray break-all">· {t('farm.outside.tag', { name: j.print_name })}</span>
+                )}
+                {j.state === 'waiting' && j.note && <span className="text-xs text-amber-400 break-words min-w-0 flex-1">{j.note}</span>}
+                {(j.state === 'waiting' || j.state === 'pending') && (
+                  <Button size="sm" variant="ghost" className="ml-auto" onClick={() => cancel.mutate(j.id)}>
+                    {t('farm.jobs.cancel')}
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
   );
 }
 
