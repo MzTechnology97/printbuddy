@@ -15,7 +15,7 @@ type Part = FarmProductView['parts'][number];
 const INPUT =
   'bg-bambu-dark border border-bambu-dark-tertiary rounded px-2 py-1 text-sm text-white placeholder-bambu-gray focus:outline-none focus:border-bambu-green';
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-import { AccodaSummary } from './PrintPlanPage';
+import { AccodaSummary, PrinterChip } from './PrintPlanPage';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import { FilePlates } from './PlatesPanel';
 import './i18n';
@@ -221,6 +221,71 @@ function ProductPlates({ view }: { view: FarmProductView }) {
   );
 }
 
+type Fit = FarmPlanComponent['plates'][number]['printers'][number];
+const fitRank = (f: Fit) => (f.idle && f.material_ok && f.color_ok ? 2 : f.idle ? 1 : 0);
+
+/** Per printer model: the product's plates for it, and its printers (best fit over those plates). */
+function ProductPrinters({ view }: { view: FarmProductView }) {
+  const { t } = useTranslation();
+  const plan = useQuery({
+    queryKey: ['farm', 'product-plan', view.project_id],
+    queryFn: () => farmApi.getProductPlan(view.project_id),
+  });
+  const printers = useQuery({ queryKey: ['printers'], queryFn: api.getPrinters });
+  const models = new Map<string, { plates: string[]; printers: Map<number, Fit> }>();
+  for (const c of plan.data?.components || []) {
+    for (const p of c.plates) {
+      const m = models.get(p.printer_model) ?? { plates: [] as string[], printers: new Map<number, Fit>() };
+      m.plates.push(
+        `${c.code} · ${fileName(p.file)} · ${t('farm.plates.plate', { index: p.plate })} · ${p.material} · ${t('farm.project.perPrint', { count: p.yield })}`,
+      );
+      for (const f of p.printers) {
+        const seen = m.printers.get(f.id);
+        if (!seen || fitRank(f) > fitRank(seen)) m.printers.set(f.id, f);
+      }
+      models.set(p.printer_model, m);
+    }
+  }
+  const covered = new Set([...models.keys()].map((m) => m.toLowerCase()));
+  const missing = [
+    ...new Set(
+      (printers.data || [])
+        .filter((p) => p.is_active && p.model && !covered.has(p.model.toLowerCase()))
+        .map((p) => p.model as string),
+    ),
+  ].sort();
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-white">{t('farm.project.printers')}</h3>
+      <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.project.printersIntro')}</p>
+      {plan.isLoading ? (
+        <Loader2 className="w-5 h-5 animate-spin text-bambu-green" />
+      ) : (
+        <ul className="space-y-2">
+          {[...models.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([model, m]) => (
+            <li key={model} className="bg-bambu-dark rounded-lg p-3 space-y-1">
+              <p className="text-white text-sm font-semibold">{model}</p>
+              <ul className="text-xs text-bambu-gray break-all">
+                {[...new Set(m.plates)].map((line) => <li key={line}>{line}</li>)}
+              </ul>
+              <div className="flex flex-wrap gap-1">
+                {m.printers.size ? (
+                  [...m.printers.values()].map((f) => <PrinterChip key={f.id} p={f} />)
+                ) : (
+                  <span className="text-xs text-bambu-gray">{t('farm.project.noActivePrinter')}</span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {missing.length > 0 && (
+        <p className="text-xs text-amber-400">{t('farm.project.noProfile', { models: missing.join(', ') })}</p>
+      )}
+    </section>
+  );
+}
+
 /** Set or kit, and what is still missing before the product can be printed. */
 function ProductStatus({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
@@ -347,6 +412,8 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
         <ProductPiecesPanel projectId={view.project_id} />
 
         <ProductPlates view={view} />
+
+        <ProductPrinters view={view} />
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold text-white">{t('farm.project.files')}</h3>

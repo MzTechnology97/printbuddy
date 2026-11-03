@@ -355,6 +355,43 @@ describe('FarmProductGate', () => {
     confirm.mockRestore();
   });
 
+  it('shows the printers of each model with a plate, and the models without one', async () => {
+    const fit = (id: number, name: string, idle: boolean, ok: boolean) =>
+      ({ id, name, idle, material_ok: ok, color_ok: ok });
+    const plate = (file: string, model: string, printers: unknown[]) => ({
+      plate_id: 1, library_file_id: 9, file, plate: 1, printer_model: model, material: 'PETG', yield: 8,
+      print_time_seconds: null, filament_grams: null, sliced: true, score: 1, printers,
+    });
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)),
+      http.get('/api/v1/farm/plan/products/65', () =>
+        HttpResponse.json({
+          fetched_at: null, error: null, tolerance: 80,
+          components: [
+            { code: 'C-0118', name: 'Tappo', plates: [
+              plate('Caps/P1S-Caps-PETG.3mf', 'P1S', [fit(3, 'P1S uno', true, true), fit(4, 'P1S due', false, true)]),
+              plate('Caps/A1-Caps.3mf', 'A1', []),
+            ] },
+          ],
+        }),
+      ),
+      http.get('/api/v1/printers/', () =>
+        HttpResponse.json([
+          { id: 3, name: 'P1S uno', model: 'P1S', is_active: true },
+          { id: 7, name: 'K1', model: 'K1', is_active: true },
+          { id: 8, name: 'Vecchia', model: 'X1C', is_active: false },
+        ]),
+      ),
+    );
+    sheet(65);
+    const section = (await screen.findByRole('heading', { name: 'Printers' })).closest('section')!;
+    expect(await within(section).findByText('C-0118 · P1S-Caps-PETG.3mf · Plate 1 · PETG · 8 per print')).toBeInTheDocument();
+    expect(within(section).getByText('P1S uno')).toBeInTheDocument();
+    expect(within(section).getByText('P1S due')).toBeInTheDocument();
+    expect(within(section).getByText('no active printer of this model')).toBeInTheDocument(); // A1
+    expect(within(section).getByText('No plate for: K1')).toBeInTheDocument(); // the inactive X1C is left out
+  });
+
   it('keeps the upstream panels for normal projects', async () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),

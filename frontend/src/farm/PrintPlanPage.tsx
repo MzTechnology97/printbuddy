@@ -29,7 +29,7 @@ const STATUS_STYLE: Record<string, string> = {
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
 
-function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
+export function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
   const { t } = useTranslation();
   const ready = p.idle && p.material_ok && p.color_ok;
   const dot = ready ? 'bg-bambu-green' : p.idle ? 'bg-amber-400' : 'bg-bambu-gray';
