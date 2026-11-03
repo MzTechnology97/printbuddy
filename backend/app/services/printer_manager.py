@@ -217,7 +217,7 @@ class PrinterManager:
         # Persisted to DB (printers.awaiting_plate_clear) so the gate survives restarts/power
         # cycles — see issue #961. Loaded into this set at startup via load_awaiting_plate_clear_from_db().
         self._awaiting_plate_clear: set[int] = set()
-        # fork: when each printer's gate was raised (epoch seconds; 0 for gates loaded at startup), so a
+        # fork: when each printer's gate was raised (epoch seconds; startup time for gates loaded then), so a
         # Telegram "Piatto libero" button from an earlier finish can be refused (services/telegram_bot.py).
         self._plate_clear_raised_at: dict[int, float] = {}
 
@@ -244,10 +244,14 @@ class PrinterManager:
         return printer_id in self._awaiting_plate_clear
 
     def plate_clear_raised_at(self, printer_id: int) -> float | None:
-        """When the plate-clear gate was raised (0: before this start); None when not awaiting."""
+        """When the plate-clear gate was raised; None when not awaiting.
+
+        A gate whose time is unknown gets "now" at the first ask: buttons built from then on work,
+        older ones are refused.
+        """
         if printer_id not in self._awaiting_plate_clear:
             return None
-        return self._plate_clear_raised_at.get(printer_id, 0.0)
+        return self._plate_clear_raised_at.setdefault(printer_id, time.time())
 
     def set_awaiting_plate_clear(self, printer_id: int, awaiting: bool):
         """Set/clear the awaiting-plate-clear gate and persist it to DB.
@@ -339,6 +343,10 @@ class PrinterManager:
                 result = await db.execute(select(Printer.id).where(Printer.awaiting_plate_clear.is_(True)))
                 ids = {row[0] for row in result.all()}
                 self._awaiting_plate_clear = ids
+                # When it was raised is lost with the restart: from now, so a Telegram "Piatto libero"
+                # button sent before the restart is refused (the plate may have been cleared meanwhile).
+                loaded_at = time.time()
+                self._plate_clear_raised_at = dict.fromkeys(ids, loaded_at)
                 if ids:
                     logger.info("Loaded %d printer(s) awaiting plate-clear acknowledgment: %s", len(ids), sorted(ids))
         except Exception as e:

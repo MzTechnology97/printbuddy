@@ -259,8 +259,16 @@ class TelegramBot:
                 logger.info(
                     "Telegram bot %s: taking commands from %d chat(s), %d user(s)", poller.label, len(chats), len(users)
                 )
+            elif poller.users == users and poller.allowed == chats:
+                continue
             else:
                 poller.allowed, poller.users = chats, users
+            if not users:  # said when it starts and when the settings change, not every minute
+                logger.warning(
+                    "Telegram bot %s: no allowed user (only group chats and no allowed_user_ids): every command is "
+                    "ignored",
+                    poller.label,
+                )
 
     def _ended(self, token: str, poller: _Poller) -> None:
         """A poller that ended on its own (not dropped) is forgotten: the next reconcile starts a new one."""
@@ -277,16 +285,25 @@ class TelegramBot:
             poller.task.cancel()
         await poller.client.close()
 
+    async def _learn_name(self, poller: _Poller) -> None:
+        """The bot's username (getMe): without it "/cmd@ThisBot" in a group is ignored."""
+        try:
+            poller.username = (await poller.client.call("getMe") or {}).get("username")
+        except Exception as exc:
+            logger.warning("Telegram bot %s: getMe failed: %s; trying again", poller.label, _describe(exc))
+
     async def _poll(self, token: str, poller: _Poller) -> None:
         try:
             await poller.client.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in COMMANDS])
-            poller.username = (await poller.client.call("getMe") or {}).get("username")
         except (httpx.HTTPError, TelegramError) as exc:
-            logger.warning("Telegram bot %s: setMyCommands/getMe failed: %s", poller.label, _describe(exc))
+            logger.warning("Telegram bot %s: setMyCommands failed: %s", poller.label, _describe(exc))
         # offset None: the first call (offset -1, no wait) only skips what piled up while Printbuddy was off,
         # so old commands and buttons are never run after a restart.
-        offset, delay = None, 5
+        offset, delay, name_at = None, 5, 0.0
         while True:
+            if poller.username is None and time.monotonic() >= name_at:  # at start, then once a minute
+                name_at = time.monotonic() + RELOAD_SECONDS
+                await self._learn_name(poller)
             fresh = offset is None
             params: dict[str, Any] = {
                 "timeout": 0 if fresh else POLL_SECONDS,
@@ -413,6 +430,9 @@ class TelegramBot:
         kind, *parts = data.split(":")
         who = (chat, user)
         if kind == "no":
+            pending = self._pending.get(parts[0]) if parts else None
+            if pending is not None and (pending.chat, pending.user) != who:
+                return Reply("Questa conferma è di un altro utente.")
             if parts:
                 self._pending.pop(parts[0], None)
             return Reply("Annullato.")
@@ -429,11 +449,12 @@ class TelegramBot:
             if command == "accoda":
                 return await self._ask_enqueue(arg, who)
         if kind == "ok" and len(parts) == 1:
-            pending = self._pending.pop(parts[0], None)  # used once: a second tap finds nothing
+            pending = self._pending.get(parts[0])
+            if pending is not None and (pending.chat, pending.user) != who:
+                return Reply("Questa conferma è di un altro utente.")  # it stays for who asked
+            self._pending.pop(parts[0], None)  # used once: a second tap finds nothing
             if pending is None or time.time() - pending.created > CONFIRM_SECONDS:
                 return Reply("Conferma scaduta o già usata: ripeti il comando.")
-            if (pending.chat, pending.user) != who:
-                return Reply("Questa conferma è di un altro utente.")
             if pending.action in ("pause", "resume", "stop") and _print_running(int(pending.arg)) != pending.check:
                 return Reply("La stampa è cambiata da quando l'hai chiesto: ripeti il comando.")
             return await self.execute(chat, pending.action, pending.arg, user)

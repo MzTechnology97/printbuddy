@@ -7,6 +7,7 @@ to Telegram and no printer is contacted. Data is made up.
 import asyncio
 import json
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -385,3 +386,85 @@ async def test_plate_to_clear_notification_carries_the_button(commands, markup):
     if markup:
         keyboard = {"inline_keyboard": [[{"text": "✅ Piatto libero", "callback_data": "clear:3:9"}]]}
         assert json.loads(sent["reply_markup"]) == keyboard
+
+
+async def test_plate_buttons_from_before_a_restart_are_refused(bot, printer_factory):
+    printer = await printer_factory(name="P1S due", model="P1S", awaiting_plate_clear=True)
+    before_restart = int(time.time()) - 60  # a button sent by the previous run
+    manager = "backend.app.api.routes.printers.printer_manager"
+    try:
+        await printer_manager.load_awaiting_plate_clear_from_db()
+        assert printer_manager.plate_clear_raised_at(printer.id) >= before_restart + 60
+        with (
+            patch(f"{manager}.is_connected", return_value=True),
+            patch(f"{manager}.get_status", return_value=_state("FINISH")),
+            patch(f"{manager}.set_awaiting_plate_clear") as set_flag,
+        ):
+            old = await bot.on_button(CHAT, f"clear:{printer.id}:{before_restart}", CHAT)
+            assert old.text.startswith("Questa notifica è di una stampa precedente")
+            set_flag.assert_not_called()
+            fresh = int(printer_manager.plate_clear_raised_at(printer.id))  # what a new notification carries
+            assert (await bot.on_button(CHAT, f"clear:{printer.id}:{fresh}", CHAT)).text.startswith("Piatto")
+    finally:
+        printer_manager.set_awaiting_plate_clear(printer.id, False)
+
+
+def test_a_gate_without_a_known_time_refuses_older_buttons_only():
+    printer_manager._awaiting_plate_clear.add(9999)
+    try:
+        first = printer_manager.plate_clear_raised_at(9999)
+        assert first is not None and printer_manager.plate_clear_raised_at(9999) == first  # stable once asked
+    finally:
+        printer_manager._awaiting_plate_clear.discard(9999)
+        printer_manager._plate_clear_raised_at.pop(9999, None)
+
+
+class _NameLater(FakeTelegram):
+    """getMe fails the first time, setMyCommands always."""
+
+    def __init__(self, batches):
+        super().__init__(batches)
+        self.names_asked = 0
+
+    async def call(self, method, files=None, **params):
+        if method == "setMyCommands":
+            raise tb.TelegramError(method, 500, "boom")
+        if method == "getMe":
+            self.names_asked += 1
+            if self.names_asked == 1:
+                raise httpx.ConnectError("refused")
+        return await super().call(method, files=files, **params)
+
+
+async def test_the_bot_name_is_asked_again_when_getme_fails(bot, db_session, fast_sleep, monkeypatch):
+    monkeypatch.setattr(tb, "RELOAD_SECONDS", 0)  # try the name again at once
+    fake = _NameLater([[], [_message(f"/aiuto@{BOT}", chat=CHAT, user=CHAT, update_id=3)]])
+    await _run_poller(bot, db_session, fake)
+    await _until(lambda: fake.sent())
+    await bot.stop()
+    assert fake.names_asked >= 2 and bot.fakes == [] and "Comandi:" in fake.sent()[0][1]["text"]
+
+
+async def test_reconcile_warns_once_when_no_user_may_give_commands(bot, db_session, caplog):
+    await _provider(db_session, bot_token=TOKEN, chat_id="-1001234", commands_enabled="true")
+    with caplog.at_level(logging.WARNING, logger=tb.__name__):
+        await bot.reconcile()
+        await bot.reconcile()  # unchanged settings: not again
+    await bot.stop()
+    assert caplog.text.count("no allowed user") == 1
+
+
+async def test_another_user_tapping_a_confirmation_leaves_it_to_who_asked(bot, printer_factory):
+    await printer_factory(name="X1C tre", model="X1C")
+    client = MagicMock(pause_print=MagicMock(return_value=True))
+    running = _state()
+    with (
+        patch("backend.app.services.printer_manager.printer_manager.get_status", side_effect=lambda pid: running),
+        patch("backend.app.api.routes.printers.printer_manager.get_client", return_value=client),
+    ):
+        ask = await bot.on_command(CHAT, "/pausa x1c tre", CHAT)
+        key = _ok_data(ask).split(":")[1]
+        assert (await bot.on_button(CHAT, f"no:{key}", "777")).text == "Questa conferma è di un altro utente."
+        assert (await bot.on_button(CHAT, f"ok:{key}", "777")).text == "Questa conferma è di un altro utente."
+        assert (await bot.on_button(CHAT, f"ok:{key}", CHAT)).text == "Pausa inviata."
+    client.pause_print.assert_called_once()
