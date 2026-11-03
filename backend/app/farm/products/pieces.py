@@ -41,7 +41,13 @@ from backend.app.farm.plates.geometry import group
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.render import render_png
-from backend.app.farm.plates.service import link_by_geometry, object_mesh, suggest_shapes
+from backend.app.farm.plates.service import (
+    fits_shape,
+    link_by_geometry,
+    object_mesh,
+    shape_geometries,
+    suggest_shapes,
+)
 from backend.app.farm.products import routes as products
 from backend.app.farm.products.folders import excluded_by, project_folders
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
@@ -232,9 +238,13 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
         )
     open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
     proposals = await suggest_shapes(db, open_names)
+    measured = await shape_geometries(db, set(proposals.values()))
+    by_yield = {y.id: y.fingerprint for y, _, _ in rows}
     for p in pieces:
         if p["shape_id"] is None:
-            p["suggested_shape_id"] = next((proposals[n] for n in p["names"] if n in proposals), None)
+            shape_id = next((proposals[n] for n in p["names"] if n in proposals), None)
+            fp = by_yield.get(p["image_yield_id"])
+            p["suggested_shape_id"] = shape_id if shape_id and fits_shape(fp, measured.get(shape_id)) else None
     pieces.sort(key=lambda p: (p["quantity"] is not None, -p["plates"]))  # still to decide first
     return {
         "kind": product.kind,
