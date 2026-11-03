@@ -438,3 +438,11 @@ async def test_completed_jobs_for_seller_hub_however_old(async_client, db_sessio
     default = {j["id"]: j for j in (await async_client.get(f"{API}/jobs")).json()}
     assert default[still["id"]]["finished_at"] is None
     assert (await async_client.get(f"{API}/jobs", params={"state": "printing"})).status_code == 422
+
+
+def test_slot_mapping_reads_colours_in_any_form():
+    """The K2 case: 3MF #F75403, CFS slot F75403FF, same PETG; the farm's Arancio is that orange too."""
+    used = [{"slot_id": 1, "type": "PETG", "color": "#F75403"}]
+    trays = [{"type": "PETG", "color": "F75403FF", "global_tray_id": 3}]
+    assert service._slot_mapping(used, trays, "f75403", 80) == [3]
+    assert service._slot_mapping(used, trays, "f28c28", 80) == [3]  # within the farm's tolerance
