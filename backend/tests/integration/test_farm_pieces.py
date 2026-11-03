@@ -353,6 +353,26 @@ async def test_product_printed_as_a_set(async_client, tmp_path):
     r = await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "kit"})
     assert r.status_code == 409  # two pieces in the set
 
+    # A wrong shape taken out of the set from the sheet: its piece goes back to "to decide".
+    bottom = next(r["shape_id"] for r in view["parts"][0]["recipe"] if r["shape"] == "Bottom")
+    r = await async_client.put(f"{API}/products/{pid}/recipe/{bottom}", json={"quantity": 0})
+    assert [x["quantity"] for x in r.json()["recipe"]] == [2]
+    left = {
+        p["names"][0]: p["quantity"] for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    }
+    assert left == {"Top": 2, "Bottom": None}
+    # The set itself taken out: no parts left, every piece to decide, its code retired (never deleted).
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert view["parts"][0]["used_by"] == []
+    assert (await async_client.put(f"{API}/products/{pid}/parts/{code}", json={"quantity": 0})).status_code == 200
+    assert (await async_client.get(f"{API}/products/{pid}/view")).json()["parts"] == []
+    left = {
+        p["names"][0]: p["quantity"] for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    }
+    assert left == {"Top": None, "Bottom": None}
+    assert next(c for c in (await async_client.get(f"{API}/components")).json() if c["code"] == code)["retired"]
+    assert (await async_client.put(f"{API}/products/{pid}/recipe/{bottom}", json={"quantity": 1})).status_code == 404
+
 
 async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client):
     shapes = [(await async_client.post(f"{API}/shapes", json={"name": n})).json()["id"] for n in ("SX", "DX")]
@@ -396,6 +416,8 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     assert (await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 1})).status_code == 200
     view = (await async_client.get(f"{API}/products/{kit}/view")).json()
     assert [(p["code"], p["quantity"]) for p in view["parts"]] == [(loose, 4), (comps[1], 1)]
+    # The DX is also in "Solo DX": taking it out of the kit keeps it.
+    assert [u["name"] for u in view["parts"][1]["used_by"]] == ["Solo DX"]
     await async_client.put(f"{API}/products/{kit}/parts/{loose}", json={"quantity": 0})
     await async_client.put(f"{API}/products/{kit}/parts/{comps[1]}", json={"quantity": 0})
     status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}

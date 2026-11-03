@@ -112,6 +112,7 @@ export interface FarmProductView {
       filament_grams: number | null;
       sliced: boolean;
     }[];
+    used_by: { project_id: number; name: string }[]; // other products with this component
   })[];
   folders: { folder_id: number; name: string }[];
   files: {
@@ -379,6 +380,11 @@ export const farmApi = {
   componentImageUrl: (code: string, colorHex?: string | null) =>
     // the colour in the URL only refreshes the browser's copy when the component changes colour
     withStreamToken(`/api/v1/farm/components/${code}/image${colorHex ? `?c=${colorHex}` : ''}`),
+  setRecipeEntry: (projectId: number, shapeId: number, quantity: number) =>
+    farmRequest<{ component_code: string; recipe: { shape_id: number; quantity: number }[] }>(
+      `/products/${projectId}/recipe/${shapeId}`,
+      { method: 'PUT', body: JSON.stringify({ quantity }) },
+    ),
   setPart: (projectId: number, code: string, quantity: number) =>
     farmRequest<{ project_id: number; component_code: string; quantity: number }>(
       `/products/${projectId}/parts/${code}`,
