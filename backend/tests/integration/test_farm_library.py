@@ -459,3 +459,131 @@ class TestEmbeddedSlicing:
         resp = await async_client.post(f"/api/v1/farm/library/files/{file_id}/slice", json={"plate": 1})
         assert resp.status_code == 400
         assert sidecar == []
+
+
+# ---------------------------------------------------------------- colour variants
+
+VARIANT_SETTINGS = {
+    "printer_model": "Bambu Lab P2S",
+    "filament_colour": ["#F75403", "#FCE300", "#000000"],  # arancione, giallo, nero: three profiles
+    "filament_settings_id": ["PETG HF", "PETG Basic", "PETG HS Matte"],
+}
+# Plate 1: one object on filament 2 (giallo), with a part; plate 2: two objects on filaments 1 and 3.
+VARIANT_MODEL_SETTINGS = """<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="2"><metadata key="name" value="Maniglia"/><metadata key="extruder" value="2"/>
+    <part id="1" subtype="normal_part"><metadata key="extruder" value="2"/></part>
+    <part id="2" subtype="modifier_part"><metadata key="extruder" value="0"/></part>
+  </object>
+  <object id="3"><metadata key="name" value="A"/><metadata key="extruder" value="1"/></object>
+  <object id="4"><metadata key="name" value="B"/><metadata key="extruder" value="3"/></object>
+  <plate><metadata key="plater_id" value="1"/>
+    <model_instance><metadata key="object_id" value="2"/></model_instance></plate>
+  <plate><metadata key="plater_id" value="2"/>
+    <model_instance><metadata key="object_id" value="3"/></model_instance>
+    <model_instance><metadata key="object_id" value="4"/></model_instance></plate>
+</config>"""
+
+
+def make_variant_3mf(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = "".join(f'<metadata name="{k}">{v}</metadata>' for k, v in BAMBU.items())
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("3D/3dmodel.model", f"<model>{meta}<resources/></model>")
+        zf.writestr("Metadata/project_settings.config", json.dumps(VARIANT_SETTINGS))
+        zf.writestr("Metadata/model_settings.config", VARIANT_MODEL_SETTINGS)
+    return age(path)
+
+
+def extruders(model_bytes: bytes) -> dict[str, list[str]]:
+    import xml.etree.ElementTree as ET
+
+    with zipfile.ZipFile(io.BytesIO(model_bytes)) as zf:
+        root = ET.fromstring(zf.read("Metadata/model_settings.config"))
+    return {
+        obj.get("id"): [m.get("value") for m in obj.iter("metadata") if m.get("key") == "extruder"]
+        for obj in root.findall("object")
+    }
+
+
+class TestColourVariantFile:
+    """The 3MF side: which filament a colour picks, and the copy moved to it."""
+
+    def test_colour_picks_the_filament(self, tmp_path):
+        from backend.app.farm.variants import MissingColour, variant_filament
+
+        src = make_variant_3mf(tmp_path / "ami.3mf").read_bytes()
+        assert variant_filament(src, 1, "Nero", "111111", 80) == 3  # closest within tolerance (#000000)
+        assert variant_filament(src, 1, "Giallo", "fce300", 80) == 0  # already on it: slice as it is
+        with pytest.raises(MissingColour, match="il 3MF non ha un filamento Verde: aggiungilo nel progetto"):
+            variant_filament(src, 1, "Verde", "2e9e44", 80)
+        assert variant_filament(src, 2, "Nero", "111111", 80) == 0  # two filaments on the plate: left alone
+
+    def test_copy_moves_only_that_plate(self, tmp_path):
+        from backend.app.farm.variants import move_plate_to
+
+        src = make_variant_3mf(tmp_path / "ami.3mf").read_bytes()
+        moved = move_plate_to(src, 1, 3)
+        assert extruders(moved) == {"2": ["3", "3", "3"], "3": ["1"], "4": ["3"]}
+        with zipfile.ZipFile(io.BytesIO(moved)) as zf:
+            assert json.loads(zf.read("Metadata/project_settings.config")) == VARIANT_SETTINGS
+
+
+@pytest.mark.integration
+class TestColourVariantSlicing:
+    @pytest.fixture
+    def sidecar(self, monkeypatch, tmp_path):
+        from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+        calls = []
+        output = make_3mf(tmp_path / "out.gcode.3mf", BAMBU).read_bytes()
+
+        async def fake_slice(self, **kwargs):
+            calls.append(kwargs)
+            return SliceResult(content=output, print_time_seconds=600, filament_used_g=5.0, filament_used_mm=1000.0)
+
+        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+        return calls
+
+    async def test_variant_outputs(self, async_client, db_session, watched, nas, sidecar):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from backend.app.farm.reslice import sliced_plates
+        from backend.app.farm.slicing import slice_embedded, variant_slice
+
+        path = make_variant_3mf(nas / "Ami" / "ami.3mf")
+        before = path.read_bytes()
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["ami.3mf"]["library_file_id"]
+        lib_file = await db_session.get(LibraryFile, file_id)
+        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == file_id))
+        plate = SimpleNamespace(library_file_id=file_id, plate_index=1)
+
+        assert await variant_slice(db_session, plate, "Nero") is None  # not sliced yet
+        nero = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1, colour="Nero")
+        assert extruders(sidecar[-1]["model_bytes"])["2"] == ["3", "3", "3"]
+        out = await db_session.get(LibraryFile, nero.library_file_id)
+        assert out.filename == "ami - Nero.gcode.3mf"
+        assert (out.file_metadata["sliced_color"], out.file_metadata["sliced_filament"]) == ("Nero", 3)
+
+        giallo = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1, colour="Giallo")
+        assert extruders(sidecar[-1]["model_bytes"])["2"] == ["2", "2", "0"]  # sent as it is
+        assert (await db_session.get(LibraryFile, giallo.library_file_id)).filename == "ami.gcode.3mf"
+        assert giallo.library_file_id != nero.library_file_id
+
+        with pytest.raises(HTTPException) as err:
+            await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1, colour="Verde")
+        assert err.value.status_code == 409 and "non ha un filamento Verde" in err.value.detail
+        assert len(sidecar) == 2  # never sliced with another colour's profile
+        assert path.read_bytes() == before  # the project on the NAS is untouched
+
+        assert (await variant_slice(db_session, plate, "nero")).id == nero.library_file_id
+        assert (await variant_slice(db_session, plate, "Giallo")).id == giallo.library_file_id
+        assert (await variant_slice(db_session, plate, None)).id == giallo.library_file_id
+        assert await variant_slice(db_session, plate, "Verde") is None
+        assert sorted(map(str, (await sliced_plates(db_session, {file_id}))[file_id])) == ["(1, 'Nero')", "(1, None)"]
+
+        again = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1, colour="Nero")
+        assert again.library_file_id == nero.library_file_id  # a new slice replaces the variant's output

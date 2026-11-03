@@ -13,21 +13,27 @@ import io
 import json
 import logging
 import os
+import time
 import uuid
 import zipfile
+from pathlib import Path
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes import library as lib
 from backend.app.api.routes.settings import get_setting
+from backend.app.core import database
 from backend.app.core.config import settings as app_settings
+from backend.app.farm import variants
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_ORCA
 from backend.app.farm.library_sync import _drop_thumbnail
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import library as nas_library
 from backend.app.farm.nas.access import library_path
 from backend.app.farm.nas.cache import ensure_local
+from backend.app.farm.plates.models import FarmPlate
 from backend.app.models.library import LibraryFile
 from backend.app.schemas.slicer import SliceResponse
 from backend.app.services.slicer_api import (
@@ -87,15 +93,16 @@ def plate_key(plate: int | None) -> int:
     return 1 if plate is None else plate
 
 
-def output_name(base: str, plate: int | None) -> str:
+def output_name(base: str, plate: int | None, colour: str | None = None) -> str:
     key = plate_key(plate)
-    if key == 1:
-        return f"{base}.gcode.3mf"
-    return f"{base} - all plates.gcode.3mf" if key == 0 else f"{base} - plate {key}.gcode.3mf"
+    name = base if key == 1 else f"{base} - all plates" if key == 0 else f"{base} - plate {key}"
+    return f"{name} - {colour}.gcode.3mf" if colour else f"{name}.gcode.3mf"
 
 
-async def previous_output(db: AsyncSession, project_id: int, plate: int | None) -> LibraryFile | None:
-    """The output a new slice of this project plate replaces (the latest one, if older copies exist)."""
+async def previous_output(
+    db: AsyncSession, project_id: int, plate: int | None, colour: str | None = None
+) -> LibraryFile | None:
+    """The output a new slice of this project plate (in this colour variant) replaces (the latest one)."""
     key, found = plate_key(plate), None
     rows = await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
     for out in rows.scalars():
@@ -105,9 +112,15 @@ async def previous_output(db: AsyncSession, project_id: int, plate: int | None) 
             and "extracted_from_library_file_id" not in meta  # Klipper .gcode taken out of an output
             and meta.get("sliced_from_library_file_id") == project_id
             and plate_key(meta.get("sliced_plate")) == key
+            and colour_key(meta.get("sliced_color")) == colour_key(colour)
         ):
             found = out
     return found
+
+
+def colour_key(colour: str | None) -> str | None:
+    """How colour variants are compared (``sliced_color``): the name as a key of the farm's colour table."""
+    return (colour or "").strip().lower() or None
 
 
 def resolve_slicer(state: FarmLibraryFile) -> str:
@@ -128,8 +141,14 @@ async def slice_embedded(
     state: FarmLibraryFile,
     plate: int | None,
     job_id: int | None = None,
+    colour: str | None = None,
 ) -> SliceResponse:
-    """Slice with embedded settings and save the ``.gcode.3mf`` next to the source."""
+    """Slice with embedded settings and save the ``.gcode.3mf`` next to the source.
+
+    With ``colour`` (a component's colour name) the plate prints with the 3MF's filament of that
+    colour: if its objects are on another one, a copy moved to it is sliced, saved as its own output
+    (see ``variants``); otherwise this is the plain output.
+    """
     slicer = resolve_slicer(state)
     await ensure_local(db, lib_file)  # NAS projects are fetched into the cache now, on use
     src = library_path(lib_file.file_path)
@@ -137,6 +156,11 @@ async def slice_embedded(
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
     source_sha = state.sha256
     model_bytes = await asyncio.to_thread(fix_printer_inherits, lib._sanitize_project_settings_sentinels(raw))
+    filament = await variant_of(db, model_bytes, plate, colour) if colour_key(colour) else 0
+    if filament:
+        model_bytes = await asyncio.to_thread(variants.move_plate_to, model_bytes, plate_key(plate), filament)
+    else:
+        colour = None  # the plain output already prints in this colour (or the plate is multi-colour)
 
     progress_request_id = on_progress = None
     if job_id is not None:
@@ -167,11 +191,11 @@ async def slice_embedded(
     base_name = lib_file.filename.removesuffix(".3mf")
     # A new slice of the same plate replaces the previous output (same row, same file): queued
     # prints and plates follow it, and printers get it under the same name.
-    previous = await previous_output(db, lib_file.id, plate)
+    previous = await previous_output(db, lib_file.id, plate, colour)
     # NAS project: the output goes on the NAS next to it, the local file is only its cache copy.
     try:
         saved = await nas_library.save_sliced(
-            db, lib_file, output_name(base_name, plate), result.content, replaces=previous
+            db, lib_file, output_name(base_name, plate, colour), result.content, replaces=previous
         )
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Cannot save the sliced file on the NAS: {exc}"[:500]) from exc
@@ -212,6 +236,8 @@ async def slice_embedded(
             "sliced_from_sha256": source_sha,
             "sliced_plate": plate,
             "sliced_with": slicer,
+            "sliced_color": colour.strip() if colour else None,  # as the component writes it: "Nero"
+            "sliced_filament": filament or None,
         }
     )
     new_file = previous or LibraryFile(file_type="gcode", source_type="sliced")
@@ -219,7 +245,7 @@ async def slice_embedded(
         _drop_thumbnail(previous.thumbnail_path)
     else:
         new_file.folder_id = saved.folder_id if saved else lib_file.folder_id
-        new_file.filename = saved.filename if saved else output_name(base_name, plate)
+        new_file.filename = saved.filename if saved else output_name(base_name, plate, colour)
         db.add(new_file)
     new_file.is_external = saved is not None
     new_file.file_path = str(out_path) if saved else lib.to_relative_path(out_path)
@@ -238,4 +264,108 @@ async def slice_embedded(
         filament_used_g=filament_g,
         filament_used_mm=filament_mm,
         used_embedded_settings=True,
+    )
+
+
+# ---------------------------------------------------------------- colour variants
+
+_variant_cache: dict[tuple, int | str] = {}  # (file, version, plate, colour, hex, tolerance) -> filament or error
+_variant_asked: dict[tuple[int, int, str], float] = {}  # (library_file_id, plate, colour) -> when slicing was asked
+
+
+async def variant_of(db: AsyncSession, source: bytes | Path, plate: int | None, colour: str) -> int:
+    """The filament to move the plate to for ``colour`` (0: slice it as it is); 409 when the 3MF lacks it."""
+    from backend.app.farm.plan import service as plan
+
+    config = await plan.load_config(db)
+    hex_ = config["colors"].get(colour_key(colour))
+    if not hex_:
+        raise HTTPException(status_code=409, detail=f"il colore {colour} non è nella tabella colori della farm")
+    try:
+        return await asyncio.to_thread(
+            variants.variant_filament, source, plate_key(plate), colour.strip(), hex_, config["tolerance"]
+        )
+    except variants.MissingColour as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _variant_filament(
+    db: AsyncSession, lib_file: LibraryFile, state: FarmLibraryFile, plate: int, colour: str
+) -> int:
+    """``variant_of`` for the current version of the project, read once per version (and colour table)."""
+    from backend.app.farm.plan import service as plan
+
+    config = await plan.load_config(db)
+    key = (
+        lib_file.id,
+        state.sha256,
+        plate,
+        colour_key(colour),
+        config["colors"].get(colour_key(colour)),
+        config["tolerance"],
+    )
+    if key not in _variant_cache:
+        await ensure_local(db, lib_file)
+        try:
+            _variant_cache[key] = await variant_of(db, library_path(lib_file.file_path), plate, colour)
+        except HTTPException as exc:
+            _variant_cache[key] = str(exc.detail)
+    found = _variant_cache[key]
+    if isinstance(found, str):
+        raise HTTPException(status_code=409, detail=found)
+    return found
+
+
+async def variant_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:
+    """The sliced output of this plate in the component's colour, for the current project version.
+
+    The plain output when the plate is already on the filament of that colour (or is multi-colour);
+    None when not sliced yet, or when the 3MF has no filament of that colour (see ``ask_variant_slicing``).
+    """
+    from backend.app.farm.plates.service import _latest_slices
+
+    lib_file = await db.get(LibraryFile, plate.library_file_id)
+    state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == plate.library_file_id))
+    if lib_file is None or state is None:
+        return None
+    variant = None
+    if colour_key(color):
+        try:
+            if await _variant_filament(db, lib_file, state, plate.plate_index, color):
+                variant = colour_key(color)
+        except HTTPException:
+            return None
+    return (await _latest_slices(db, lib_file, state.sha256, variant)).get(plate.plate_index)
+
+
+async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None) -> None:
+    """``ask_slicing`` for the component's colour: a missing colour fails the slice job with its reason."""
+    from backend.app.farm.jobs import service as jobs
+    from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
+
+    if not colour_key(color):
+        await jobs.ask_slicing(db, plate)
+        return
+    key = (plate.library_file_id, plate.plate_index, colour_key(color))
+    if time.monotonic() - _variant_asked.get(key, -jobs.RESLICE_AFTER_SECONDS) < jobs.RESLICE_AFTER_SECONDS:
+        return
+    _variant_asked[key] = time.monotonic()
+    lib_file = await db.get(LibraryFile, plate.library_file_id)
+    if lib_file is None:
+        return
+
+    async def run(job_id: int):
+        async with database.async_session() as task_db:
+            task_file = await task_db.get(LibraryFile, key[0])
+            state = await task_db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == key[0]))
+            try:
+                response = await slice_embedded(
+                    task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id, colour=color
+                )
+            except HTTPException as exc:
+                raise http_exception_to_job_error(exc) from exc
+        return response.model_dump()
+
+    await slice_dispatch.enqueue(
+        kind="library_file", source_id=key[0], source_name=f"{lib_file.filename} ({color})", run=run
     )

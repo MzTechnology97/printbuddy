@@ -146,11 +146,14 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
     return sorted(plates.values(), key=lambda p: p.index), nozzle
 
 
-async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | None) -> dict[int, LibraryFile]:
-    """Sliced outputs of this exact file version, by plate number.
+async def _latest_slices(
+    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None
+) -> dict[int, LibraryFile]:
+    """Sliced outputs of this exact file version, by plate number (the plain ones, or one colour variant).
 
     Any folder: NAS outputs live in the project's ``Printbuddy`` subfolder. An output sliced
     without a plate number is the project's default plate (1); "all plates" (0) is no single plate.
+    ``colour`` is a variant's ``sliced_color`` (see ``farm.variants``).
     """
     rows = (
         await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
@@ -160,7 +163,11 @@ async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | 
         meta = out.file_metadata or {}
         if "extracted_from_library_file_id" in meta:
             continue  # a Klipper .gcode taken out of an output, not an output itself
-        if meta.get("sliced_from_library_file_id") == lib_file.id and meta.get("sliced_from_sha256") == sha256:
+        if (
+            meta.get("sliced_from_library_file_id") == lib_file.id
+            and meta.get("sliced_from_sha256") == sha256
+            and ((meta.get("sliced_color") or "").strip().lower() or None) == colour
+        ):
             plate = 1 if meta.get("sliced_plate") is None else meta["sliced_plate"]
             if plate:
                 by_plate[plate] = out  # later ids win
