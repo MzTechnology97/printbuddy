@@ -3507,14 +3507,14 @@ class TestSendDryingCommand:
         assert payload["print"]["rotate_tray"] is False
 
     def test_matches_bambu_ams_filament_drying_command_shape(self, mqtt_client):
-        """Drying start payload matches the Bambu/ha-bambulab MQTT template."""
-        mqtt_client.send_drying_command(ams_id=128, temp=75, duration=8, mode=1, filament="ABS", rotate_tray=True)
+        """A drying start carries filament and close_power_conflict, as the Bambu app's (without: result "fail")."""
+        seq = mqtt_client.send_drying_command(ams_id=128, temp=75, duration=8, mode=1, filament="ABS", rotate_tray=True)
 
         call_args = mqtt_client._client.publish.call_args
         payload = json.loads(call_args[0][1])
         cmd = payload["print"]
         assert cmd == {
-            "sequence_id": cmd["sequence_id"],
+            "sequence_id": seq,
             "command": "ams_filament_drying",
             "ams_id": 128,
             "temp": 75,
@@ -3523,10 +3523,21 @@ class TestSendDryingCommand:
             "humidity": 0,
             "mode": 1,
             "rotate_tray": True,
+            "filament": "ABS",
+            "close_power_conflict": False,
         }
-        assert "sequence_id" in cmd
-        assert "filament" not in cmd
-        assert "close_power_conflict" not in cmd
+
+    def test_stop_keeps_the_short_shape(self, mqtt_client):
+        mqtt_client.send_drying_command(ams_id=0, temp=0, duration=0, mode=0)
+
+        cmd = json.loads(mqtt_client._client.publish.call_args[0][1])["print"]
+        assert "filament" not in cmd and "close_power_conflict" not in cmd
+
+    def test_reply_result_is_kept_by_sequence_id(self, mqtt_client):
+        seq = mqtt_client.send_drying_command(ams_id=0, temp=65, duration=12, mode=1, filament="PETG")
+        reply = {"command": "ams_filament_drying", "sequence_id": seq, "result": "fail", "err_code": 0}
+        mqtt_client._process_message({"print": reply})
+        assert mqtt_client.drying_results[seq] == "fail"
 
     def test_publishes_with_qos_1(self, mqtt_client):
         """Verify drying commands are published with QoS 1."""

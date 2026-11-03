@@ -442,6 +442,7 @@ class BambuMQTTClient:
         self._dev_mode_probed: bool = False
         self._dev_mode_needs_probe: bool = False  # True after seeing a pushall without "fun"
         self._dev_mode_probe_seq: str | None = None
+        self.drying_results: dict[str, str] = {}  # sequence_id -> the printer's ams_filament_drying result
         self._dev_mode_probe_time: float = 0.0  # monotonic timestamp when probe was sent
         self._dev_mode_probe_failures: int = 0  # consecutive unanswered probes
         self._connect_time: float = 0.0  # monotonic timestamp of last _on_connect
@@ -973,6 +974,8 @@ class BambuMQTTClient:
                 # INFO level so the body lands in support bundles by default.
                 elif cmd == "ams_filament_drying":
                     logger.info("[%s] ams_filament_drying response: %s", self.serial_number, print_data)
+                    if print_data.get("sequence_id") is not None and print_data.get("result"):
+                        self.drying_results[str(print_data["sequence_id"])] = str(print_data["result"])
                 # Check for developer mode probe response
                 if (
                     cmd == "ams_filament_setting"
@@ -3802,14 +3805,10 @@ class BambuMQTTClient:
         if not self._client:
             return False
         self._sequence_id += 1
-        # Keep this wire payload aligned with Bambu's LAN MQTT command shape.
-        # ha-bambulab starts from AMS_FILAMENT_DRYING_TEMPLATE, then its service
-        # layer overwrites cooling_temp to 45; upstream notes that lower values
-        # make the command get ignored.  H2/AMS-HT firmware is picky here: extra
-        # keys such as ``filament``/``close_power_conflict`` can also make the
-        # printer ACK the publish but ignore the drying start.  The ``filament``
-        # argument is still accepted for older callers/log context, but it is
-        # intentionally not sent on the wire.
+        # cooling_temp stays 45 (lower values get the command ignored). A start
+        # carries ``filament`` and ``close_power_conflict`` like the Bambu app's:
+        # without them P2S (AMS 2 Pro) and X2D (AMS 2 Pro and AMS-HT) answer
+        # result "fail" and do not dry. The reply lands in ``drying_results``.
         command = {
             "print": {
                 "sequence_id": str(self._sequence_id),
@@ -3823,6 +3822,8 @@ class BambuMQTTClient:
                 "rotate_tray": rotate_tray,
             }
         }
+        if mode == 1:
+            command["print"].update({"filament": filament, "close_power_conflict": False})
         # Log the full wire JSON at INFO so support bundles capture exactly
         # what we sent — needed to diagnose silent rejections (#1447) where
         # the printer ACKs the command but never starts/stops drying.
@@ -3835,7 +3836,7 @@ class BambuMQTTClient:
             self.serial_number,
             wire_json,
         )
-        return True
+        return str(self._sequence_id)  # truthy: the sequence_id its reply will carry
 
     def _handle_kprofile_response(self, data: dict):
         """Handle K-profile response from printer."""

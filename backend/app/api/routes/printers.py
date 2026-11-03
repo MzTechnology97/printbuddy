@@ -2619,6 +2619,15 @@ async def start_drying(
     )
     if not success:
         raise HTTPException(400, "Printer not connected")
+    # The printer ACKs every publish; only its reply says whether it dries. Wait briefly for it.
+    result = None
+    for _ in range(30 if isinstance(success, str) else 0):
+        result = printer_manager.drying_result(printer_id, success)
+        if result is not None:
+            break
+        await asyncio.sleep(0.1)
+    if result == "fail":
+        raise HTTPException(409, "The printer refused to start drying (result: fail)")
     return {"status": "drying_started", "ams_id": ams_id, "temp": temp, "duration": duration}
 
 
