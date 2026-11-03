@@ -3,7 +3,7 @@
  * All data is made up.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -161,6 +161,52 @@ describe('FarmProductGate', () => {
       '/farm/products?tab=plates&q=P1S-Caps-PETG.3mf',
       '/farm/products?tab=plates&q=K1-Caps.3mf',
     ]);
+  });
+
+  it('shows what is missing and makes the product a set', async () => {
+    const user = userEvent.setup();
+    let sent: unknown;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json({ ...view, kind: null })),
+      http.put('/api/v1/farm/products/65/kind', async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ project_id: 65, kind: 'set' });
+      }),
+    );
+    render(<Page id={65} />);
+    expect(await screen.findByText('Choose set or kit')).toBeInTheDocument();
+    expect(await screen.findByText('1 piece to decide')).toBeInTheDocument();
+    expect(screen.getByText('C-0119 has no confirmed plate')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Set printed together' }));
+    expect(confirm).toHaveBeenCalled();
+    await waitFor(() => expect(sent).toEqual({ kind: 'set' }));
+    confirm.mockRestore();
+  });
+
+  it('a set shows its pieces per set and asks how many per set', async () => {
+    const recipe = [
+      { shape_id: 1, shape: 'Tappo Bouchon porte', quantity: 2 },
+      { shape_id: 2, shape: 'Tappo kapi kolu', quantity: 1 },
+    ];
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () =>
+        HttpResponse.json({ ...view, kind: 'set', parts: [{ ...view.parts[0], shape_id: null, recipe }] }),
+      ),
+      http.get('/api/v1/farm/products/65/pieces', () =>
+        HttpResponse.json({
+          kind: 'set',
+          set: { code: 'C-0118', name: 'Tappi', color: 'Nero', color_hex: '111111' },
+          default_color: 'Nero',
+          unshaped_parts: [],
+          pieces: [piece({ quantity: null })],
+        }),
+      ),
+    );
+    render(<Page id={65} />);
+    expect(await screen.findByText('Per set: 2× Tappo Bouchon porte + 1× Tappo kapi kolu')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Per set Tappo porte')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set printed together' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('prints the product now, also a part Seller Hub does not ask for', async () => {

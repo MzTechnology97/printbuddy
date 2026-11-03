@@ -43,6 +43,7 @@ class TestShapesAndComponents:
             "shape": "Tartufo sopra",
             "color": "Nero",
             "retired": False,
+            "recipe": None,
         }
         # One active component per shape and colour; another colour is a new component.
         r = await async_client.post(f"{API}/components", json={"shape_id": top["id"], "color": "nero"})

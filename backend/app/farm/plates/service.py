@@ -25,7 +25,7 @@ from backend.app.farm.plates.geometry import object_fingerprints, object_meshes,
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.folders import excluded_files
-from backend.app.farm.products.models import FarmShape
+from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes, component_yield
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
@@ -346,9 +346,42 @@ async def _confirmed_plates_by(db: AsyncSession, attr: str, wanted: set) -> dict
     return result
 
 
-async def plates_by_shape(db: AsyncSession, shape_ids: list[int]) -> dict[int, list[dict]]:
-    """Confirmed plates producing each shape: one plate serves every colour of the shape."""
-    return await _confirmed_plates_by(db, "shape_id", set(shape_ids))
+async def plates_for(db: AsyncSession, components: list[FarmComponent]) -> dict[int, list[dict]]:
+    """Confirmed plates of each component (by id), in the shape of :func:`_confirmed_plates_by`.
+
+    A plate of a shape serves every colour of it; a set's plate yields its complete sets.
+    """
+    result: dict[int, list[dict]] = {c.id: [] for c in components}
+    shapes = {s for c in components for s in component_shapes(c)}
+    codes = {c.code for c in components if not component_shapes(c)}
+    if not shapes and not codes:
+        return result
+    plates = (
+        await db.execute(
+            select(FarmPlate)
+            .where(
+                FarmPlate.status == "confirmed",
+                FarmPlate.yields.any(FarmPlateYield.shape_id.in_(shapes) | FarmPlateYield.component_code.in_(codes)),
+                FarmPlate.library_file_id.notin_(await excluded_files(db)),
+            )
+            .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
+        )
+    ).scalars()
+    resolver = await PrinterModelResolver.load(db)
+    for plate in plates:
+        model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
+        for c in components:
+            if n := component_yield(c, plate.yields):
+                result[c.id].append(
+                    {
+                        "library_file_id": plate.library_file_id,
+                        "plate": plate.plate_index,
+                        "printer_model": model,
+                        "material": "+".join(plate.materials or []),
+                        "yield": n,
+                    }
+                )
+    return result
 
 
 async def plates_by_component(db: AsyncSession, codes: list[str]) -> dict[str, list[dict]]:

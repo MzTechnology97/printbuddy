@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
 import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
 import { useToast } from '../contexts/ToastContext';
@@ -15,6 +15,60 @@ import './i18n';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/** Set or kit, and what is still missing before the product can be printed. */
+function ProductStatus({ view }: { view: FarmProductView }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const pieces = useQuery({
+    queryKey: ['farm', 'product-pieces', view.project_id],
+    queryFn: () => farmApi.getProductPieces(view.project_id),
+  });
+  const kind = useMutation({
+    mutationFn: (k: 'set' | 'kit') => farmApi.setProductKind(view.project_id, k),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const choose = (k: 'set' | 'kit') => {
+    if (k === view.kind) return;
+    if (k === 'set' && view.parts.length > 1 && !window.confirm(t('farm.project.kindConfirm'))) return;
+    kind.mutate(k);
+  };
+  const open = pieces.data?.pieces.filter((p) => p.quantity == null).length ?? 0;
+  const todo = [
+    !view.kind && t('farm.project.todoKind'),
+    open > 0 && t('farm.project.todoPieces', { count: open }),
+    ...view.parts.filter((p) => p.plates.length === 0).map((p) => t('farm.project.todoPlates', { code: p.code })),
+  ].filter(Boolean) as string[];
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-white font-semibold">{t('farm.project.kind')}</span>
+        {(['set', 'kit'] as const).map((k) => (
+          <Button key={k} size="sm" variant={view.kind === k ? 'primary' : 'secondary'} disabled={kind.isPending}
+            aria-pressed={view.kind === k} onClick={() => choose(k)}>
+            {t(k === 'set' ? 'farm.project.kindSet' : 'farm.project.kindKit')}
+          </Button>
+        ))}
+      </div>
+      <p className="text-xs text-bambu-gray max-w-3xl">
+        {t(view.kind === 'set' ? 'farm.project.kindSetHint' : view.kind === 'kit' ? 'farm.project.kindKitHint' : 'farm.project.kindNone')}
+      </p>
+      {todo.length === 0 && view.parts.length > 0 ? (
+        <p className="text-sm text-bambu-green flex items-center gap-1">
+          <CheckCircle2 className="w-4 h-4" /> {t('farm.project.ready')}
+        </p>
+      ) : (
+        <ul className="text-sm text-amber-400 space-y-0.5">
+          {todo.map((x) => (
+            <li key={x} className="flex items-center gap-1"><AlertTriangle className="w-4 h-4 shrink-0" /> {x}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 function FarmProductPanel({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
@@ -50,6 +104,8 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
           </p>
         )}
 
+        <ProductStatus view={view} />
+
         <ProductPiecesPanel projectId={view.project_id} />
 
         <section className="space-y-2">
@@ -71,6 +127,13 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
                 <p className="text-white">
                   {part.quantity}× <span className="font-mono text-bambu-green">{part.code}</span> {part.name}
                 </p>
+                {part.recipe && part.recipe.length > 0 && (
+                  <p className="text-xs text-bambu-gray">
+                    {t('farm.project.perSet', {
+                      pieces: part.recipe.map((r) => `${r.quantity}× ${r.shape ?? r.shape_id}`).join(' + '),
+                    })}
+                  </p>
+                )}
                 {part.plates.length === 0 ? (
                   <p className="text-xs text-amber-400 flex items-center gap-1">
                     <AlertTriangle className="w-3.5 h-3.5" /> {t('farm.components.noPlateYet')}

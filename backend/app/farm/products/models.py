@@ -23,7 +23,9 @@ class FarmShape(Base):
 class FarmComponent(Base):
     """A printed part with a stable code (``C-0042``): the key Seller Hub stock uses.
 
-    Normally a shape in a colour ("Tartufo sopra – Nero"). Codes are never reused, so
+    Normally a shape in a colour ("Tartufo sopra – Nero"). A set printed together is one
+    component with a ``recipe`` instead: the shapes of one set and how many of each
+    ("Tartufo" = 1 sopra + 1 sotto), so plates yield complete sets. Codes are never reused, so
     components are never deleted: one that is no longer made is retired.
     """
 
@@ -34,12 +36,40 @@ class FarmComponent(Base):
     name: Mapped[str] = mapped_column(String(200))
     shape_id: Mapped[int | None] = mapped_column(ForeignKey("farm_shapes.id"), nullable=True, index=True)
     color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    recipe: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{"shape_id", "quantity"}]; then no shape_id
     retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-add_columns("farm_components", {"shape_id": "INTEGER", "color": "VARCHAR(50)", "retired_at": "DATETIME"})
+add_columns(
+    "farm_components", {"shape_id": "INTEGER", "color": "VARCHAR(50)", "retired_at": "DATETIME", "recipe": "JSON"}
+)
+
+
+def component_shapes(c: FarmComponent) -> set[int]:
+    """Shapes a component is printed as: its set's, or its own."""
+    if c.recipe:
+        return {r["shape_id"] for r in c.recipe}
+    return {c.shape_id} if c.shape_id else set()
+
+
+def component_yield(c: FarmComponent, yields) -> int:
+    """Units of the component a plate's yields give: complete sets for a set, else its pieces.
+
+    Before shapes, plates named components by code (``component_code``); those still count.
+    """
+    if c.recipe:
+        have: dict[int, int] = {}
+        for y in yields:
+            if y.shape_id is not None:
+                have[y.shape_id] = have.get(y.shape_id, 0) + y.quantity
+        return min(have.get(r["shape_id"], 0) // r["quantity"] for r in c.recipe)
+    return sum(
+        y.quantity
+        for y in yields
+        if (c.shape_id and y.shape_id == c.shape_id) or (not c.shape_id and y.component_code == c.code)
+    )
 
 
 class FarmProduct(Base):
@@ -53,11 +83,13 @@ class FarmProduct(Base):
     # Other listings of the same object: [{"skus", "asins", "color", "pieces"}]. Each sells ``pieces`` units
     # of the product, in ``color`` (parts with a shape take the component of that shape in that colour).
     variants: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # "set": printed and sold together, one component (a set of pieces); "kit": parts printed apart; None: not said.
+    kind: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-add_columns("farm_products", {"variants": "JSON"})
+add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)"})
 
 
 class FarmProductPart(Base):
