@@ -299,6 +299,10 @@ export const farmApi = {
     farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
       '/plan',
     ),
+  getProductPlan: (projectId: number) =>
+    farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
+      `/plan/products/${projectId}`,
+    ),
   getJobs: () => farmRequest<FarmJob[]>('/jobs'),
   getPrinterSpools: () => farmRequest<FarmPrinterSpool[]>('/printer-spools'),
   setPrinterSpool: (printerId: number, data: { material: string; color_name: string }) =>
