@@ -91,6 +91,17 @@ export interface FarmLibraryFileState {
   printer_model: string | null;
 }
 
+/** Parts of a kit assembled together before the product, ``per_unit`` groups per unit sold. */
+export interface FarmAssembly {
+  key: string; // stable within the product
+  name: string;
+  per_unit: number;
+  parts: { component_code: string; quantity: number }[]; // quantity per group
+  warnings?: { component_code: string; expected: number; quantity: number }[]; // quantities that do not add up
+}
+
+export type FarmAssemblyInput = Omit<FarmAssembly, 'key' | 'warnings'> & { key?: string };
+
 export interface FarmProductView {
   project_id: number;
   name: string;
@@ -115,6 +126,7 @@ export interface FarmProductView {
     }[];
     used_by: { project_id: number; name: string }[]; // other products with this component
   })[];
+  assemblies?: FarmAssembly[];
   folders: { folder_id: number; name: string }[];
   files: {
     library_file_id: number;
@@ -419,6 +431,11 @@ export const farmApi = {
       `/products/${projectId}/recipe/${shapeId}`,
       { method: 'PUT', body: JSON.stringify({ quantity }) },
     ),
+  setAssemblies: (projectId: number, assemblies: FarmAssemblyInput[]) =>
+    farmRequest<{ project_id: number; assemblies: FarmAssembly[] }>(`/products/${projectId}/assemblies`, {
+      method: 'PUT',
+      body: JSON.stringify({ assemblies }),
+    }),
   setPart: (projectId: number, code: string, quantity: number) =>
     farmRequest<{ project_id: number; component_code: string; quantity: number }>(
       `/products/${projectId}/parts/${code}`,

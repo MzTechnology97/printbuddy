@@ -208,9 +208,12 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
         for c in components.values()
         if c.shape_id and c.color and c.retired_at is None
     }
+    from backend.app.farm.products.assemblies import assemblies_of, contract
+
     products = []
     for product, project in rows:
         own = [(components[p.component_id], p.quantity) for p in parts_by_product.get(product.project_id, [])]
+        groups = assemblies_of(product, {c.code: q for c, q in own})
         variants = []
         for i, v in enumerate(product.variants or [], start=1):
             color = v.get("color")
@@ -231,6 +234,10 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                     "parts": []
                     if None in resolved
                     else [line(c, min(QTY_MAX, q * v["pieces"])) for c, (_, q) in zip(resolved, own)],
+                    # The same groups in the variant's components, ``pieces`` times as many per sale.
+                    "assemblies": []
+                    if None in resolved
+                    else contract(groups, {c.code: r.code for (c, _), r in zip(own, resolved, strict=True)}, v["pieces"]),
                 }
             )
         products.append(
@@ -243,6 +250,7 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "disabled": product.disabled_at is not None,
                 "updated_at": serialize_utc_datetime(max(product.updated_at, project.updated_at)),
                 "parts": [line(c, q) for c, q in own],
+                "assemblies": contract(groups),
                 "variants": variants,
             }
         )
@@ -307,6 +315,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     from backend.app.farm.models import FarmLibraryFile
     from backend.app.farm.plates.models import FarmPlate
     from backend.app.farm.plates.printer_map import PrinterModelResolver
+    from backend.app.farm.products.assemblies import assemblies_of
     from backend.app.farm.products.folders import excluded_by, excluded_files, project_folders
 
     product = await db.get(FarmProduct, project_id)
@@ -415,6 +424,8 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
             }
             for part, c in parts
         ],
+        # Groups of parts assembled together before the product; warnings when quantities don't add up.
+        "assemblies": assemblies_of(product, {c.code: part.quantity for part, c in parts}),
         # The folders linked to the product (subfolders come with them), by their path in the library.
         "folders": [
             {"folder_id": fid, "name": folders[fid]} for fid in await linked_folders(db, project_id) if fid in folders
@@ -968,6 +979,10 @@ router.include_router(pieces_router)
 from backend.app.farm.products.isolation import router as isolation_router  # noqa: E402
 
 router.include_router(isolation_router)
+
+from backend.app.farm.products.assemblies import router as assemblies_router  # noqa: E402
+
+router.include_router(assemblies_router)
 
 
 # ---------------------------------------------------------------- one-off import from Seller Hub

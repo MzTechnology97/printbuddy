@@ -145,11 +145,17 @@ class FarmProduct(Base):
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Pieces of its 3MF that are not part of it ("0 per product"), by geometry: [fingerprint, ...].
     not_part: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Groups of parts assembled together before the product (see ``assemblies``):
+    # [{"key", "name", "per_unit", "parts": [{"component_code", "quantity"}]}].
+    assemblies: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME", "not_part": "JSON"})
+add_columns(
+    "farm_products",
+    {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME", "not_part": "JSON", "assemblies": "JSON"},
+)
 
 
 def not_part(product: FarmProduct, fp: list | None) -> bool:
