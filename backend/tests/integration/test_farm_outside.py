@@ -481,3 +481,119 @@ async def test_one_failing_step_never_stops_the_tick(db_session):
         raise ValueError("bad colour")
 
     await service._guarded(db_session, "colour sampling", broken)  # logged, not raised
+
+
+@pytest.mark.asyncio
+async def test_the_next_print_of_the_same_file_does_not_hide_one_done_while_off(
+    async_client, db_session, farm, monkeypatch
+):
+    from backend.app.services.printer_manager import printer_manager
+
+    def epoch(d: datetime) -> float:
+        return d.replace(tzinfo=timezone.utc).timestamp()
+
+    # Print A (10:00-11:00) while Printbuddy was off; print B of the same file archived at 11:05.
+    after = archive(farm["k2"], "Regalo.gcode", ended=at(12))
+    after.started_at = after.created_at = at(11, 5)
+    db_session.add(after)
+    await db_session.commit()
+    jobs = [
+        {
+            "job_id": "000A",
+            "filename": "Regalo.gcode",
+            "status": "completed",
+            "start_time": epoch(at(10)),
+            "end_time": epoch(at(11)),
+        },
+        {
+            "job_id": "000B",
+            "filename": "Regalo.gcode",
+            "status": "completed",
+            "start_time": epoch(at(11, 5)),
+            "end_time": epoch(at(12)),
+        },
+    ]
+
+    class Client:
+        def _get(self, path):
+            return {"jobs": jobs if "&start=0&" in path else []}
+
+    monkeypatch.setattr(printer_manager, "get_client", lambda pid: Client() if pid == farm["k2"] else None)
+    assert await outside.scan_klipper_history(db_session) == 1  # A: recorded; B: Printbuddy has it
+    [job] = [j for j in (await async_client.get(f"{API}/jobs")).json() if j["outside_queue"]]
+    assert job["finished_at"] == "2026-01-01T11:00:00"
+
+
+@pytest.mark.asyncio
+async def test_one_print_that_always_fails_never_holds_back_the_others(async_client, db_session, farm, monkeypatch):
+    from backend.app.services.printer_manager import printer_manager
+
+    record = outside._record
+
+    async def fragile(db, source, printer_id, name, *args):
+        if "Rotto" in name:
+            raise ValueError("cannot read this one")
+        return await record(db, source, printer_id, name, *args)
+
+    monkeypatch.setattr(outside, "_record", fragile)
+    db_session.add_all(
+        [archive(farm["a1"], "Rotto.3mf", ended=at(10)), archive(farm["a1"], "Gancio.3mf", ended=at(11))]
+    )
+    await db_session.commit()
+    assert await outside.scan_archives(db_session) == 1
+    assert await outside.scan_archives(db_session) == 0  # the broken one is tried again, the other kept once
+    assert [j["print_name"] for j in (await async_client.get(f"{API}/jobs")).json() if j["outside_queue"]] == [
+        "Gancio.3mf"
+    ]
+
+    # Klipper: the same, and the cursor stays on the job that failed so it is read again.
+    def epoch(d: datetime) -> float:
+        return d.replace(tzinfo=timezone.utc).timestamp()
+
+    jobs = [
+        {
+            "job_id": "0001",
+            "filename": "Rotto.gcode",
+            "status": "completed",
+            "start_time": epoch(at(12)),
+            "end_time": epoch(at(12, 30)),
+        },
+        {
+            "job_id": "0002",
+            "filename": "Coperchio.gcode",
+            "status": "completed",
+            "start_time": epoch(at(13)),
+            "end_time": epoch(at(13, 30)),
+        },
+    ]
+    open_while_asking = []
+
+    class Client:
+        def _get(self, path):
+            open_while_asking.append(db_session.in_transaction())
+            return {"jobs": jobs if "&start=0&" in path else []}
+
+    monkeypatch.setattr(printer_manager, "get_client", lambda pid: Client() if pid == farm["k2"] else None)
+    assert await outside.scan_klipper_history(db_session) == 1
+    assert open_while_asking == [False]  # no write transaction held while the printer answers
+    from backend.app.api.routes.settings import get_setting
+
+    assert float(await get_setting(db_session, outside.HISTORY_KEY.format(farm["k2"]))) == epoch(at(12))
+
+
+@pytest.mark.asyncio
+async def test_one_printer_failing_never_stops_the_colour_of_the_others(db_session, farm, printing, monkeypatch):
+    sample = service._sample_colour
+
+    async def fragile(db, printer_id, *args):
+        if printer_id == farm["k2"]:
+            raise ValueError("bad status")
+        return await sample(db, printer_id, *args)
+
+    monkeypatch.setattr(service, "_sample_colour", fragile)
+    running = archive(farm["a1"], "Sopra__abcdef12.3mf", status="printing", ended=at(15))
+    db_session.add(running)
+    await db_session.commit()
+    printing.running.update({farm["a1"], farm["k2"]})
+    assert await service.record_used_colors(db_session) == 1
+    assert (await db_session.get(PrintArchive, running.id)).extra_data == {service.USED_COLORS_KEY: {"Bianco": 1}}

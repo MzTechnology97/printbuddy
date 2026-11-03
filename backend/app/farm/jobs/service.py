@@ -393,56 +393,63 @@ async def record_used_colors(db: AsyncSession) -> int:
     so its spool set by hand. The batch's colour is the one sampled most. Returns how many prints.
     """
     config = await plan.load_config(db)
-    by_hand = {s.printer_id: s for s in (await db.execute(select(FarmPrinterSpool))).scalars()}
+    by_hand = dict((await db.execute(select(FarmPrinterSpool.printer_id, FarmPrinterSpool.color_name))).all())
     sampled = 0
-    for printer in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all():
-        status = printer_manager.get_status(printer.id)
-        if status is None or status.state != "RUNNING":
-            continue
-        trays = _loaded_trays(printer.id)
-        if trays:
-            tray = next((t for t in trays if t["global_tray_id"] == getattr(status, "tray_now", None)), None)
-            if tray is None or not tray.get("color"):
-                continue  # between two slots, or a tray without colour
-            name = colour_name(tray["color"], config["colors"], config["tolerance"])
-        elif printer.id in by_hand:
-            name = by_hand[printer.id].color_name
-        else:
-            continue
-        if not name:
-            continue  # a slot reporting no real colour
-        # The archive of the print running now: the newest "printing" one of the file the printer reports.
-        printing = getattr(status, "subtask_name", None) or getattr(status, "gcode_file", None)
-        recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PRINT_MAX_AGE)
-        candidates = await db.execute(
-            select(PrintArchive)
-            .where(
-                PrintArchive.printer_id == printer.id,
-                PrintArchive.status == "printing",
-                PrintArchive.created_at >= recent,
-            )
-            .order_by(PrintArchive.id.desc())
-        )
-        archive = next(
-            (a for a in candidates.scalars() if _same_file(printing, a.filename) or _same_file(printing, a.print_name)),
-            None,
-        )
-        if archive is None:
-            continue
-        samples = dict((archive.extra_data or {}).get(USED_COLORS_KEY) or {})
-        samples[name] = samples.get(name, 0) + 1
-        archive.extra_data = {**(archive.extra_data or {}), USED_COLORS_KEY: samples}
-        jobs = await db.execute(
-            select(FarmPrintJob)
-            .join(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
-            .where(PrintQueueItem.archive_id == archive.id)
-        )
-        for job in jobs.scalars():
-            job.used_color = used_color(archive.extra_data)
-        sampled += 1
-    if sampled:
-        await db.commit()
+    for printer_id in (await db.execute(select(Printer.id).where(Printer.is_active.is_(True)))).scalars().all():
+        try:  # one printer at a time: one that always fails never holds back the others
+            if await _sample_colour(db, printer_id, config, by_hand.get(printer_id)):
+                await db.commit()
+                sampled += 1
+        except Exception:
+            await db.rollback()
+            logger.exception("Printer %s: colour not sampled", printer_id)
     return sampled
+
+
+async def _sample_colour(db: AsyncSession, printer_id: int, config: dict, by_hand: str | None) -> bool:
+    """One sample of the colour this printer feeds, on its running print; False when there is none."""
+    status = printer_manager.get_status(printer_id)
+    if status is None or status.state != "RUNNING":
+        return False
+    trays = _loaded_trays(printer_id)
+    if trays:
+        tray = next((t for t in trays if t["global_tray_id"] == getattr(status, "tray_now", None)), None)
+        if tray is None or not tray.get("color"):
+            return False  # between two slots, or a tray without colour
+        name = colour_name(tray["color"], config["colors"], config["tolerance"])
+    else:
+        name = by_hand
+    if not name:
+        return False  # no slot, no spool set by hand, or a slot reporting no real colour
+    # The archive of the print running now: the newest "printing" one of the file the printer reports.
+    printing = getattr(status, "subtask_name", None) or getattr(status, "gcode_file", None)
+    recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PRINT_MAX_AGE)
+    candidates = await db.execute(
+        select(PrintArchive)
+        .where(
+            PrintArchive.printer_id == printer_id,
+            PrintArchive.status == "printing",
+            PrintArchive.created_at >= recent,
+        )
+        .order_by(PrintArchive.id.desc())
+    )
+    archive = next(
+        (a for a in candidates.scalars() if _same_file(printing, a.filename) or _same_file(printing, a.print_name)),
+        None,
+    )
+    if archive is None:
+        return False
+    samples = dict((archive.extra_data or {}).get(USED_COLORS_KEY) or {})
+    samples[name] = samples.get(name, 0) + 1
+    archive.extra_data = {**(archive.extra_data or {}), USED_COLORS_KEY: samples}
+    jobs = await db.execute(
+        select(FarmPrintJob)
+        .join(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
+        .where(PrintQueueItem.archive_id == archive.id)
+    )
+    for job in jobs.scalars():
+        job.used_color = used_color(archive.extra_data)
+    return True
 
 
 def _slot_mapping(used: list[dict], trays: list[dict], color_hex: str, tolerance: int) -> list[int] | None:
