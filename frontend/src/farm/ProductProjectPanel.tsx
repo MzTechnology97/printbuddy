@@ -16,6 +16,7 @@ const INPUT =
   'bg-bambu-dark border border-bambu-dark-tertiary rounded px-2 py-1 text-sm text-white placeholder-bambu-gray focus:outline-none focus:border-bambu-green';
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 import { AccodaSummary, PrinterChip } from './PrintPlanPage';
+import { AssembliesPanel } from './AssembliesPanel';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import { FilePlates } from './PlatesPanel';
 import './i18n';
@@ -498,6 +499,7 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
             ))}
           </ul>
           {view.kind !== 'set' && <AddPart view={view} />}
+          {view.kind !== 'set' && view.parts.length > 1 && <AssembliesPanel view={view} />}
         </section>
 
         <ProductPiecesPanel projectId={view.project_id} />

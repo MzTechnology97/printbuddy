@@ -602,4 +602,53 @@ describe('FarmProductGate', () => {
     expect(await screen.findByText('Upstream production plan')).toBeInTheDocument();
     expect(screen.getByText('Upstream BOM')).toBeInTheDocument();
   });
+
+  it('groups parts of a kit to assemble together', async () => {
+    const user = userEvent.setup();
+    let sent: unknown;
+    const pair = [
+      { component_code: 'C-0118', quantity: 1 },
+      { component_code: 'C-0119', quantity: 1 },
+    ];
+    const kit = {
+      ...view,
+      kind: 'kit',
+      parts: [...view.parts, { ...part, code: 'C-0120', name: 'Perno – Nero', shape: 'Perno', plates: [] }],
+      assemblies: [
+        {
+          key: 'A1',
+          name: 'Coppia tappi',
+          per_unit: 3,
+          parts: pair,
+          warnings: [{ component_code: 'C-0118', expected: 3, quantity: 2 }],
+        },
+      ],
+    };
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(kit)),
+      http.put('/api/v1/farm/products/65/assemblies', async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ project_id: 65, assemblies: [] });
+      }),
+    );
+    sheet(65);
+    expect(await screen.findByText('Coppia tappi')).toBeInTheDocument();
+    expect(screen.getByText('×3 per unit')).toBeInTheDocument();
+    expect(screen.getByText('C-0118: 3 in the groups, 2 in the product')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /New group/ }));
+    await user.type(screen.getByLabelText('Group name'), 'Perni');
+    await user.clear(screen.getByLabelText('Groups per unit'));
+    await user.type(screen.getByLabelText('Groups per unit'), '2');
+    await user.click(screen.getByRole('checkbox', { name: /C-0120/ })); // the only part in no group
+    await user.click(screen.getByRole('button', { name: 'Save group' }));
+    await waitFor(() =>
+      expect(sent).toEqual({
+        assemblies: [
+          { key: 'A1', name: 'Coppia tappi', per_unit: 3, parts: pair },
+          { name: 'Perni', per_unit: 2, parts: [{ component_code: 'C-0120', quantity: 1 }] },
+        ],
+      }),
+    );
+  });
 });
