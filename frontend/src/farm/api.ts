@@ -167,6 +167,7 @@ export interface FarmPlanComponent {
   products: { project_id: number; name: string; has_cover: boolean }[];
   in_queue: number;
   missing: number;
+  kit_quantity?: number; // pieces in one product (a product's own plan only)
   plates: FarmPlanPlate[];
 }
 

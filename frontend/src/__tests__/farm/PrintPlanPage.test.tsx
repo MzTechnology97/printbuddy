@@ -262,4 +262,28 @@ describe('PrintPlanPage', () => {
       }),
     );
   });
+
+  it("shows Seller Hub's stock, leaves what is in stock unticked and marks the piece that limits the kit", async () => {
+    const [first] = plan.components;
+    const big = { ...first, code: 'C-0094', name: 'Maniglia grande – Giallo', stock: 12, to_print: 0, missing: 0,
+      status: '', kit_quantity: 2 };
+    const small = { ...first, code: 'C-0095', name: 'Maniglia piccola – Giallo', stock: 1, to_print: 6, missing: 6,
+      status: 'urgente', kit_quantity: 2 };
+    const { unmount } = render(<AccodaSummary components={[big, small]} byHand onClose={() => undefined}
+      onDone={() => undefined} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    expect(within(dialog).getByLabelText('Print C-0095')).toBeChecked();
+    expect(within(dialog).getByLabelText('Print C-0094')).not.toBeChecked(); // 12 in stock
+    expect(within(dialog).getByText('you already have 12')).toBeInTheDocument();
+    expect(within(dialog).getByText('To print: 6')).toBeInTheDocument();
+    expect(within(dialog).getByText('limits the kit: 0 products')).toBeInTheDocument();
+    unmount();
+
+    // Seller Hub not read: the dialog works as before and says the stock is not known.
+    render(<AccodaSummary components={[{ ...big, stock: null }]} byHand onClose={() => undefined}
+      onDone={() => undefined} />);
+    const again = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    expect(within(again).getByText('stock not available')).toBeInTheDocument();
+    expect(within(again).getByLabelText('Print C-0094')).toBeChecked();
+  });
 });

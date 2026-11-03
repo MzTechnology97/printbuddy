@@ -20,6 +20,7 @@ import {
 } from './api';
 import { PlateThumb } from './PlatesPanel';
 import { PrinterSlots } from './PrinterSlots';
+import { kitUnits, suggestPrints } from './suggest';
 import './i18n';
 
 const INPUT =
@@ -237,6 +238,23 @@ function ComponentImage({ c }: { c: FarmPlanComponent }) {
   );
 }
 
+/** Seller Hub's stock and what it says to print; "already N" when nothing is to print. */
+function StockNote({ c, limiting }: { c: FarmPlanComponent; limiting: boolean }) {
+  const { t } = useTranslation();
+  if (c.stock == null) return <span className="text-xs text-bambu-gray">{t('farm.jobs.stockUnknown')}</span>;
+  return (
+    <span className="text-xs text-bambu-gray flex flex-wrap gap-x-2">
+      <span>{t('farm.jobs.stock', { count: c.stock })}</span>
+      {c.to_print ? (
+        <span className="text-amber-300">{t('farm.jobs.toPrint', { count: c.to_print })}</span>
+      ) : (
+        <span className="text-bambu-green">{t('farm.jobs.enough', { count: c.stock })}</span>
+      )}
+      {limiting && <span className="text-red-300">{t('farm.jobs.limiting', { count: kitUnits(c) ?? 0 })}</span>}
+    </span>
+  );
+}
+
 /** ``byHand``: printing a product whatever Seller Hub asks, so components already covered are kept.
  *
  * Like upstream's print dialog: which components, the printer with what it has loaded, its AMS/CFS
@@ -253,11 +271,9 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
   const usable = components.filter((c) => c.plates.length > 0 && (byHand || c.missing > 0));
-  // Ticked: what is still missing, else everything (the plan's selection, a product nobody asks for); all can change.
-  const [picked, setPicked] = useState(() => {
-    const missing = usable.filter((c) => c.missing > 0);
-    return new Set((byHand && missing.length ? missing : usable).map((c) => c.code));
-  });
+  // Seller Hub's stock orders and ticks them (what it says to print); all can change.
+  const [suggestion] = useState(() => suggestPrints(usable, byHand));
+  const [picked, setPicked] = useState(() => new Set(suggestion.picked));
   const [chosen, setChosen] = useState<Record<string, number>>({}); // component -> printer; none: first free
   const [chosenPlate, setChosenPlate] = useState<Record<string, number>>({}); // none: the loaded material decides
   const [slots, setSlots] = useState<Record<string, Record<number, number>>>({}); // slots picked by hand
@@ -333,7 +349,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
               <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>{t('farm.jobs.pickNone')}</Button>
             </div>
           )}
-          {usable.map((c) => {
+          {suggestion.order.map((c) => {
             const on = picked.has(c.code);
             const best = c.plates[0];
             const printers = [...new Map(c.plates.flatMap((p) => p.printers).map((pr) => [pr.id, pr])).values()];
@@ -350,6 +366,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
                         style={{ background: `#${c.color_hex}` }} />
                     )}
                     <span className="font-mono text-bambu-green">{c.code}</span> {c.name}
+                    <StockNote c={c} limiting={suggestion.limiting === c.code} />
                   </span>
                 </label>
                 {on && (
