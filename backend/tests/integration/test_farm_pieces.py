@@ -393,3 +393,43 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     # A component Seller Hub knows can't be given a single shape back by mistake.
     r = await async_client.patch(f"{API}/components/{comps[0]}", json={"shape_id": shapes[0]})
     assert r.status_code == 422
+
+
+async def test_a_set_keeps_only_the_shapes_of_its_pieces(async_client, tmp_path):
+    """Left/right shapes named by hand before geometry, then the real piece found in the 3MF (a mirrored pair)."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Knee" / "knee.3mf", {1: [("KneeGrip_Mirrored", tetra(), None)] * 4})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    file_id = (await async_client.get(f"{API}/library/files")).json()[0]["library_file_id"]
+    knee_folder = (await async_client.get(f"/api/v1/library/files/{file_id}")).json()["folder_id"]
+    shapes = [
+        (await async_client.post(f"{API}/shapes", json={"name": n})).json()["id"] for n in ("Fianchetto SX", "DX")
+    ]
+    codes = [
+        (await async_client.post(f"{API}/components", json={"shape_id": s, "color": "Nero"})).json()["code"]
+        for s in shapes
+    ]
+    r = await async_client.post(
+        f"{API}/products",
+        json={"name": "Coppia fianchetti", "parts": [{"component_code": codes[0]}, {"component_code": codes[1]}]},
+    )
+    pid = r.json()["project_id"]
+    await async_client.put(f"{API}/folders/{knee_folder}/projects", json={"project_ids": [pid]})
+
+    await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    [part] = view["parts"]
+    assert (part["code"], part["name"]) == (codes[0], "Coppia fianchetti – Nero")  # the set's name, not the SX's
+
+    [knee] = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces", json={"yield_ids": knee["yield_ids"], "quantity": 2, "shape_name": "Knee"}
+    )
+    assert r.json()["component_code"] == codes[0]
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    [part] = view["parts"]
+    # SX and DX have no piece in the product's 3MF: they leave the set, which now prints 4 / 2 = 2 sets a plate.
+    assert [(r["shape"], r["quantity"]) for r in part["recipe"]] == [("Knee", 2)]
+    assert [p["yield"] for p in part["plates"]] == [2]

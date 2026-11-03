@@ -74,27 +74,62 @@ async def _used_elsewhere(db: AsyncSession, component_id: int, project_id: int) 
     )
 
 
+async def _product_rows(db: AsyncSession, project_id: int) -> tuple[dict[int, str], list]:
+    """The product's 3MF projects ``{id: filename}`` and their measured objects ``(yield, file id, model)``."""
+    folders = await project_folders(db, project_id)
+    files = dict(
+        (
+            await db.execute(
+                select(LibraryFile.id, LibraryFile.filename)
+                .where(LibraryFile.deleted_at.is_(None), LibraryFile.folder_id.in_(folders))
+                .where(LibraryFile.filename.ilike("%.3mf"), LibraryFile.filename.not_ilike("%.gcode.3mf"))
+                .where(LibraryFile.id.notin_(await excluded_by(db, project_id)))
+            )
+        ).all()
+    )
+    rows = (
+        await db.execute(
+            select(FarmPlateYield, FarmPlate.library_file_id, FarmPlate.printer_model)
+            .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
+            .where(FarmPlate.library_file_id.in_(files))
+            .order_by(FarmPlateYield.id)
+        )
+    ).all()
+    return files, [r for r in rows if r[0].fingerprint]  # filtered before grouping: same pieces as the Pieces tab
+
+
+async def _product_shapes(db: AsyncSession, project_id: int) -> set[int]:
+    """Shapes of the pieces in the product's 3MF projects: the only ones a set of it can be made of."""
+    return {y.shape_id for y, _, _ in (await _product_rows(db, project_id))[1] if y.shape_id is not None}
+
+
 async def _make_set(db: AsyncSession, product: FarmProduct, project: Project) -> FarmComponent | None:
     """Turn the product's parts into one set component; None when it has no parts yet.
 
     The first part only this product uses, once per unit, keeps its code: Seller Hub's stock of it
     already counts sets (a whole product, or one of a left/right pair). Otherwise the set gets a
     new code, since stock of a piece used several times per unit would not be sets. The shapes of
-    every part go into the recipe with their quantities; the other parts leave the product, and
-    components no other product uses are retired.
+    every part found among the product's pieces go into the recipe with their quantities (a shape
+    with no piece in its 3MF, e.g. one named by hand before geometry, would make every plate yield
+    0 sets); the other parts leave the product, and components no other product uses are retired.
+    A kept piece component takes the product's name, since it now stands for the whole set.
     """
     parts = await _parts(db, product.project_id)
     if not parts:
         return None
     if keep := next((c for p, c in parts if c.recipe is not None), None):
         return keep  # already a set
+    # No piece linked yet: nothing to check against; the first Salva in its pieces rebuilds the set.
+    present = await _product_shapes(db, product.project_id) or None
     recipe: dict[int, int] = {}
     for part, comp in parts:
-        for shape_id in products.component_shapes(comp):
+        for shape_id in products.component_shapes(comp) & (present or products.component_shapes(comp)):
             recipe[shape_id] = recipe.get(shape_id, 0) + part.quantity
     own = [(p, c) for p, c in parts if p.quantity == 1 and not await _used_elsewhere(db, c.id, product.project_id)]
     if own:
         keep_part, keep = own[0]
+        if keep.shape_id is not None:  # named after one piece ("… SX – Nero"): now the whole set
+            keep.name = " – ".join(x for x in (project.name[:180], keep.color) if x)
     else:
         keep = FarmComponent(code=await products._next_code(db), name=project.name[:200], color=parts[0][1].color)
         db.add(keep)
@@ -143,26 +178,7 @@ async def set_kind(project_id: int, data: KindIn, db: AsyncSession = Depends(get
 async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
     """Distinct pieces in the 3MF projects of the product's folders, with their part in the product."""
     product = await _product(db, project_id)
-    folders = await project_folders(db, project_id)
-    files = dict(
-        (
-            await db.execute(
-                select(LibraryFile.id, LibraryFile.filename)
-                .where(LibraryFile.deleted_at.is_(None), LibraryFile.folder_id.in_(folders))
-                .where(LibraryFile.filename.ilike("%.3mf"), LibraryFile.filename.not_ilike("%.gcode.3mf"))
-                .where(LibraryFile.id.notin_(await excluded_by(db, project_id)))
-            )
-        ).all()
-    )
-    rows = (
-        await db.execute(
-            select(FarmPlateYield, FarmPlate.library_file_id, FarmPlate.printer_model)
-            .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
-            .where(FarmPlate.library_file_id.in_(files))
-            .order_by(FarmPlateYield.id)
-        )
-    ).all()
-    rows = [r for r in rows if r[0].fingerprint]  # filtered before grouping: same pieces as the Pieces tab
+    files, rows = await _product_rows(db, project_id)
     parts = await _parts(db, project_id)
     set_comp = next((c for _, c in parts if c.recipe is not None), None) if product.kind == "set" else None
     by_shape = {c.shape_id: (part, c) for part, c in parts if c.shape_id}
@@ -438,7 +454,9 @@ async def set_product_piece(project_id: int, data: ProductPieceIn, db: AsyncSess
             db.add(comp)
             await db.flush()
             db.add(FarmProductPart(project_id=project_id, component_id=comp.id, quantity=1, sort_order=0))
-        recipe = [r for r in comp.recipe or [] if r["shape_id"] != shape_id]
+        # Rebuilt from the product's pieces: a shape no longer among them (or set to 0) leaves the set.
+        present = await _product_shapes(db, project_id)
+        recipe = [r for r in comp.recipe or [] if r["shape_id"] != shape_id and r["shape_id"] in present]
         if data.quantity:
             recipe.append({"shape_id": shape_id, "quantity": data.quantity})
         comp.recipe = recipe
