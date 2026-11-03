@@ -37,6 +37,7 @@ from backend.app.farm.products.models import (
     FarmShape,
     component_shapes,
     component_yield,
+    not_part,
 )
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile, LibraryFolder
@@ -336,14 +337,14 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         ).all()
     )
     counts: dict[int, dict] = {}
-    for file_id, status, n in (
-        await db.execute(
-            select(FarmPlate.library_file_id, FarmPlate.status, func.count())
-            .where(FarmPlate.library_file_id.in_({f.id for f in files}))
-            .group_by(FarmPlate.library_file_id, FarmPlate.status)
-        )
-    ).all():
-        counts.setdefault(file_id, {"proposed": 0, "confirmed": 0})[status] = n
+    for plate in (
+        await db.execute(select(FarmPlate).where(FarmPlate.library_file_id.in_({f.id for f in files})))
+    ).scalars():
+        c = counts.setdefault(plate.library_file_id, {"proposed": 0, "confirmed": 0, "unrelated_plates": []})
+        if plate.yields and all(not_part(product, y.fingerprint) for y in plate.yields):
+            c["unrelated_plates"].append(plate.id)  # only pieces that are not part of this product
+        else:
+            c[plate.status] += 1
     resolver = await PrinterModelResolver.load(db)
 
     used_by: dict[int, list[dict]] = {}
@@ -409,7 +410,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
                 "filename": f.filename,
                 "path": paths.get(f.id, f.filename),
                 "folder": folders.get(f.folder_id, ""),
-                **counts.get(f.id, {"proposed": 0, "confirmed": 0}),
+                **counts.get(f.id, {"proposed": 0, "confirmed": 0, "unrelated_plates": []}),
                 "opened": f.id in counts,
                 "excluded": f.id in own,
             }

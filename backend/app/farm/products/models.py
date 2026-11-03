@@ -87,11 +87,20 @@ class FarmProduct(Base):
     kind: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Not made any more for now: kept with its data, left out of what to print.
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Pieces of its 3MF that are not part of it ("0 per product"), by geometry: [fingerprint, ...].
+    not_part: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
-add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME"})
+add_columns("farm_products", {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME", "not_part": "JSON"})
+
+
+def not_part(product: FarmProduct, fp: list | None) -> bool:
+    """The piece with this geometry was marked as not part of the product."""
+    from backend.app.farm.plates.geometry import same_piece
+
+    return bool(fp) and any(same_piece(fp, f) for f in product.not_part or [])
 
 
 class FarmProductPart(Base):

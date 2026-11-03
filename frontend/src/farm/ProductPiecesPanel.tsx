@@ -35,6 +35,11 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
   const qtyLabel = t(isSet ? 'farm.productPieces.perSetInput' : 'farm.productPieces.perProduct');
   const hex = piece.component?.color_hex || data.set?.color_hex || colors[color.toLowerCase()] || null;
 
+  const notPart = useMutation({
+    mutationFn: () => farmApi.setProductPiece(projectId, { yield_ids: piece.yield_ids, quantity: 0 }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
   const save = useMutation({
     mutationFn: () =>
       farmApi.setProductPiece(projectId, {
@@ -125,8 +130,38 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
             onClick={() => save.mutate()}>
             {save.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t('farm.productPieces.save')}
           </Button>
+          {piece.quantity == null && (
+            <Button size="sm" variant="secondary" disabled={notPart.isPending} title={t('farm.productPieces.notPartHint')}
+              aria-label={`${t('farm.productPieces.notPart')} ${label}`} onClick={() => notPart.mutate()}>
+              {t('farm.productPieces.notPart')}
+            </Button>
+          )}
         </div>
       </div>
+    </li>
+  );
+}
+
+/** A piece set aside as not part of the product: its picture, its name and "Put back". */
+function AsideRow({ projectId, piece }: { projectId: number; piece: FarmProductPiece }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const restore = useMutation({
+    mutationFn: () => farmApi.restoreProductPiece(projectId, piece.yield_ids),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const label = piece.shape || piece.names[0];
+  return (
+    <li className="flex items-center gap-3 text-sm">
+      <img src={farmApi.pieceImageUrl(piece.image_yield_id, null)} alt="" loading="lazy"
+        className="w-12 h-12 rounded bg-gray-300 object-contain shrink-0" />
+      <span className="min-w-0 flex-1 break-all text-bambu-gray">{label} · {piece.files.join(', ')}</span>
+      <Button size="sm" variant="secondary" disabled={restore.isPending}
+        aria-label={`${t('farm.productPieces.restore')} ${label}`} onClick={() => restore.mutate()}>
+        {t('farm.productPieces.restore')}
+      </Button>
     </li>
   );
 }
@@ -137,7 +172,9 @@ export function ProductPiecesPanel({ projectId }: { projectId: number }) {
   const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
   const data = pieces.data;
-  const open = data?.pieces.filter((p) => p.quantity == null).length ?? 0;
+  const main = data?.pieces.filter((p) => !p.not_part) ?? [];
+  const aside = data?.pieces.filter((p) => p.not_part) ?? [];
+  const open = main.filter((p) => p.quantity == null).length;
   return (
     <section className="space-y-2">
       <h3 className="text-sm font-semibold text-white">{t('farm.productPieces.title')}</h3>
@@ -149,14 +186,24 @@ export function ProductPiecesPanel({ projectId }: { projectId: number }) {
       ) : (
         <>
           <p className="text-xs text-bambu-gray">
-            {t('farm.productPieces.counts', { open, done: data.pieces.length - open })}
+            {t('farm.productPieces.counts', { open, done: main.length - open })}
           </p>
           <ul className="space-y-2">
-            {data.pieces.map((p) => (
+            {main.map((p) => (
               <PieceRow key={`${p.yield_ids[0]}-${p.quantity}-${p.component?.code}`} projectId={projectId} piece={p}
                 data={data} shapes={shapes.data || []} colors={settings.data?.colors || {}} />
             ))}
           </ul>
+          {aside.length > 0 && (
+            <details className="bg-bambu-dark rounded-lg p-3">
+              <summary className="text-sm text-bambu-gray cursor-pointer">
+                {t('farm.productPieces.aside', { count: aside.length })}
+              </summary>
+              <ul className="space-y-2 mt-2">
+                {aside.map((p) => <AsideRow key={p.yield_ids[0]} projectId={projectId} piece={p} />)}
+              </ul>
+            </details>
+          )}
         </>
       )}
     </section>

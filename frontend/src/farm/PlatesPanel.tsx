@@ -172,10 +172,12 @@ function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
   );
 }
 
-export function FilePlates({ file, shapes, onShapeCreated }: {
+/** ``aside``: plates of the file shown last, folded (e.g. only pieces that are not part of a product). */
+export function FilePlates({ file, shapes, onShapeCreated, aside = [] }: {
   file: Pick<FarmLibraryFileState, 'library_file_id' | 'path'>;
   shapes: FarmShape[];
   onShapeCreated: () => void;
+  aside?: number[];
 }) {
   const { t } = useTranslation();
   const plates = useQuery({
@@ -185,12 +187,24 @@ export function FilePlates({ file, shapes, onShapeCreated }: {
   if (plates.isLoading) return <Loader2 className="w-5 h-5 animate-spin text-bambu-green m-3" />;
   if (plates.error) return <p className="text-sm text-red-400 p-3">{(plates.error as Error).message}</p>;
   if (!plates.data?.length) return <p className="text-sm text-bambu-gray p-3">{t('farm.plates.none')}</p>;
+  const card = (p: FarmPlateDetail) => (
+    <PlateCard key={`${p.id}-${p.status}`} plate={p} fileName={file.path.split(/[\\/]/).pop() || file.path}
+      shapes={shapes} onShapeCreated={onShapeCreated} />
+  );
+  const later = plates.data.filter((p) => aside.includes(p.id));
   return (
     <ul className="space-y-2 p-3 pt-0">
-      {plates.data.map((p) => (
-        <PlateCard key={`${p.id}-${p.status}`} plate={p} fileName={file.path.split(/[\\/]/).pop() || file.path}
-          shapes={shapes} onShapeCreated={onShapeCreated} />
-      ))}
+      {plates.data.filter((p) => !aside.includes(p.id)).map(card)}
+      {later.length > 0 && (
+        <li>
+          <details>
+            <summary className="text-sm text-bambu-gray cursor-pointer">
+              {t('farm.project.unrelatedPlates', { count: later.length })}
+            </summary>
+            <ul className="space-y-2 mt-2">{later.map(card)}</ul>
+          </details>
+        </li>
+      )}
     </ul>
   );
 }

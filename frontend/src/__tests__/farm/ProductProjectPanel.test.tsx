@@ -488,6 +488,46 @@ describe('FarmProductGate', () => {
     confirm.mockRestore();
   });
 
+  it('sets a piece aside as not part of the product, and puts it back', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)),
+      http.get('/api/v1/farm/products/65/pieces', () =>
+        HttpResponse.json({
+          kind: null,
+          set: null,
+          default_color: 'Nero',
+          unshaped_parts: [],
+          pieces: [
+            piece({}),
+            piece({ yield_ids: [9], image_yield_id: 9, names: ['Klamka Lewa'], quantity: 0, not_part: true }),
+          ],
+        }),
+      ),
+      http.put('/api/v1/farm/products/65/pieces', async ({ request }) => {
+        sent.push(['save', await request.json()]);
+        return HttpResponse.json({ shape_id: null, component_code: null, quantity: 0, plates_confirmed: 0 });
+      }),
+      http.put('/api/v1/farm/products/65/pieces/restore', async ({ request }) => {
+        sent.push(['restore', await request.json()]);
+        return HttpResponse.json({ project_id: 65, not_part: 0 });
+      }),
+    );
+    sheet(65);
+    expect(await screen.findByText('1 to decide · 0 in the product')).toBeInTheDocument(); // the aside one not counted
+    expect(screen.getByText('Not part of the product (1)')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Not part of it Tappo porte' }));
+    await user.click(screen.getByText('Not part of the product (1)'));
+    await user.click(screen.getByRole('button', { name: 'Put back Klamka Lewa' }));
+    await waitFor(() =>
+      expect(sent).toEqual([
+        ['save', { yield_ids: [1, 2], quantity: 0 }],
+        ['restore', { yield_ids: [9] }],
+      ]),
+    );
+  });
+
   it('keeps the upstream panels for normal projects', async () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),
