@@ -25,6 +25,7 @@ from backend.app.models.library import LibraryFile
 from backend.app.models.printer import Printer
 from backend.app.services.archive import ArchiveService
 from backend.app.services.bambu_ftp import (
+    PrinterFTPBusyError,
     cache_3mf_download,
     delete_file_async,
     get_ftp_retry_settings,
@@ -655,7 +656,7 @@ class BackgroundDispatchService:
                         max_retries=ftp_retry_count,
                         retry_delay=ftp_retry_delay,
                         operation_name=operation_name,
-                        non_retry_exceptions=(DispatchJobCancelled,),
+                        non_retry_exceptions=(DispatchJobCancelled, PrinterFTPBusyError),
                     )
                 )
             return bool(
