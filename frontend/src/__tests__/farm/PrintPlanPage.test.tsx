@@ -171,6 +171,26 @@ describe('PrintPlanPage', () => {
     expect(screen.getByLabelText('Select C-0004')).toBeDisabled();
   });
 
+  it('warns about requested components no active printer can print', async () => {
+    const onlyX1C = {
+      ...plan.components[0],
+      code: 'C-0300',
+      name: 'Gancio',
+      plates: [plate(5, 'X1C', 1, true, [])], // a plate, but for a model with no active printer
+    };
+    const enough = { ...plan.components[1], code: 'C-0301', name: 'Coperchio', to_print: 0 }; // not asked for
+    server.use(
+      http.get('/api/v1/farm/plan', () =>
+        HttpResponse.json({ ...plan, components: [...plan.components, onlyX1C, enough] }),
+      ),
+    );
+    render(<PrintPlanPage />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      '2 components Seller Hub asks for have no plate ready for any active printer:C-0004 Supporto Velux · C-0300 Gancio',
+    );
+  });
+
   it('lists jobs with their state and cancels a waiting one', async () => {
     jobs = [
       { id: 7, component_code: 'C-0121', color: 'Marrone', state: 'waiting', note: 'A1 uno: no Marrone PLA loaded',

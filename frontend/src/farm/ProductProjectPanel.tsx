@@ -15,7 +15,7 @@ type Part = FarmProductView['parts'][number];
 const INPUT =
   'bg-bambu-dark border border-bambu-dark-tertiary rounded px-2 py-1 text-sm text-white placeholder-bambu-gray focus:outline-none focus:border-bambu-green';
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-import { AccodaSummary, PrinterChip } from './PrintPlanPage';
+import { AccodaSummary, NotPrintable, PrinterChip } from './PrintPlanPage';
 import { AssembliesPanel } from './AssembliesPanel';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import { FilePlates } from './PlatesPanel';
@@ -278,6 +278,7 @@ function ProductPrinters({ view }: { view: FarmProductView }) {
     <section className="space-y-2">
       <h3 className="text-sm font-semibold text-white">{t('farm.project.printers')}</h3>
       <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.project.printersIntro')}</p>
+      <NotPrintable components={plan.data?.components || []} />
       {plan.isLoading ? (
         <Loader2 className="w-5 h-5 animate-spin text-bambu-green" />
       ) : (
