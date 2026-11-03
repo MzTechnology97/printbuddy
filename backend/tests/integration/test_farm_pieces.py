@@ -329,6 +329,16 @@ async def test_product_printed_as_a_set(async_client, tmp_path):
     assert (first.status_code, first.content[:4]) == (200, b"\x89PNG")
     assert Image.open(io.BytesIO(first.content)).size == (512, 256)
     assert (await async_client.get(f"{API}/components/{code}/image")).content == first.content
+    # Seller Hub: the same picture by URL, with its API key, and a version that follows the colour.
+    listed = {c["code"]: c for c in (await async_client.get(f"{API}/components")).json()}
+    assert listed[code]["image_url"] == f"/api/v1/farm/components/{code}/image"
+    version = listed[code]["image_version"]
+    await async_client.patch(f"{API}/components/{code}", json={"color": "Bianco"})
+    listed = {c["code"]: c for c in (await async_client.get(f"{API}/components")).json()}
+    assert listed[code]["image_version"] not in (None, version)
+    contract = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["project_id"] == pid)
+    assert contract["parts"][0]["image_version"] == listed[code]["image_version"]
+    assert [r["shape"] for r in contract["parts"][0]["recipe"]] == ["Top", "Bottom"]
     # The set takes no second component.
     other = (await async_client.post(f"{API}/components", json={"name": "Scatola"})).json()["code"]
     assert (await async_client.put(f"{API}/products/{pid}/parts/{other}", json={"quantity": 1})).status_code == 409

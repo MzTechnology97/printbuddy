@@ -170,9 +170,21 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
     def plates(c: FarmComponent) -> list[dict]:
         return by_component.get(c.id, [])
 
+    from backend.app.farm.products.pieces import component_images
+
+    images = await component_images(db, [c for c in components.values() if c.id in used or c.shape_id])
+    shapes = await _shape_names(db)
+
     def line(c: FarmComponent, quantity: int) -> dict:
-        # Confirmed plates (file × printer model × material) and their yield of this component.
-        return {"component_code": c.code, "name": c.name, "quantity": quantity, "plates": plates(c)}
+        # Confirmed plates (file × printer model × material) and their yield of this component (sets for a set).
+        return {
+            "component_code": c.code,
+            "name": c.name,
+            "quantity": quantity,
+            "plates": plates(c),
+            "recipe": _component_dict(c, shapes)["recipe"],
+            **images.get(c.code, {"image_url": None, "image_version": None}),
+        }
 
     colored = {
         (c.shape_id, c.color.casefold()): c
@@ -221,9 +233,12 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/components", dependencies=[_read])
 async def list_components(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    from backend.app.farm.products.pieces import component_images
+
     shapes = {s.id: s.name for s in (await db.execute(select(FarmShape))).scalars()}
-    rows = (await db.execute(select(FarmComponent).order_by(FarmComponent.code))).scalars()
-    return [_component_dict(c, shapes) for c in rows]
+    rows = list((await db.execute(select(FarmComponent).order_by(FarmComponent.code))).scalars())
+    images = await component_images(db, rows)
+    return [{**_component_dict(c, shapes), **images[c.code]} for c in rows]
 
 
 def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
