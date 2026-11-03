@@ -17,6 +17,7 @@ const view = {
   project_id: 65,
   name: 'Tappi Paraspifferi AMI',
   has_cover: false,
+  folders: [{ folder_id: 3, name: 'Caps' }],
   skus: ['TP-01'],
   asins: ['B0TEST0065'],
   parts: [
@@ -390,6 +391,35 @@ describe('FarmProductGate', () => {
     expect(within(section).getByText('P1S due')).toBeInTheDocument();
     expect(within(section).getByText('no active printer of this model')).toBeInTheDocument(); // A1
     expect(within(section).getByText('No plate for: K1')).toBeInTheDocument(); // the inactive X1C is left out
+  });
+
+  it('links and unlinks the product folders', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)),
+      http.get('/api/v1/library/folders', () =>
+        HttpResponse.json([
+          { id: 3, name: 'Caps', children: [{ id: 4, name: 'Bambu', children: [] }] },
+          { id: 5, name: 'Specchietto', children: [] },
+        ]),
+      ),
+      http.put('/api/v1/farm/products/65/folders/:id', async ({ request, params }) => {
+        sent.push([params.id, await request.json()]);
+        return HttpResponse.json({ folder_id: Number(params.id), project_ids: [] });
+      }),
+    );
+    sheet(65);
+    const section = (await screen.findByRole('heading', { name: 'Linked folders' })).closest('section')!;
+    expect(within(section).getByText('Caps')).toBeInTheDocument();
+    const pick = within(section).getByLabelText('Link a folder…');
+    await waitFor(() => expect(within(pick).getByRole('option', { name: 'Caps / Bambu' })).toBeInTheDocument());
+    expect(within(pick).queryByRole('option', { name: 'Caps' })).not.toBeInTheDocument(); // already linked
+    await user.selectOptions(pick, 'Specchietto');
+    await user.click(within(section).getByRole('button', { name: 'Unlink' }));
+    await waitFor(() => expect(sent).toEqual([['5', { linked: true }], ['3', { linked: false }]]));
+    confirm.mockRestore();
   });
 
   it('keeps the upstream panels for normal projects', async () => {

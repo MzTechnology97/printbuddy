@@ -110,6 +110,7 @@ export interface FarmProductView {
       sliced: boolean;
     }[];
   })[];
+  folders: { folder_id: number; name: string }[];
   files: {
     library_file_id: number;
     filename: string;
@@ -350,6 +351,11 @@ export const farmApi = {
       { method: 'PUT', body: JSON.stringify({ excluded }) },
     ),
   getProductPieces: (projectId: number) => farmRequest<FarmProductPieces>(`/products/${projectId}/pieces`),
+  setProductFolder: (projectId: number, folderId: number, linked: boolean) =>
+    farmRequest<{ folder_id: number; project_ids: number[] }>(`/products/${projectId}/folders/${folderId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ linked }),
+    }),
   setProductKind: (projectId: number, kind: 'set' | 'kit') =>
     farmRequest<{ project_id: number; kind: FarmProductKind }>(`/products/${projectId}/kind`, {
       method: 'PUT',

@@ -5,7 +5,7 @@ import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
-import { api } from '../api/client';
+import { api, type LibraryFolderTree } from '../api/client';
 import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
 import { useToast } from '../contexts/ToastContext';
@@ -286,6 +286,49 @@ function ProductPrinters({ view }: { view: FarmProductView }) {
   );
 }
 
+const flatFolders = (tree: LibraryFolderTree[], prefix = ''): { id: number; path: string }[] =>
+  tree.flatMap((f) => [{ id: f.id, path: `${prefix}${f.name}` }, ...flatFolders(f.children || [], `${prefix}${f.name} / `)]);
+
+/** The library folders linked to the product: link another, unlink one. */
+function ProductFolders({ view }: { view: FarmProductView }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const tree = useQuery({ queryKey: ['library-folders'], queryFn: api.getLibraryFolders });
+  const link = useMutation({
+    mutationFn: ({ id, linked }: { id: number; linked: boolean }) => farmApi.setProductFolder(view.project_id, id, linked),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const mine = new Set(view.folders.map((f) => f.folder_id));
+  const choices = flatFolders(tree.data || []).filter((f) => !mine.has(f.id));
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-white">{t('farm.project.folders')}</h3>
+      {view.folders.length === 0 && <p className="text-sm text-amber-400">{t('farm.project.noFolders')}</p>}
+      <ul className="space-y-1">
+        {view.folders.map((f) => (
+          <li key={f.folder_id} className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-white min-w-0 flex-1 break-all">{f.name}</span>
+            <Button size="sm" variant="secondary" disabled={link.isPending}
+              onClick={() => window.confirm(t('farm.project.unlinkConfirm', { name: f.name })) &&
+                link.mutate({ id: f.folder_id, linked: false })}>
+              {t('farm.project.unlink')}
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <select aria-label={t('farm.project.linkFolder')} className={`${INPUT} max-w-full`} value=""
+        disabled={link.isPending} onChange={(e) => e.target.value && link.mutate({ id: Number(e.target.value), linked: true })}>
+        <option value="">{t('farm.project.linkFolder')}</option>
+        {choices.map((f) => (
+          <option key={f.id} value={f.id}>{f.path}</option>
+        ))}
+      </select>
+    </section>
+  );
+}
+
 /** Set or kit, and what is still missing before the product can be printed. */
 function ProductStatus({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
@@ -414,6 +457,8 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
         <ProductPlates view={view} />
 
         <ProductPrinters view={view} />
+
+        <ProductFolders view={view} />
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold text-white">{t('farm.project.files')}</h3>
