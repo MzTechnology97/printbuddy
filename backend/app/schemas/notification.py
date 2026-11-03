@@ -263,6 +263,10 @@ class TelegramConfig(BaseModel):
         default=None,
         description="Optional Telegram forum topic/thread ID",
     )
+    commands_enabled: bool = Field(default=False, description="The bot takes commands (services/telegram_bot.py)")
+    allowed_chat_ids: str | None = Field(
+        default=None, description="Chats whose commands are answered, comma-separated; empty: chat_id"
+    )
 
 
 class EmailConfig(BaseModel):

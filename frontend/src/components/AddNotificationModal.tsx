@@ -300,6 +300,8 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
           { key: 'bot_token', label: 'Bot Token', placeholder: 'Bot token from @BotFather', type: 'password', required: true },
           { key: 'chat_id', label: 'Chat ID', placeholder: 'Your chat or group ID, e.g. -1001234567890', type: 'text', required: true },
           { key: 'message_thread_id', label: 'Topic / Thread ID', placeholder: 'Optional forum topic ID, e.g. 17585', type: 'text', required: false },
+          { key: 'commands_enabled', label: 'Accept commands (/stato, /coda, /pausa…)', type: 'checkbox', required: false, helperText: 'The bot answers commands by long polling; only one Printbuddy may poll a bot' },
+          { key: 'allowed_chat_ids', label: 'Allowed chat IDs', placeholder: 'Comma-separated; empty = the Chat ID above', type: 'text', required: false, showIf: (cfg: Record<string, string>) => cfg.commands_enabled === 'true' },
         ];
       case 'email':
         return [

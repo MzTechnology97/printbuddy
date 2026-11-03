@@ -121,6 +121,7 @@ from backend.app.services.spoolman_tracking import (
     store_print_data as _store_spoolman_print_data,
 )
 from backend.app.services.tasmota import tasmota_service
+from backend.app.services.telegram_bot import telegram_bot  # fork: Telegram bot commands
 
 
 # =============================================================================
@@ -6014,6 +6015,7 @@ async def lifespan(app: FastAPI):
     await library_trash_service.start_scheduler()
     farm_library_scheduler.start()  # fork: periodic sync of watched NAS folders
     farm_job_dispatcher.start()  # fork: places Accoda jobs on free printers
+    telegram_bot.start()  # fork: Telegram providers that take commands (long polling)
 
     # Start the archive auto-purge sweeper (#1008 follow-up)
     await archive_purge_service.start_scheduler()
@@ -6066,6 +6068,7 @@ async def lifespan(app: FastAPI):
     library_trash_service.stop_scheduler()
     farm_library_scheduler.stop()
     farm_job_dispatcher.stop()
+    await telegram_bot.stop()
     archive_purge_service.stop_scheduler()
     obico_detection_service.stop()
     stop_ams_history_recording()

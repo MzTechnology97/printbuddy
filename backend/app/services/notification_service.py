@@ -353,8 +353,16 @@ class NotificationService:
                 return thread_id
         return None
 
-    async def _send_telegram(self, config: dict, message: str, image_data: bytes | None = None) -> tuple[bool, str]:
-        """Send notification via Telegram bot."""
+    async def _send_telegram(
+        self, config: dict, message: str, image_data: bytes | None = None, buttons: list | None = None
+    ) -> tuple[bool, str]:
+        """Send notification via Telegram bot.
+
+        ``buttons`` (rows of (label, callback data)) are attached only when the bot takes commands
+        (``telegram_bot``), which answers them.
+        """
+        from backend.app.services.telegram_bot import commands_enabled
+
         bot_token = config.get("bot_token", "").strip()
         chat_id = config.get("chat_id", "").strip()
         thread_id = self._telegram_thread_id(config)
@@ -375,6 +383,9 @@ class NotificationService:
         telegram_payload = {"chat_id": chat_id}
         if thread_id:
             telegram_payload["message_thread_id"] = thread_id
+        if buttons and commands_enabled(config):
+            keyboard = [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
+            telegram_payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
 
         if image_data:
             # Use sendPhoto to attach the thumbnail with the caption
@@ -715,6 +726,7 @@ class NotificationService:
         event_type: str | None = None,
         variables: dict | None = None,
         raise_network: bool = False,
+        buttons: list | None = None,
     ) -> tuple[bool, str]:
         """Send notification to a specific provider.
 
@@ -737,7 +749,9 @@ class NotificationService:
             elif provider.provider_type == "pushover":
                 return await self._send_pushover(config, title, message, image_data=image_data)
             elif provider.provider_type == "telegram":
-                return await self._send_telegram(config, f"*{title}*\n{message}", image_data=image_data)
+                return await self._send_telegram(
+                    config, f"*{title}*\n{message}", image_data=image_data, buttons=buttons
+                )
             elif provider.provider_type == "email":
                 return await self._send_email(config, title, message)
             elif provider.provider_type == "discord":
@@ -791,6 +805,7 @@ class NotificationService:
         printer_name: str | None,
         image_data: bytes | None,
         variables: dict | None,
+        buttons: list | None = None,
     ) -> None:
         """Send again after a network error, waiting longer before each try; the outcome is logged."""
         from backend.app.core.database import async_session
@@ -812,6 +827,7 @@ class NotificationService:
                         event_type=event_type,
                         variables=variables,
                         raise_network=True,
+                        buttons=buttons,
                     )
                 except NotificationNetworkError as e:
                     success, error = False, f"{e} (attempt {attempt}/{attempts})"
@@ -920,6 +936,7 @@ class NotificationService:
         force_immediate: bool = False,
         image_data: bytes | None = None,
         variables: dict | None = None,
+        buttons: list | None = None,
     ) -> int:
         """Send notification to multiple providers and log the results.
 
@@ -941,6 +958,7 @@ class NotificationService:
                         event_type=event_type,
                         variables=variables,
                         raise_network=True,
+                        buttons=buttons,
                     )
                 except NotificationNetworkError as e:
                     success, error = False, f"{e} (attempt 1/{len(RETRY_DELAYS) + 1}); retrying in {RETRY_DELAYS[0]}s"
@@ -953,6 +971,7 @@ class NotificationService:
                         printer_name=printer_name,
                         image_data=image_data,
                         variables=variables,
+                        buttons=buttons,
                     )
                     delivered += 1  # being retried: not "undelivered" yet
                 delivered += success
@@ -2060,8 +2079,10 @@ class NotificationService:
         if not providers:
             return False
         title, message = await self._build_message_from_template(db, event_type, dict(variables))
+        # A Telegram bot that takes commands (telegram_bot) confirms the clear plate from the message.
+        buttons = [[("✅ Piatto libero", f"clear:{printer_id}")]] if event_type == "farm_plate_to_clear" else None
         delivered = await self._send_to_providers(
-            providers, title, message, db, event_type, printer_id, printer_name, variables=variables
+            providers, title, message, db, event_type, printer_id, printer_name, variables=variables, buttons=buttons
         )
         return delivered > 0
 

@@ -98,6 +98,17 @@ def farm_notifications(monkeypatch):
     return sent
 
 
+@pytest.fixture(autouse=True)
+def no_real_telegram_bot(monkeypatch):
+    """The app's Telegram bot (started by the app lifespan) can never reach Telegram from a test."""
+    from backend.app.services.telegram_bot import telegram_bot
+
+    def refuse(token):
+        raise RuntimeError("tests use a fake Telegram client")
+
+    monkeypatch.setattr(telegram_bot, "_factory", refuse)
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Create an instance of the default event loop for each test session."""
