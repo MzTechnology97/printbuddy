@@ -4063,8 +4063,8 @@ async def get_printable_objects(
     if not client:
         raise HTTPException(400, "Printer not connected")
 
-    # Reload objects from 3MF if requested or no objects loaded
-    if reload or not client.state.printable_objects:
+    # Reload objects from 3MF if requested or no objects loaded (Bambu FTP; Klipper reports them while polling)
+    if (reload or not client.state.printable_objects) and (printer.provider or "bambu").lower() == "bambu":
         subtask_name = client.state.subtask_name
         if subtask_name:
             from backend.app.services.archive import extract_printable_objects_from_3mf
