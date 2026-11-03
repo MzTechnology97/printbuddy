@@ -62,6 +62,7 @@ from backend.app.services.printer_providers.factory import normalize_provider
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 30
+HISTORY_EVERY_SECONDS = 10 * 60  # Klipper prints done while Printbuddy was off
 CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
 RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
@@ -512,6 +513,8 @@ async def dispatch_once(db: AsyncSession) -> int:
 
 async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
     """Cancel a job; its queue item too while it has not started."""
+    if job.source:
+        raise HTTPException(409, "A print outside the queue is not cancelled: say it is not production")
     if job.queue_item_id:
         item = await db.get(PrintQueueItem, job.queue_item_id)
         if item is not None and item.status == "printing":
@@ -539,14 +542,20 @@ class FarmJobDispatcher:
 
     async def _loop(self) -> None:
         from backend.app.farm import alerts, printer_files
+        from backend.app.farm.jobs import outside
 
         last_cleanup = 0.0
+        last_history = -HISTORY_EVERY_SECONDS
         while True:
             try:
                 await asyncio.sleep(TICK_SECONDS)
                 async with database.async_session() as db:
                     await dispatch_once(db)
                     await alerts.check(db)  # never raises
+                    await outside.scan_archives(db)
+                    if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
+                        last_history = time.monotonic()
+                        await outside.scan_klipper_history(db)
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)

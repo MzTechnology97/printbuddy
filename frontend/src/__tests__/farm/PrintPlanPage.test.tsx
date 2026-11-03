@@ -208,6 +208,57 @@ describe('PrintPlanPage', () => {
     await waitFor(() => expect(cancelled).toBe('7'));
   });
 
+  it('asks what a print outside the queue printed, with the proposal from its name', async () => {
+    const assigned: unknown[] = [];
+    server.use(
+      http.get('/api/v1/farm/products', () =>
+        HttpResponse.json({
+          generated_at: '',
+          products: [
+            { project_id: 4, name: 'Gancio', skus: [], asins: [], updated_at: '',
+              parts: [{ component_code: 'C-0200', name: 'Gancio', quantity: 1, plates: [] }] },
+            { project_id: 5, name: 'Tartufo', skus: [], asins: [], updated_at: '',
+              parts: [
+                { component_code: 'C-0121', name: 'Sopra', quantity: 1, plates: [] },
+                { component_code: 'C-0122', name: 'Sotto', quantity: 1, plates: [] },
+              ] },
+          ],
+        }),
+      ),
+      http.post('/api/v1/farm/jobs/:id/assign', async ({ params, request }) => {
+        assigned.push({ id: params.id, ...((await request.json()) as object) });
+        return HttpResponse.json([]);
+      }),
+    );
+    const outsideJob = { component_code: '', color: null, state: 'to_assign', note: null, plate_ids: [],
+      plate_id: null, printer_id: 1, printer: 'A1 uno', queue_item_id: null, pieces: 0, created_at: '',
+      finished_at: '2026-01-01T10:00:00', outside_queue: true };
+    jobs = [
+      { ...outsideJob, id: 9, print_name: 'Sopra plate 2.3mf',
+        proposal: [{ component_code: 'C-0121', name: 'Sopra', pieces: 15, color: 'Nero', plate_id: 1 }] },
+      { ...outsideJob, id: 10, print_name: 'Regalo.3mf', proposal: null },
+    ];
+    const user = userEvent.setup();
+    render(<PrintPlanPage />);
+    expect(await screen.findByText('2 prints outside the queue to assign')).toBeInTheDocument();
+    expect(screen.getByText('From its name it looks like: C-0121 Sopra ×15')).toBeInTheDocument();
+    // The proposed product is chosen, with the proposed pieces; the user adds the bottoms.
+    expect(await screen.findByLabelText('Pieces C-0121')).toHaveValue(15);
+    await user.type(screen.getByLabelText('Pieces C-0122'), '14');
+    await user.click(screen.getAllByRole('button', { name: 'Save the pieces' })[0]);
+    await user.click(screen.getAllByRole('button', { name: 'Not production' })[1]);
+    await waitFor(() =>
+      expect(assigned).toEqual([
+        { id: '9', parts: [{ component_code: 'C-0121', pieces: 15 }, { component_code: 'C-0122', pieces: 14 }] },
+        { id: '10', not_production: true },
+      ]),
+    );
+    // Nothing proposed: the product is the user's pick, and nothing can be saved before it.
+    expect(screen.getAllByRole('button', { name: 'Save the pieces' })[1]).toBeDisabled();
+    await user.selectOptions(screen.getByLabelText('Product of Regalo.3mf'), 'Gancio');
+    expect(screen.getAllByLabelText('Pieces C-0200')[0]).toHaveValue(null);
+  });
+
   it('sets the spool loaded on a Klipper printer without CFS', async () => {
     const user = userEvent.setup();
     render(<PrintPlanPage />);
