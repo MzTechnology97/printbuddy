@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
@@ -192,11 +192,15 @@ describe('FarmProductGate', () => {
     expect(screen.getByText(/P1S · PETG · 8 pieces · 1h 30m · 60 g/)).toBeInTheDocument();
     expect(screen.getByText(/to slice/)).toBeInTheDocument();
     expect(screen.getByText('no confirmed plate')).toBeInTheDocument(); // the second part
-    const links = screen.getAllByRole('link', { name: 'Confirm plates' });
-    expect(links.map((l) => l.getAttribute('href'))).toEqual([
-      '/farm/products?tab=plates&q=P1S-Caps-PETG.3mf',
-      '/farm/products?tab=plates&q=K1-Caps.3mf',
+    // Plates: each 3MF still used, opened in place (both still to look at here).
+    const files = within(screen.getByRole('heading', { name: 'Plates' }).closest('section')!).getAllByRole('button');
+    expect(files.map((b) => b.textContent)).toEqual([
+      expect.stringContaining('P1S-Caps-PETG.3mf'),
+      expect.stringContaining('K1-Caps.3mf'),
     ]);
+    server.use(http.get('/api/v1/farm/library/files/10/plates', () => HttpResponse.json([])));
+    await userEvent.setup().click(files[1]);
+    expect(await screen.findByText('No plates in this file.')).toBeInTheDocument();
   });
 
   it('shows what is missing and makes the product a set', async () => {
