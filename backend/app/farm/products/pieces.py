@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import os
 from collections import Counter
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -225,25 +227,14 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
     }
 
 
-@router.get("/pieces/{yield_id}/image")
-async def piece_image(
-    yield_id: int,
-    color: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    _: None = RequireCameraStreamTokenIfAuthEnabled,
-):
-    """PNG of one object alone, in ``color`` (hex); kept until the 3MF changes."""
+async def _piece_png(db: AsyncSession, y: FarmPlateYield, color: str | None) -> bytes:
+    """PNG of one object alone, in ``color`` (clean hex); cached until the 3MF changes. 404 when unreadable."""
     from backend.app.api.routes import library as lib
 
-    y = await db.get(FarmPlateYield, yield_id)
-    plate = await db.get(FarmPlate, y.plate_id) if y else None
+    plate = await db.get(FarmPlate, y.plate_id)
     lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == plate.library_file_id)) if plate else None
     if lib_file is None:
         raise HTTPException(404, "Piece not found")
-    try:
-        color = plan.clean_hex(color) if color else None
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
     key = hashlib.sha256(f"{lib_file.id}|{plate.source_sha256}|{y.object_name}|{color}".encode()).hexdigest()[:32]
     cache = lib.get_library_thumbnails_dir() / "farm_pieces"
     path = cache / f"{key}.png"
@@ -260,7 +251,139 @@ async def piece_image(
         tmp = path.with_name(f".{path.name}.part")
         tmp.write_bytes(png)
         os.replace(tmp, path)
-    return Response(path.read_bytes(), media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+    return path.read_bytes()
+
+
+def _hex(color: str | None) -> str | None:
+    try:
+        return plan.clean_hex(color) if color else None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _png(data: bytes) -> Response:
+    return Response(data, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/pieces/{yield_id}/image")
+async def piece_image(
+    yield_id: int,
+    color: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: None = RequireCameraStreamTokenIfAuthEnabled,
+):
+    """PNG of one object alone, in ``color`` (hex); kept until the 3MF changes."""
+    y = await db.get(FarmPlateYield, yield_id)
+    if y is None:
+        raise HTTPException(404, "Piece not found")
+    return _png(await _piece_png(db, y, _hex(color)))
+
+
+async def _shape_yield(db: AsyncSession, shape_id: int) -> FarmPlateYield | None:
+    """A measured object of the shape to draw: on a confirmed plate first, in a 3MF still used."""
+    from backend.app.farm.products.folders import excluded_files
+
+    return await db.scalar(
+        select(FarmPlateYield)
+        .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
+        .join(LibraryFile, LibraryFile.id == FarmPlate.library_file_id)
+        .where(
+            FarmPlateYield.shape_id == shape_id,
+            FarmPlateYield.fingerprint.isnot(None),
+            LibraryFile.deleted_at.is_(None),
+            FarmPlate.library_file_id.notin_(await excluded_files(db)),
+        )
+        .order_by(FarmPlate.status != "confirmed", FarmPlateYield.id)
+        .limit(1)
+    )
+
+
+def _side_by_side(pngs: list[tuple[bytes, int]]) -> bytes:
+    """The pieces of a set in one picture, each once, "×n" under those used n times."""
+    images = [Image.open(io.BytesIO(data)).convert("RGBA") for data, _ in pngs]
+    size = max(i.height for i in images)
+    caption = 28 if any(n > 1 for _, n in pngs) else 0
+    out = Image.new("RGBA", (sum(i.width for i in images), size + caption), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(out)
+    x = 0
+    for image, (_, n) in zip(images, pngs, strict=True):
+        out.paste(image, (x, 0), image)
+        if n > 1:
+            draw.text(
+                (x + image.width // 2, size + caption // 2),
+                f"×{n}",
+                fill=(90, 90, 90, 255),
+                anchor="mm",
+                font=ImageFont.load_default(size=22),
+            )
+        x += image.width
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@router.get("/components/{code}/image")
+async def component_image(
+    code: str, db: AsyncSession = Depends(get_db), _: None = RequireCameraStreamTokenIfAuthEnabled
+):
+    """The component as printed, in its colour: its shape, or a set's pieces side by side. 404 without pieces."""
+    comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == code))
+    if comp is None:
+        raise HTTPException(404, "Component not found")
+    color = _hex((await plan.load_config(db))["colors"].get((comp.color or "").lower()))
+    entries = comp.recipe or ([{"shape_id": comp.shape_id, "quantity": 1}] if comp.shape_id else [])
+    pngs = []
+    for entry in entries:
+        y = await _shape_yield(db, entry["shape_id"])
+        if y is not None:
+            try:
+                pngs.append((await _piece_png(db, y, color), entry["quantity"]))
+            except HTTPException:
+                continue  # an unreadable 3MF: the set is drawn without that piece
+    if not pngs:
+        raise HTTPException(404, "No piece to draw")
+    if len(pngs) == 1 and pngs[0][1] == 1:
+        return _png(pngs[0][0])
+    return _png(await asyncio.to_thread(_side_by_side, pngs))
+
+
+class PartQuantityIn(BaseModel):
+    quantity: int = Field(ge=0, le=products.QTY_MAX)  # 0: out of the product
+
+
+@router.put("/products/{project_id}/parts/{code}", dependencies=[products._update])
+async def set_part(project_id: int, code: str, data: PartQuantityIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Add a component to a kit, change how many go in one unit, or take it out (0).
+
+    A component taken out that no other product uses is retired: Seller Hub stops counting it.
+    """
+    product = await _product(db, project_id)
+    comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == code))
+    if comp is None:
+        raise HTTPException(404, "Component not found")
+    parts = await _parts(db, project_id)
+    part = next((p for p, c in parts if c.id == comp.id), None)
+    if data.quantity == 0:
+        if part is not None:
+            await db.delete(part)
+            if not await _used_elsewhere(db, comp.id, project_id):
+                comp.retired_at = comp.retired_at or products._now()
+    elif part is not None:
+        if comp.recipe is not None and data.quantity != 1:
+            raise HTTPException(422, "A set is one per unit: change how many pieces go in the set")
+        part.quantity = data.quantity
+    else:
+        if product.kind == "set" and parts:
+            raise HTTPException(409, "A set has one component: add the piece to its set instead")
+        if comp.retired_at is not None:
+            raise HTTPException(409, f"{comp.code} is retired")
+        last = max((p.sort_order for p, _ in parts), default=-1)
+        db.add(
+            FarmProductPart(project_id=project_id, component_id=comp.id, quantity=data.quantity, sort_order=last + 1)
+        )
+    product.updated_at = products._now()
+    await db.commit()
+    return {"project_id": project_id, "component_code": comp.code, "quantity": data.quantity}
 
 
 class ProductPieceIn(BaseModel):
