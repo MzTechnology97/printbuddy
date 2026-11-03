@@ -84,10 +84,13 @@ class TestProducts:
         assert p["skus"] == ["PX-01", "PX-02"]
         assert p["asins"] == ["B0TEST0001"]
         assert p["updated_at"].endswith("Z")
+        # A set adds its pieces (recipe); a component with pieces adds its picture (image_url, image_version).
+        none = {"recipe": None, "image_url": None, "image_version": None}
         assert p["parts"] == [
-            {"component_code": "C-0001", "name": "Base X", "quantity": 1, "plates": []},
-            {"component_code": "C-0002", "name": "Gancio", "quantity": 2, "plates": []},
+            {"component_code": "C-0001", "name": "Base X", "quantity": 1, "plates": [], **none},
+            {"component_code": "C-0002", "name": "Gancio", "quantity": 2, "plates": [], **none},
         ]
+        assert p["kind"] is None
 
     @pytest.mark.asyncio
     async def test_parts_list_confirmed_plates(self, async_client, db_session):
@@ -226,6 +229,12 @@ class TestApiKey:
             assert (await async_client.get(API + path, headers={"X-API-Key": ok})).status_code == 200
             assert (await async_client.get(API + path, headers={"X-API-Key": denied})).status_code == 403
             assert (await async_client.get(API + path, headers={"X-API-Key": "bb_wrong"})).status_code == 401
+        # A component's picture: Seller Hub downloads it with the same key (404 here: nothing to draw).
+        await async_client.post(f"{API}/components", json={"name": "Base X"})
+        image = f"{API}/components/C-0001/image"
+        assert (await async_client.get(image, headers={"X-API-Key": ok})).status_code == 404
+        assert (await async_client.get(image, headers={"X-API-Key": denied})).status_code == 403
+        assert (await async_client.get(image, headers={"X-API-Key": "bb_wrong"})).status_code == 401
 
 
 def plan() -> dict:

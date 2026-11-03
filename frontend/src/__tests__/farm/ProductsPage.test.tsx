@@ -78,8 +78,30 @@ describe('ProductsPage', () => {
     expect(screen.getByText(/Queued 3/)).toBeInTheDocument();
     expect(screen.getByText(/Printed in 7 days 12/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Prints and queue' })).toHaveAttribute('href', '/projects/7?view=project');
-    // Components live on their own tab now.
-    expect(screen.getByRole('tab', { name: 'Components' })).toHaveAttribute('aria-selected', 'false');
+    // Components and pieces live on each product's sheet: only Products and Plates remain.
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Products', 'Plates']);
+  });
+
+  it('shows which products are still to sort out', async () => {
+    const ready = {
+      ...products[0],
+      project_id: 9,
+      name: 'Pronto',
+      kind: 'set',
+      parts: [{ component_code: 'C-0009', name: 'Set', quantity: 1, plates: [{ library_file_id: 1, plate: 1 }] }],
+    };
+    server.use(
+      http.get('/api/v1/farm/products', () =>
+        HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products: [...products, ready] }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    expect(await screen.findByText('Pronto')).toBeInTheDocument();
+    expect(screen.getByText('ready')).toBeInTheDocument();
+    await user.click(screen.getByLabelText('Only to sort out'));
+    expect(screen.queryByText('Pronto')).not.toBeInTheDocument();
+    expect(screen.getByText('Portaoggetti X')).toBeInTheDocument(); // no type chosen yet
   });
 
   it('filters products by name, SKU, ASIN or component', async () => {

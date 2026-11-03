@@ -22,6 +22,7 @@ export interface FarmProduct {
   skus: string[];
   asins: string[];
   updated_at: string;
+  kind?: FarmProductKind;
   parts: FarmPart[];
   variants?: FarmVariant[];
 }

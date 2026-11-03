@@ -17,16 +17,23 @@ import hashlib
 import io
 import os
 from collections import Counter
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.auth import RequireCameraStreamTokenIfAuthEnabled
+from backend.app.core.auth import (
+    RequireCameraStreamTokenIfAuthEnabled,
+    caller_is_api_key,
+    check_permission,
+    get_api_key,
+    is_auth_enabled,
+    verify_camera_stream_token,
+)
 from backend.app.core.database import get_db
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plan import service as plan
@@ -295,23 +302,59 @@ async def piece_image(
     return _png(await _piece_png(db, y, _hex(color)))
 
 
-async def _shape_yield(db: AsyncSession, shape_id: int) -> FarmPlateYield | None:
-    """A measured object of the shape to draw: on a confirmed plate first, in a 3MF still used."""
+async def _drawable(db: AsyncSession, shape_ids: set[int]) -> dict[int, tuple[FarmPlateYield, FarmPlate]]:
+    """A measured object of each shape to draw: on a confirmed plate first, in a 3MF still used."""
     from backend.app.farm.products.folders import excluded_files
 
-    return await db.scalar(
-        select(FarmPlateYield)
+    if not shape_ids:
+        return {}
+    rows = await db.execute(
+        select(FarmPlateYield, FarmPlate)
         .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
         .join(LibraryFile, LibraryFile.id == FarmPlate.library_file_id)
         .where(
-            FarmPlateYield.shape_id == shape_id,
+            FarmPlateYield.shape_id.in_(shape_ids),
             FarmPlateYield.fingerprint.isnot(None),
             LibraryFile.deleted_at.is_(None),
             FarmPlate.library_file_id.notin_(await excluded_files(db)),
         )
         .order_by(FarmPlate.status != "confirmed", FarmPlateYield.id)
-        .limit(1)
     )
+    found: dict[int, tuple[FarmPlateYield, FarmPlate]] = {}
+    for y, plate in rows.all():
+        found.setdefault(y.shape_id, (y, plate))
+    return found
+
+
+def _entries(comp: FarmComponent) -> list[dict]:
+    return comp.recipe or ([{"shape_id": comp.shape_id, "quantity": 1}] if comp.shape_id else [])
+
+
+async def component_images(db: AsyncSession, components: list[FarmComponent]) -> dict[str, dict]:
+    """``{code: {"image_url", "image_version"}}`` for the Seller Hub contract.
+
+    The version changes with what the picture shows (colour, pieces and the 3MF they are drawn
+    from), so a cached copy is refreshed only then. No picture: both None.
+    """
+    colors = (await plan.load_config(db))["colors"]
+    drawable = await _drawable(db, {e["shape_id"] for c in components for e in _entries(c)})
+    out = {}
+    for c in components:
+        parts = [(e, drawable.get(e["shape_id"])) for e in _entries(c)]
+        parts = [(e, d) for e, d in parts if d is not None]
+        if not parts:
+            out[c.code] = {"image_url": None, "image_version": None}
+            continue
+        color = colors.get((c.color or "").lower())
+        seed = "|".join(
+            f"{e['shape_id']}:{e['quantity']}:{plate.library_file_id}:{plate.source_sha256}:{y.object_name}"
+            for e, (y, plate) in parts
+        )
+        out[c.code] = {
+            "image_url": f"/api/v1/farm/components/{c.code}/image",
+            "image_version": hashlib.sha256(f"{color}|{seed}".encode()).hexdigest()[:12],
+        }
+    return out
 
 
 def _side_by_side(pngs: list[tuple[bytes, int]]) -> bytes:
@@ -338,22 +381,34 @@ def _side_by_side(pngs: list[tuple[bytes, int]]) -> bytes:
     return buf.getvalue()
 
 
-@router.get("/components/{code}/image")
-async def component_image(
-    code: str, db: AsyncSession = Depends(get_db), _: None = RequireCameraStreamTokenIfAuthEnabled
-):
+async def _image_reader(
+    is_key: Annotated[bool, Depends(caller_is_api_key)],
+    token: str | None = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """<img> tags send a stream token; Seller Hub downloads with its API key (``read_status``)."""
+    if is_key:
+        check_permission(await get_api_key(authorization, x_api_key, db), "read_status")
+    elif await is_auth_enabled(db) and not (token and await verify_camera_stream_token(token)):
+        raise HTTPException(401, "A stream token or an API key is required")
+
+
+@router.get("/components/{code}/image", dependencies=[Depends(_image_reader)])
+async def component_image(code: str, db: AsyncSession = Depends(get_db)):
     """The component as printed, in its colour: its shape, or a set's pieces side by side. 404 without pieces."""
     comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == code))
     if comp is None:
         raise HTTPException(404, "Component not found")
     color = _hex((await plan.load_config(db))["colors"].get((comp.color or "").lower()))
-    entries = comp.recipe or ([{"shape_id": comp.shape_id, "quantity": 1}] if comp.shape_id else [])
+    entries = _entries(comp)
+    drawable = await _drawable(db, {e["shape_id"] for e in entries})
     pngs = []
     for entry in entries:
-        y = await _shape_yield(db, entry["shape_id"])
-        if y is not None:
+        if entry["shape_id"] in drawable:
             try:
-                pngs.append((await _piece_png(db, y, color), entry["quantity"]))
+                pngs.append((await _piece_png(db, drawable[entry["shape_id"]][0], color), entry["quantity"]))
             except HTTPException:
                 continue  # an unreadable 3MF: the set is drawn without that piece
     if not pngs:

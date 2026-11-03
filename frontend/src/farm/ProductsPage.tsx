@@ -3,13 +3,11 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2, Search, Layers, Grid3x3, Shapes } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search, Grid3x3 } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
-import { ComponentsPanel } from './ComponentsPanel';
-import { PiecesPanel } from './PiecesPanel';
 import { PlatesPanel } from './PlatesPanel';
 import './i18n';
 
@@ -284,13 +282,16 @@ export function ProductsPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [query, setQuery] = useState('');
   const [params, setParams] = useSearchParams();
-  const tab = (['components', 'pieces', 'plates'] as const).find((id) => id === params.get('tab')) ?? 'products';
+  // Components and pieces live on each product's sheet; old ?tab=components|pieces links land on the list.
+  const tab = params.get('tab') === 'plates' ? 'plates' : 'products';
+  const [onlyTodo, setOnlyTodo] = useState(false);
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
   const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
-  const shown = (products.data?.products || []).filter((p) => matches(p, query.trim()));
+  const todo = (p: FarmProduct) => !p.kind || p.parts.length === 0 || p.parts.some((x) => x.plates.length === 0);
+  const shown = (products.data?.products || []).filter((p) => matches(p, query.trim()) && (!onlyTodo || todo(p)));
 
   return (
     <div className="p-4 md:p-8 space-y-6">
@@ -305,7 +306,7 @@ export function ProductsPage() {
         )}
       </div>
       <div role="tablist" className="flex gap-2 border-b border-bambu-dark-tertiary">
-        {(['products', 'components', 'pieces', 'plates'] as const).map((id) => (
+        {(['products', 'plates'] as const).map((id) => (
           <button
             key={id}
             role="tab"
@@ -315,18 +316,12 @@ export function ProductsPage() {
               tab === id ? 'border-bambu-green text-white' : 'border-transparent text-bambu-gray hover:text-white'
             }`}
           >
-            {{ products: <Package className="w-4 h-4" />, components: <Layers className="w-4 h-4" />,
-              pieces: <Shapes className="w-4 h-4" />, plates: <Grid3x3 className="w-4 h-4" /> }[id]}
-            {t({ products: 'farm.products.title', components: 'farm.products.components', pieces: 'farm.pieces.title',
-              plates: 'farm.plates.title' }[id])}
+            {{ products: <Package className="w-4 h-4" />, plates: <Grid3x3 className="w-4 h-4" /> }[id]}
+            {t({ products: 'farm.products.title', plates: 'farm.plates.title' }[id])}
           </button>
         ))}
       </div>
-      {tab === 'components' ? (
-        <ComponentsPanel />
-      ) : tab === 'pieces' ? (
-        <PiecesPanel />
-      ) : tab === 'plates' ? (
+      {tab === 'plates' ? (
         <PlatesPanel />
       ) : (
         <>
@@ -342,6 +337,10 @@ export function ProductsPage() {
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
+      <label className="flex items-center gap-2 text-sm text-bambu-gray">
+        <input type="checkbox" checked={onlyTodo} onChange={(e) => setOnlyTodo(e.target.checked)} />
+        {t('farm.project.onlyTodo')}
+      </label>
 
       {editing && (
         <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} shapes={shapes.data || []} onDone={() => setEditing(null)} />
@@ -372,6 +371,9 @@ export function ProductsPage() {
                     <h2 className="text-white font-semibold truncate">
                       <Link to={`/farm/products/${p.project_id}`} className="hover:text-bambu-green">{p.name}</Link>
                     </h2>
+                    <span className={`text-xs shrink-0 ${todo(p) ? 'text-amber-400' : 'text-bambu-green'}`}>
+                      {t(todo(p) ? 'farm.project.todo' : 'farm.project.readyBadge')}
+                    </span>
                     <Button variant="ghost" size="sm" onClick={() => setEditing(draftOf(p))}>{t('farm.products.edit')}</Button>
                   </div>
                   {(p.skus.length > 0 || p.asins.length > 0) && (
