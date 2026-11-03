@@ -311,6 +311,11 @@ export const farmApi = {
     code: string,
     data: { name?: string; retired?: boolean; shape_id?: number | null; color?: string | null },
   ) => farmRequest<FarmComponent>(`/components/${code}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  mergeShape: (shapeId: number, into: number) =>
+    farmRequest<{ merged: number; into: number; objects: number; components_merged: string[] }>(
+      `/shapes/${shapeId}/merge`,
+      { method: 'POST', body: JSON.stringify({ into }) },
+    ),
   mergeComponent: (code: string, into: string) =>
     farmRequest<{ merged: string; into: string; products: number }>(`/components/${code}/merge`, {
       method: 'POST',
