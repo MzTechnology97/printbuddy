@@ -1081,7 +1081,7 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
     # Filter out chamber temp for models that don't have a real sensor
     # P1P, P1S, A1, A1Mini report meaningless chamber_temper values
     temperatures = state.temperatures
-    if not supports_chamber_temp(model):
+    if not supports_chamber_temp(model) and "chamber_max" not in temperatures:
         temperatures = {
             k: v for k, v in temperatures.items() if k not in ("chamber", "chamber_target", "chamber_heating")
         }

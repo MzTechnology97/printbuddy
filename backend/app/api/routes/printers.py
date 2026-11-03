@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select
@@ -1068,7 +1068,7 @@ async def get_printer_status(
     # Filter out chamber temp for models that don't have a real sensor
     # P1P, P1S, A1, A1Mini report meaningless chamber_temper values
     temperatures = state.temperatures
-    if not supports_chamber_temp(printer.model):
+    if not supports_chamber_temp(printer.model) and "chamber_max" not in temperatures:
         temperatures = {
             k: v for k, v in temperatures.items() if k not in ("chamber", "chamber_target", "chamber_heating")
         }
@@ -3934,6 +3934,32 @@ async def set_bed_temperature(
     return {"success": True, "message": f"Bed target set to {target}°C"}
 
 
+@router.post("/{printer_id}/temperature/chamber")
+async def set_chamber_temperature(
+    printer_id: int,
+    target: int = Query(..., ge=0, le=150, description="Chamber target temperature in °C; 0 turns heater off"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the chamber heater target (Klipper printers with a chamber ``heater_generic``)."""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Printer not found")
+    client = printer_manager.get_client(printer_id)
+    if not client:
+        raise HTTPException(400, "Printer not connected")
+    set_temp = getattr(client, "set_chamber_temperature", None)
+    if not callable(set_temp):
+        raise HTTPException(400, "Printer provider does not support chamber temperature control")
+    try:
+        ok = await asyncio.to_thread(set_temp, target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not ok:
+        raise HTTPException(500, "Failed to set chamber temperature")
+    return {"success": True, "message": f"Chamber target set to {target}°C"}
+
+
 @router.post("/{printer_id}/home-axes")
 async def home_axes(
     printer_id: int,
@@ -4661,4 +4687,87 @@ async def klipper_z_offset(
         raise HTTPException(500, "Failed to set Z-offset")
     if save:
         send_gcode("SAVE_CONFIG")
+    return {"success": True}
+
+
+async def _klipper_client(db: AsyncSession, printer_id: int, method: str):
+    """The connected client's ``method`` (a Moonraker-only feature), or the HTTP error explaining why not."""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Printer not found")
+    client = printer_manager.get_client(printer_id)
+    if not client:
+        raise HTTPException(400, "Printer not connected")
+    fn = getattr(client, method, None)
+    if not callable(fn):
+        raise HTTPException(400, "Printer provider does not support Klipper macros and console")
+    return fn
+
+
+@router.get("/{printer_id}/klipper/macros")
+async def klipper_macros(
+    printer_id: int,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
+    db: AsyncSession = Depends(get_db),
+):
+    """The printer's G-code macros, without the internal ones (``_NAME``)."""
+    list_macros = await _klipper_client(db, printer_id, "list_macros")
+    try:
+        return {"macros": await asyncio.to_thread(list_macros)}
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not read the printer's macros") from exc
+
+
+@router.post("/{printer_id}/klipper/macros/{name}")
+async def klipper_run_macro(
+    printer_id: int,
+    name: str,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run one of the printer's macros (only a name the printer lists)."""
+    run_macro = await _klipper_client(db, printer_id, "run_macro")
+    try:
+        ok = await asyncio.to_thread(run_macro, name)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(400, f"Klipper refused {name}: see the console") from exc
+    if not ok:
+        raise HTTPException(500, f"Failed to run {name}")
+    return {"success": True}
+
+
+@router.get("/{printer_id}/klipper/console")
+async def klipper_console(
+    printer_id: int,
+    count: int = Query(100, ge=1, le=500),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
+    db: AsyncSession = Depends(get_db),
+):
+    """The latest console lines from Moonraker's G-code store: commands and Klipper's responses."""
+    gcode_store = await _klipper_client(db, printer_id, "gcode_store")
+    try:
+        return {"lines": await asyncio.to_thread(gcode_store, count)}
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not read the printer's console") from exc
+
+
+@router.post("/{printer_id}/klipper/console")
+async def klipper_console_send(
+    printer_id: int,
+    script: str = Body(..., embed=True, min_length=1, max_length=2000),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a G-code command from the console; its responses appear in the console lines."""
+    await _klipper_client(db, printer_id, "gcode_store")
+    send_gcode = _require_send_gcode(printer_id)
+    try:
+        ok = await asyncio.to_thread(send_gcode, script)
+    except httpx.HTTPStatusError as exc:
+        # Klipper's own error ("Unknown command") is in the console lines too.
+        raise HTTPException(400, "Klipper refused the command: see the console") from exc
+    if not ok:
+        raise HTTPException(500, "Failed to send the command")
     return {"success": True}

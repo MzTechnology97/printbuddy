@@ -434,6 +434,7 @@ export interface PrinterStatus {
     chamber?: number;
     chamber_target?: number;
     chamber_heating?: boolean;  // Actual heater state from MQTT
+    chamber_max?: number | null;  // Klipper chamber heater's max_temp: present only when the chamber can be set
   } | null;
   cover_url: string | null;
   hms_errors: HMSError[];
@@ -3791,6 +3792,27 @@ export const api = {
       `/printers/${printerId}/klipper/z_offset?amount=${amount}&save=${save}`,
       { method: 'POST' }
     ),
+  setChamberTemperature: (printerId: number, target: number) =>
+    request<{ success: boolean; message: string }>(
+      `/printers/${printerId}/temperature/chamber?target=${target}`,
+      { method: 'POST' }
+    ),
+  klipperMacros: (printerId: number) =>
+    request<{ macros: string[] }>(`/printers/${printerId}/klipper/macros`),
+  klipperRunMacro: (printerId: number, name: string) =>
+    request<{ success: boolean }>(
+      `/printers/${printerId}/klipper/macros/${encodeURIComponent(name)}`,
+      { method: 'POST' }
+    ),
+  klipperConsole: (printerId: number, count = 100) =>
+    request<{ lines: { message: string; time: number; type: 'command' | 'response' }[] }>(
+      `/printers/${printerId}/klipper/console?count=${count}`
+    ),
+  klipperConsoleSend: (printerId: number, script: string) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/console`, {
+      method: 'POST',
+      body: JSON.stringify({ script }),
+    }),
 
   // Chamber Light Control
   setChamberLight: (printerId: number, on: boolean) =>

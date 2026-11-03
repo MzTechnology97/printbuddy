@@ -1196,3 +1196,94 @@ def test_moonraker_print_ended_by_a_klipper_disconnect_is_a_failure(monkeypatch)
     assert end_with("error") == "failed"
     assert end_with("cancelled") == "stopped"
     assert end_with(None) == "stopped"  # no history: as before
+
+
+def _klipper_controls_client(monkeypatch, available: list[str], status: dict):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Creality K2 Pro")
+    monkeypatch.setattr(
+        client, "_query_objects", lambda names: {n: status[n] for n in names if n in status} or {"print_stats": {}}
+    )
+    monkeypatch.setattr(client, "_available_objects", lambda: available)
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+    sent: list[str] = []
+    monkeypatch.setattr(client, "send_gcode", lambda script: sent.append(script) or True)
+    return client, sent
+
+
+def test_moonraker_chamber_heater_is_read_and_set_with_the_printers_m141(monkeypatch):
+    from backend.app.services.printer_manager import printer_state_to_dict
+
+    available = ["heater_generic chamber_heater", "gcode_macro M141", "temperature_fan chamber_fan"]
+    status = {"heater_generic chamber_heater": {"temperature": 32.9, "target": 45.0, "power": 0.6}}
+    client, sent = _klipper_controls_client(monkeypatch, available, status)
+    asked: list[str] = []
+
+    def fake_get(path, **kwargs):
+        asked.append(path)
+        return {"status": {"configfile": {"settings": {"heater_generic chamber_heater": {"max_temp": 80.0}}}}}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert client.request_status_update() is True
+    temps = client.state.temperatures
+    assert (temps["chamber"], temps["chamber_target"], temps["chamber_heating"], temps["chamber_max"]) == (
+        32.9,
+        45.0,
+        True,
+        80.0,
+    )
+    client.request_status_update()
+    assert [p for p in asked if "configfile" in p] == ["printer/objects/query?configfile=settings"]  # read once
+    # Not a Bambu chamber model, but a real heater: the card keeps it.
+    assert printer_state_to_dict(client.state, 1, "Creality K2 Pro")["temperatures"]["chamber"] == 32.9
+
+    assert client.set_chamber_temperature(50) is True
+    assert sent == ["M141 S50"]  # the printer's M141 also runs the chamber fans
+    with pytest.raises(ValueError, match="0-80"):
+        client.set_chamber_temperature(90)
+    available.remove("gcode_macro M141")
+    assert client.set_chamber_temperature(0) is True
+    assert sent[-1] == "SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=0"
+
+
+def test_moonraker_without_a_chamber_heater_shows_no_chamber(monkeypatch):
+    """An SV08-like printer: sensors only, no heater_generic."""
+    from backend.app.services.printer_manager import printer_state_to_dict
+
+    client, sent = _klipper_controls_client(monkeypatch, ["temperature_sensor EBB36"], {})
+    assert client.request_status_update() is True
+    assert "chamber" not in printer_state_to_dict(client.state, 1, "Sovol SV08")["temperatures"]
+    with pytest.raises(ValueError, match="no chamber heater"):
+        client.set_chamber_temperature(40)
+    assert sent == []
+
+
+def test_moonraker_macros_hide_internal_ones_and_run_only_listed_names(monkeypatch):
+    available = [
+        "gcode_macro START_PRINT",
+        "gcode_macro _START_PRINT_VARS",
+        "gcode_macro set_case_leds_on",
+        "gcode_macro M141",
+        "heater_bed",
+    ]
+    client, sent = _klipper_controls_client(monkeypatch, available, {})
+    assert client.list_macros() == ["M141", "set_case_leds_on", "START_PRINT"]
+    assert client.run_macro("set_case_leds_on") is True
+    assert sent == ["set_case_leds_on"]
+    for name in ("_START_PRINT_VARS", "FIRMWARE_RESTART", "START_PRINT\nM112"):
+        with pytest.raises(ValueError):
+            client.run_macro(name)
+    assert sent == ["set_case_leds_on"]
+
+
+def test_moonraker_console_reads_the_gcode_store(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125")
+    lines = [
+        {"message": "M141 S50", "time": 1700000000.0, "type": "command"},
+        {"message": "// Chamber heating: heater=50C", "time": 1700000000.1, "type": "response"},
+    ]
+    asked: list[str] = []
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: asked.append(path) or {"gcode_store": lines})
+    assert client.gcode_store(50) == lines
+    assert asked == ["server/gcode_store?count=50"]
