@@ -357,8 +357,11 @@ function SpoolRow({ s, colors }: { s: FarmPrinterSpool; colors: string[] }) {
     <li className="p-3 flex flex-wrap items-center gap-2 text-sm">
       <span className="text-white w-32 truncate" title={s.model}>{s.name}</span>
       {s.color && <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60" style={{ background: `#${s.color}` }} />}
-      <input list="farm-materials" aria-label={`${t('farm.spools.material')} ${s.name}`} className={`${INPUT} py-1 w-28`}
+      <input list={`farm-materials-${s.printer_id}`} aria-label={`${t('farm.spools.material')} ${s.name}`} className={`${INPUT} py-1 w-28`}
         value={material} placeholder={t('farm.spools.material')} onChange={(e) => setMaterial(e.target.value)} />
+      <datalist id={`farm-materials-${s.printer_id}`}>
+        {(s.materials?.length ? s.materials : MATERIALS).map((m) => <option key={m} value={m} />)}
+      </datalist>
       <select aria-label={`${t('farm.spools.color')} ${s.name}`} className={`${INPUT} py-1`} value={color}
         onChange={(e) => setColor(e.target.value)}>
         <option value="">{t('farm.spools.color')}</option>
@@ -386,7 +389,6 @@ function SpoolsCard() {
     <section className="space-y-2">
       <h2 className="text-lg font-semibold text-white">{t('farm.spools.title')}</h2>
       <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.spools.intro')}</p>
-      <datalist id="farm-materials">{MATERIALS.map((m) => <option key={m} value={m} />)}</datalist>
       <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
         {spools.data.map((s) => <SpoolRow key={`${s.printer_id}-${s.updated_at}`} s={s} colors={colors} />)}
       </ul>
