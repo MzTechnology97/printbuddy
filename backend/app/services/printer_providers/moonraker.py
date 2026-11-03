@@ -52,7 +52,9 @@ class MoonrakerPrinterState:
     ams_extruder_map: dict[str, int] = field(default_factory=dict)
     fila_switch: FilaSwitchState = field(default_factory=FilaSwitchState)
     last_ams_update: float = 0.0
-    printable_objects: dict[str, str] = field(default_factory=dict)
+    printable_objects: dict[int, dict[str, Any]] = field(default_factory=dict)
+    printable_objects_bbox_all: list[float] | None = None
+    skipped_objects: list[int] = field(default_factory=list)
     cooling_fan_speed: int | None = None
     big_fan1_speed: int | None = None
     big_fan2_speed: int | None = None
@@ -369,6 +371,29 @@ def _moonraker_speed_level(gcode_move: Any) -> int | None:
     if factor is None:
         return None
     return min(_SPEED_MODE_PERCENT, key=lambda mode: abs(_SPEED_MODE_PERCENT[mode] - factor * 100))
+
+
+def _apply_moonraker_exclude_object(state: MoonrakerPrinterState, exclude_object: Any) -> None:
+    """Klipper `exclude_object` -> the skip-objects state used for Bambu (ids are the list positions)."""
+    # shortcut: the modal places markers on a top-down plate view, but Klipper's cover is the angled slicer
+    # thumbnail, so markers only show the layout; draw the polygons instead if that proves confusing.
+    objects = exclude_object.get("objects") if isinstance(exclude_object, dict) else None
+    objects = [obj for obj in objects or [] if isinstance(obj, dict) and obj.get("name")]
+    excluded = set(exclude_object.get("excluded_objects") or []) if objects else set()
+    state.printable_objects = {}
+    points: list[list[float]] = []
+    for index, obj in enumerate(objects):
+        center = obj.get("center")
+        center = center if isinstance(center, list) and len(center) >= 2 else [None, None]
+        state.printable_objects[index] = {
+            "name": str(obj["name"]),
+            "x": _safe_float(center[0]),
+            "y": _safe_float(center[1]),
+        }
+        points.extend(p for p in obj.get("polygon") or [] if isinstance(p, list) and len(p) >= 2)
+    state.skipped_objects = [index for index, obj in enumerate(objects) if obj["name"] in excluded]
+    xs, ys = [float(p[0]) for p in points], [float(p[1]) for p in points]
+    state.printable_objects_bbox_all = [min(xs), min(ys), max(xs), max(ys)] if points else None
 
 
 def _apply_moonraker_fans(state: MoonrakerPrinterState, status: dict[str, Any]) -> None:
@@ -1471,6 +1496,12 @@ class MoonrakerPrinterClient:
             except Exception:  # noqa: BLE001 - the light is optional
                 pass
             self.state.chamber_light = _moonraker_light_is_on(status.get(light_object))
+        if "exclude_object" in available_objects:
+            try:
+                status.update(self._query_objects(["exclude_object"]))
+            except Exception:  # noqa: BLE001 - skipping objects is optional
+                pass
+            _apply_moonraker_exclude_object(self.state, status.get("exclude_object"))
         cfs_status = self._query_cfs_status(available_objects)
         if cfs_status:
             status.update(cfs_status)
@@ -1621,6 +1652,13 @@ class MoonrakerPrinterClient:
         if percent is None or not self.send_gcode(f"M220 S{percent}"):
             return False
         self.state.speed_level = int(mode)
+        return True
+
+    def skip_objects(self, object_ids: list[int]) -> bool:
+        names = [self.state.printable_objects[oid]["name"] for oid in object_ids if oid in self.state.printable_objects]
+        if not names or not self.send_gcode("\n".join(f"EXCLUDE_OBJECT NAME={name}" for name in names)):
+            return False
+        self.state.skipped_objects.extend(oid for oid in object_ids if oid not in self.state.skipped_objects)
         return True
 
     def home_axes(self, axes: list[str] | None = None) -> bool:

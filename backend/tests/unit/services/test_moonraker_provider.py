@@ -425,6 +425,52 @@ def test_moonraker_status_poll_reads_light_and_speed(monkeypatch):
     assert client.state.chamber_light is False
 
 
+def test_moonraker_status_poll_reads_and_skips_excluded_objects(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Generic Klipper Printer")
+    # Shape of a real Klipper `exclude_object` reply (names anonymised).
+    exclude_status = {
+        "exclude_object": {
+            "objects": [
+                {"name": "PART_ID_0_COPY_0", "center": [100.0, 50.0], "polygon": [[90.0, 40.0], [110.0, 60.0]]},
+                {"name": "PART_ID_1_COPY_0", "center": [100.0, 150.0], "polygon": [[90.0, 140.0], [110.0, 160.0]]},
+                {"name": "PART_ID_2_COPY_0"},
+            ],
+            "excluded_objects": ["PART_ID_1_COPY_0"],
+            "current_object": "PART_ID_0_COPY_0",
+        }
+    }
+    monkeypatch.setattr(
+        client,
+        "_query_objects",
+        lambda names: exclude_status if names == ["exclude_object"] else {"print_stats": {"state": "printing"}},
+    )
+    monkeypatch.setattr(client, "_available_objects", lambda: ["exclude_object"])
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+    sent: list[str] = []
+    monkeypatch.setattr(client, "send_gcode", lambda s: sent.append(s) or True)
+
+    assert client.request_status_update() is True
+    assert client.state.printable_objects == {
+        0: {"name": "PART_ID_0_COPY_0", "x": 100.0, "y": 50.0},
+        1: {"name": "PART_ID_1_COPY_0", "x": 100.0, "y": 150.0},
+        2: {"name": "PART_ID_2_COPY_0", "x": None, "y": None},
+    }
+    assert client.state.skipped_objects == [1]
+    assert client.state.printable_objects_bbox_all == [90.0, 40.0, 110.0, 160.0]
+
+    assert client.skip_objects([0, 2]) is True
+    assert sent == ["EXCLUDE_OBJECT NAME=PART_ID_0_COPY_0\nEXCLUDE_OBJECT NAME=PART_ID_2_COPY_0"]
+    assert client.state.skipped_objects == [1, 0, 2]
+    assert client.skip_objects([7]) is False
+
+    # A new print without labelled objects clears the list.
+    exclude_status["exclude_object"] = {"objects": [], "excluded_objects": []}
+    client.request_status_update()
+    assert (client.state.printable_objects, client.state.skipped_objects) == ({}, [])
+
+
 def test_moonraker_complete_state_clamps_progress_and_remaining_time(monkeypatch):
     client = MoonrakerPrinterClient("http://k2-plus.local:7125", printer_model="Creality K2 Plus")
     status = _moonraker_status_with_cfs("None")

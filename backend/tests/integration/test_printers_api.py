@@ -380,6 +380,32 @@ class TestPrintersAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_klipper_printable_objects_skip_bambu_ftp(self, async_client: AsyncClient, printer_factory):
+        """Klipper objects come from Moonraker polling; the route must not try the Bambu FTP reload."""
+        from types import SimpleNamespace
+
+        from backend.app.services.printer_manager import printer_manager
+
+        printer = await printer_factory(name="K1", provider="klipper", api_url="http://k1.local:7125")
+        state = SimpleNamespace(
+            printable_objects={},
+            skipped_objects=[],
+            subtask_name="part.gcode",
+            state="RUNNING",
+            printable_objects_bbox_all=None,
+        )
+        with (
+            patch.dict(printer_manager._clients, {printer.id: SimpleNamespace(state=state)}),
+            patch("backend.app.services.bambu_ftp.download_file_try_paths_async") as ftp,
+        ):
+            response = await async_client.get(f"/api/v1/printers/{printer.id}/print/objects?reload=true")
+
+        assert response.status_code == 200
+        assert response.json()["objects"] == []
+        ftp.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_get_printer_not_found(self, async_client: AsyncClient):
         """Verify 404 for non-existent printer."""
         response = await async_client.get("/api/v1/printers/9999")
