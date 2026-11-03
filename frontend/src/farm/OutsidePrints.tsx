@@ -17,12 +17,14 @@ function AssignRow({ job }: { job: FarmJob }) {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
-  const proposed = new Map((job.proposal || []).map((p) => [p.component_code, p.pieces]));
+  const oneOf = (job.proposal || []).some((p) => p.alternative);
+  // Alternatives: the product is suggested, the pieces are the user's (never two colours of one piece).
+  const proposed = new Map((job.proposal || []).map((p) => [p.component_code, oneOf ? null : p.pieces]));
   const guess = products.data?.products.find((p) => p.parts.some((part) => proposed.has(part.component_code)));
   const [productId, setProductId] = useState<number | null>(null);
   const [pieces, setPieces] = useState<Record<string, string>>({});
   const product = products.data?.products.find((p) => p.project_id === (productId ?? guess?.project_id));
-  const value = (code: string) => pieces[code] ?? (proposed.has(code) ? String(proposed.get(code)) : '');
+  const value = (code: string) => pieces[code] ?? String(proposed.get(code) ?? '');
   const parts = (product?.parts || [])
     .map((p) => ({ component_code: p.component_code, pieces: Number(value(p.component_code)) || 0 }))
     .filter((p) => p.pieces > 0);
@@ -44,8 +46,8 @@ function AssignRow({ job }: { job: FarmJob }) {
       </div>
       {job.proposal?.length ? (
         <p className="text-xs text-bambu-gray">
-          {t('farm.outside.proposal', {
-            parts: job.proposal.map((p) => `${p.component_code} ${p.name} ×${p.pieces}`).join(', '),
+          {t(oneOf ? 'farm.outside.proposalOneOf' : 'farm.outside.proposal', {
+            parts: job.proposal.map((p) => `${p.component_code} ${p.name} ×${p.pieces}`).join(oneOf ? ' / ' : ', '),
           })}
         </p>
       ) : null}

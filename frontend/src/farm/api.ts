@@ -221,6 +221,7 @@ export interface FarmJobProposal {
   pieces: number;
   color: string | null;
   plate_id: number;
+  alternative?: boolean; // only one of the alternatives was printed: nothing is filled in for the user
 }
 
 /** One print of a component, with upstream's queue options as its print dialog sets them. */

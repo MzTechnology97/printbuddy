@@ -5,14 +5,20 @@ farm job printed becomes a farm job with its ``source`` (see ``FarmPrintJob``), 
 this order:
 1. its name carries a queue fingerprint (``Sopra__1a2b3c4d.3mf``, also when reprinted from the
    printer's display): the earlier farm job that sent that file says component, colour, plate
-   and pieces; or a plate's sliced output with that fingerprint says the plate;
+   and pieces (farm jobs that disagree make it a proposal); or a plate's sliced output with that
+   fingerprint says the plate;
 2. the archived file's SHA-256 is a farm job's file or a plate's sliced output;
 3. otherwise it is ``to_assign``, with a proposal when its name looks like a plate's 3MF; the
    user says the components and pieces (``assign``), or that it is not production.
-A plate whose components only differ by colour takes the one in the colour the printer fed
-(``service.record_used_colors``); without it, it is a proposal: the colour is the user's call.
+A plate whose components only differ by colour takes the one in the colour the printer fed,
+only when that colour is sure (``service.used_color(..., sure=True)``); otherwise it is a
+proposal of alternatives: components are never mixed up on a guess.
 
-On Klipper, Moonraker's history adds the prints done while Printbuddy was off (no archive).
+A print left to assign is notified (``farm_batch_to_assign``).
+
+On Klipper, Moonraker's history adds the prints done while Printbuddy was off (no archive). It is
+read page by page from a cursor per printer, so no job is left out however many there are; a job
+Printbuddy archived itself (same file, archived during it or ended with it) is not counted twice.
 Failed and cancelled prints make no batch. Only prints that end after the first scan count
 (``farm_outside_since``), so the farm's earlier history is not asked about.
 """
@@ -30,6 +36,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.settings import get_setting, set_setting
+from backend.app.farm import notify
 from backend.app.farm.jobs import service
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.plates.models import FarmPlate
@@ -46,7 +53,10 @@ logger = logging.getLogger(__name__)
 SINCE_KEY = "farm_outside_since"
 FINGERPRINT_RE = re.compile(r"__([0-9a-f]{8})(?![0-9a-f])")
 PLATE_RE = re.compile(r"plate[\s_-]*(\d+)", re.IGNORECASE)
-SAME_PRINT = timedelta(minutes=10)  # a Moonraker job and an archive started this close are one print
+SAME_PRINT = timedelta(minutes=10)  # margin around a Moonraker job for the archive of the same print
+HISTORY_KEY = "farm_klipper_history_{}"  # per printer: start (epoch) of the history read up to
+HISTORY_PAGE = 100  # Moonraker's largest page
+HISTORY_PAGES = 50  # pages a scan at most; the cursor goes on from there at the next scan
 NAME_MATCH = 0.75  # how alike a print's name and a 3MF's name must be for a proposal
 
 
@@ -132,8 +142,8 @@ async def _output_plate(db: AsyncSession, out: LibraryFile) -> tuple[FarmPlate |
     return plate, (meta.get("sliced_color") or "").strip().lower() or None
 
 
-async def _from_queue(db: AsyncSession, sha8: str | None, sha256: str | None) -> FarmPrintJob | None:
-    """The latest farm job whose queue print was this file."""
+async def _from_queue(db: AsyncSession, sha8: str | None, sha256: str | None) -> list[FarmPrintJob]:
+    """The farm jobs whose queue print was this file, latest first."""
     query = (
         select(FarmPrintJob)
         .join(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
@@ -144,7 +154,27 @@ async def _from_queue(db: AsyncSession, sha8: str | None, sha256: str | None) ->
         query = query.where(PrintArchive.content_hash == sha256)
     else:
         query = query.where(PrintArchive.content_hash.like(f"{sha8}%"))
-    return await db.scalar(query.order_by(FarmPrintJob.id.desc()).limit(1))
+    return list((await db.execute(query.order_by(FarmPrintJob.id.desc()))).scalars())
+
+
+async def _alternatives(db: AsyncSession, parts: list[dict]) -> list[dict]:
+    """Proposal entries of which only one was printed: the user picks."""
+    names = dict(
+        (
+            await db.execute(
+                select(FarmComponent.code, FarmComponent.name).where(
+                    FarmComponent.code.in_([p["component_code"] for p in parts])
+                )
+            )
+        ).all()
+    )
+    return [{**p, "name": p.get("name") or names.get(p["component_code"], ""), "alternative": True} for p in parts]
+
+
+def _offer(parts: list[dict]) -> list[dict]:
+    """A plate's parts as a proposal: printed together, except colours of one piece (alternatives)."""
+    alternative = _ambiguous(parts)
+    return [{**p, "alternative": alternative} for p in _clean(parts)]
 
 
 async def _from_outputs(db: AsyncSession, sha8: str | None, sha256: str | None) -> list[dict]:
@@ -185,27 +215,40 @@ async def _proposal(db: AsyncSession, names: list[str | None]) -> list[dict] | N
             best, best_ratio = plate, ratio
     if best is None:
         return None
-    return _clean(await _plate_parts(db, best, None)) or None
+    return _offer(await _plate_parts(db, best, None)) or None
 
 
 async def recognise(
     db: AsyncSession, names: list[str | None], sha256: str | None, used: str | None = None
 ) -> tuple[list[dict], list | None]:
-    """``(parts, None)`` when the print is known, else ``([], proposal)``; ``used``: the colour fed."""
+    """``(parts, None)`` when the print is known, else ``([], proposal)``.
+
+    ``used``: the colour the printer fed, only when sure: it picks between colours of one piece.
+    """
     sha8 = next((m.group(1) for n in names if n and (m := FINGERPRINT_RE.search(n))), None)
     keys = ([{"sha8": sha8, "sha256": None}] if sha8 else []) + ([{"sha8": None, "sha256": sha256}] if sha256 else [])
     for key in keys:
-        job = await _from_queue(db, **key)
-        if job is not None:
-            pieces = job.pieces or job.expected_pieces
-            return [
-                {"component_code": job.component_code, "pieces": pieces, "color": job.color, "plate_id": job.plate_id}
-            ], None
+        jobs = await _from_queue(db, **key)
+        if jobs:
+            parts = list(
+                {
+                    (j.component_code, j.pieces or j.expected_pieces, j.color, j.plate_id): {
+                        "component_code": j.component_code,
+                        "pieces": j.pieces or j.expected_pieces,
+                        "color": j.color,
+                        "plate_id": j.plate_id,
+                    }
+                    for j in jobs
+                }.values()
+            )
+            if len(parts) == 1:
+                return parts, None
+            return [], await _alternatives(db, parts)  # the same file sent for different batches
         parts = await _from_outputs(db, **key)
         if parts and _ambiguous(parts) and used:
             parts = [p for p in parts if (p["color"] or "").lower() == used.lower()] or parts
         if parts:
-            return ([], _clean(parts)) if _ambiguous(parts) else (_clean(parts), None)
+            return ([], _offer(parts)) if _ambiguous(parts) else (_clean(parts), None)
     return [], await _proposal(db, names)
 
 
@@ -218,8 +261,10 @@ async def _record(
     names: list[str | None],
     sha256: str | None,
     used: str | None = None,
-) -> None:
-    parts, proposal = await recognise(db, names, sha256, used)
+    sure: str | None = None,
+) -> list[FarmPrintJob]:
+    """The print's jobs, added to the session; ``_commit`` lists and notifies them."""
+    parts, proposal = await recognise(db, names, sha256, sure)
     common = {
         "source": source,
         "printer_id": printer_id,
@@ -228,15 +273,13 @@ async def _record(
         "used_color": used,
     }
     if not parts:
-        db.add(
+        jobs = [
             FarmPrintJob(
                 component_code="", plate_ids=[], expected_pieces=0, status="to_assign", proposal=proposal, **common
             )
-        )
-        return
-    now = _now()
-    for p in parts:
-        db.add(
+        ]
+    else:
+        jobs = [
             FarmPrintJob(
                 component_code=p["component_code"],
                 color=p["color"],
@@ -245,9 +288,40 @@ async def _record(
                 expected_pieces=p["pieces"],
                 pieces=p["pieces"],
                 status="outside",
-                listed_at=now,
                 **common,
             )
+            for p in parts
+        ]
+    db.add_all(jobs)
+    return jobs
+
+
+async def _commit(db: AsyncSession, jobs: list[FarmPrintJob]) -> None:
+    """Batches get ``listed_at`` right before the commit, so a reader of ``since`` never skips one; prints
+    left to assign are notified once committed."""
+    now = _now()
+    for job in jobs:
+        if job.status == "outside":
+            job.listed_at = now
+    await db.commit()
+    names = dict((await db.execute(select(Printer.id, Printer.name))).all())
+    for job in jobs:
+        if job.status != "to_assign":
+            continue
+        printer = names.get(job.printer_id)
+        if job.proposal:
+            joiner = " oppure " if any(p.get("alternative") for p in job.proposal) else ", "
+            hint = "Sembra: " + joiner.join(f"{p['component_code']} {p['name']} ×{p['pieces']}" for p in job.proposal)
+        else:
+            hint = "Nessuna proposta: scegli prodotto e pezzi in Cosa stampare."
+        detail = f"{printer or 'Stampante'}: {job.outside_name} stampato fuori coda. {hint}"
+        notify.notify(
+            notify.BATCH_TO_ASSIGN,
+            job.source,
+            printer_id=job.printer_id,
+            printer_name=printer,
+            batch=job.outside_name,
+            detail=detail,
         )
 
 
@@ -273,7 +347,7 @@ async def scan_archives(db: AsyncSession) -> int:
         )
         .order_by(PrintArchive.completed_at)
     )
-    done = 0
+    done, jobs = 0, []
     for archive in rows.scalars().all():
         source = f"archive:{archive.id}"
         if await _seen(db, source):
@@ -286,18 +360,53 @@ async def scan_archives(db: AsyncSession) -> int:
             (extra.get("_print_data") or {}).get("gcode_file"),
         ]
         name = archive.print_name or archive.filename
-        used = service.used_color(extra)
-        await _record(db, source, archive.printer_id, name, archive.completed_at, names, archive.content_hash, used)
+        used, sure = service.used_color(extra), service.used_color(extra, sure=True)
+        jobs += await _record(
+            db, source, archive.printer_id, name, archive.completed_at, names, archive.content_hash, used, sure
+        )
         done += 1
     if done:
-        await db.commit()
+        await _commit(db, jobs)
     return done
 
 
-def _moonraker_history(client, since: datetime) -> list[dict]:
-    """Moonraker's jobs since ``since``, through upstream's client (read-only)."""
-    query = f"server/history/list?limit=100&order=asc&since={since.replace(tzinfo=timezone.utc).timestamp():.0f}"
-    return client._get(query).get("jobs") or []
+def _moonraker_history(client, since: float) -> tuple[list[dict], bool]:
+    """Moonraker's jobs started since ``since`` (epoch), oldest first, page by page, through upstream's
+    client (read-only); False when more pages are left for the next scan."""
+    jobs: list[dict] = []
+    for page in range(HISTORY_PAGES):
+        query = f"server/history/list?limit={HISTORY_PAGE}&start={page * HISTORY_PAGE}&order=asc&since={since:.0f}"
+        found = client._get(query).get("jobs") or []
+        jobs += found
+        if len(found) < HISTORY_PAGE:
+            return jobs, True
+    return jobs, False
+
+
+def _next_cursor(jobs: list[dict], cursor: float) -> float:
+    """Up to the first job still running (read again until it ends), else the latest one read."""
+    running = [j["start_time"] for j in jobs if j.get("status") == "in_progress" and j.get("start_time")]
+    if running:
+        return max(cursor, min(running))
+    return max([cursor] + [j["start_time"] for j in jobs if j.get("start_time")])
+
+
+async def _archived(db: AsyncSession, printer_id: int, name: str, start: datetime, end: datetime) -> bool:
+    """Printbuddy archived this Moonraker job itself: an archive of the same file on the printer, made or
+    started during the job (also after a restart mid-print) or ended with it."""
+    during = (start - SAME_PRINT, end + SAME_PRINT)
+    rows = await db.execute(
+        select(PrintArchive.filename, PrintArchive.print_name).where(
+            PrintArchive.printer_id == printer_id,
+            or_(
+                PrintArchive.started_at.between(*during),
+                PrintArchive.created_at.between(*during),
+                PrintArchive.completed_at.between(end - SAME_PRINT, end + SAME_PRINT),
+            ),
+        )
+    )
+    core = _core(name)
+    return any(core in (_core(filename or ""), _core(print_name or "")) for filename, print_name in rows.all())
 
 
 def _utc(epoch: float) -> datetime:
@@ -309,42 +418,39 @@ async def scan_klipper_history(db: AsyncSession) -> int:
     from backend.app.services.printer_manager import printer_manager
     from backend.app.services.printer_providers.factory import MOONRAKER_PROVIDERS
 
-    since = await _since(db)
-    done = 0
+    since = (await _since(db)).replace(tzinfo=timezone.utc).timestamp()
+    done, jobs = 0, []
     for printer in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all():
         if (printer.provider or "").strip().lower() not in MOONRAKER_PROVIDERS:
             continue
         client = printer_manager.get_client(printer.id)
         if client is None or not hasattr(client, "_get"):
             continue
+        key = HISTORY_KEY.format(printer.id)
+        cursor = float(await get_setting(db, key) or since)
         try:
-            history = await asyncio.to_thread(_moonraker_history, client, since)
+            history, complete = await asyncio.to_thread(_moonraker_history, client, cursor)
         except Exception as exc:  # noqa: BLE001 - printer offline: asked again at the next scan
-            logger.debug("Printer %s: Moonraker history not available: %s", printer.id, exc)
+            logger.info("Printer %s: Moonraker history not available: %s", printer.id, exc)
             continue
+        if not complete:
+            logger.warning("Printer %s: %d Moonraker jobs read, more at the next scan", printer.id, len(history))
+        await set_setting(db, key, str(_next_cursor(history, cursor)))
         for job in history:
             if job.get("status") != "completed" or not job.get("job_id") or not job.get("end_time"):
                 continue
             source = f"klipper:{printer.id}:{job['job_id']}"
             if await _seen(db, source):
                 continue
-            started = _utc(job.get("start_time") or job["end_time"])
-            window = (started - SAME_PRINT, started + SAME_PRINT)
-            archived = await db.scalar(
-                select(PrintArchive.id)
-                .where(
-                    PrintArchive.printer_id == printer.id,
-                    or_(PrintArchive.started_at.between(*window), PrintArchive.created_at.between(*window)),
-                )
-                .limit(1)
-            )
-            if archived:
-                continue  # Printbuddy saw it: its archive counts
             name = str(job.get("filename") or "")
-            await _record(db, source, printer.id, name, _utc(job["end_time"]), [name], None)
+            started, ended = _utc(job.get("start_time") or job["end_time"]), _utc(job["end_time"])
+            if await _archived(db, printer.id, name, started, ended):
+                continue  # Printbuddy saw it: its archive counts
+            jobs += await _record(db, source, printer.id, name, ended, [name], None)
             done += 1
-    if done:
-        await db.commit()
+        if history:
+            logger.info("Printer %s: %d Moonraker jobs read", printer.id, len(history))
+    await _commit(db, jobs)  # the cursors too
     return done
 
 
