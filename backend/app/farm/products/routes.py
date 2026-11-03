@@ -35,10 +35,9 @@ from backend.app.farm.products.models import (
     FarmProduct,
     FarmProductPart,
     FarmShape,
-    component_shapes,
-    component_yield,
     not_part,
 )
+from backend.app.farm.products.shapes import plate_yield, product_shapes
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.print_queue import PrintQueueItem
@@ -127,6 +126,7 @@ class ComponentIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     shape_id: int | None = None
     color: str | None = Field(default=None, min_length=1, max_length=50)
+    project_id: int | None = None  # its product; by default its shape's
 
 
 class ComponentUpdate(BaseModel):
@@ -144,6 +144,22 @@ class FolderProjectsIn(BaseModel):
 
 class ShapeIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+
+
+class ShapeCreate(ShapeIn):
+    project_id: int | None = None  # the product it is a piece of
+
+
+async def adopt(db: AsyncSession, comp: FarmComponent, project_id: int) -> None:
+    from backend.app.farm.products.isolation import adopt as take  # isolation imports this module
+
+    await take(db, comp, project_id)
+
+
+async def _adopt_shape(db: AsyncSession, shape: FarmShape, project_id: int, code: str = "The component") -> None:
+    from backend.app.farm.products.isolation import adopt_shape
+
+    await adopt_shape(db, shape, project_id, code)
 
 
 # ---------------------------------------------------------------- read (Seller Hub contract)
@@ -234,11 +250,15 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.get("/components", dependencies=[_read])
-async def list_components(db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def list_components(project_id: int | None = None, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Every component, or one product's (``project_id``)."""
     from backend.app.farm.products.pieces import component_images
 
     shapes = {s.id: s.name for s in (await db.execute(select(FarmShape))).scalars()}
-    rows = list((await db.execute(select(FarmComponent).order_by(FarmComponent.code))).scalars())
+    query = select(FarmComponent).order_by(FarmComponent.code)
+    if project_id is not None:
+        query = query.where(FarmComponent.project_id == project_id)
+    rows = list((await db.execute(query)).scalars())
     images = await component_images(db, rows)
     return [{**_component_dict(c, shapes), **images[c.code]} for c in rows]
 
@@ -251,6 +271,7 @@ def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
         "shape": shapes.get(c.shape_id) if c.shape_id else None,
         "color": c.color,
         "retired": c.retired_at is not None,
+        "project_id": c.project_id,  # its product: components are never shared
         # A set printed together: its pieces per set.
         "recipe": [
             {"shape_id": r["shape_id"], "shape": shapes.get(r["shape_id"]), "quantity": r["quantity"]} for r in c.recipe
@@ -268,9 +289,12 @@ async def list_project_names(db: AsyncSession = Depends(get_db)) -> list[dict]:
 
 
 @router.get("/shapes", dependencies=[_read])
-async def list_shapes(db: AsyncSession = Depends(get_db)) -> list[dict]:
-    rows = (await db.execute(select(FarmShape).order_by(FarmShape.name))).scalars()
-    return [{"id": s.id, "name": s.name} for s in rows]
+async def list_shapes(project_id: int | None = None, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Every shape, or one product's (``project_id``)."""
+    query = select(FarmShape).order_by(FarmShape.name)
+    if project_id is not None:
+        query = query.where(FarmShape.project_id == project_id)
+    return [{"id": s.id, "name": s.name, "project_id": s.project_id} for s in (await db.execute(query)).scalars()]
 
 
 @router.get("/products/{project_id}/view", dependencies=[_read])
@@ -281,7 +305,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     STL/STEP models are left out: only 3MF projects have plates.
     """
     from backend.app.farm.models import FarmLibraryFile
-    from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+    from backend.app.farm.plates.models import FarmPlate
     from backend.app.farm.plates.printer_map import PrinterModelResolver
     from backend.app.farm.products.folders import excluded_by, excluded_files, project_folders
 
@@ -298,20 +322,6 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         )
     ).all()
     shapes = await _shape_names(db)
-    shape_ids = {s for _, c in parts for s in component_shapes(c)}
-    codes = {c.code for _, c in parts if not component_shapes(c)}
-    plates = list(
-        (
-            await db.execute(
-                select(FarmPlate).where(
-                    FarmPlate.status == "confirmed",
-                    FarmPlate.yields.any(
-                        FarmPlateYield.shape_id.in_(shape_ids) | FarmPlateYield.component_code.in_(codes)
-                    ),
-                )
-            )
-        ).scalars()
-    )
     own = await excluded_by(db, project_id)
     hidden = own | await excluded_files(db)
     folders = await project_folders(db, project_id)
@@ -325,9 +335,13 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
             )
         ).scalars()
     )
-    # Only this product's 3MFs: another product's plate of the same shape is not one of its plates.
-    plates = [p for p in plates if p.library_file_id not in hidden and p.library_file_id in {f.id for f in files}]
     file_ids = {f.id for f in files}
+    # Only this product's 3MFs: another product's plate is never one of its plates.
+    all_plates = list((await db.execute(select(FarmPlate).where(FarmPlate.library_file_id.in_(file_ids)))).scalars())
+    plates = [p for p in all_plates if p.library_file_id not in hidden]
+    product_own = (await product_shapes(db, {project_id}))[project_id]
+    migrated = bool(product_own.shapes) or any(c.project_id is not None for _, c in parts)
+    shaped = {project_id: product_own}
     paths = dict(
         (
             await db.execute(
@@ -338,12 +352,12 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         ).all()
     )
     counts: dict[int, dict] = {}
-    for plate in (
-        await db.execute(select(FarmPlate).where(FarmPlate.library_file_id.in_({f.id for f in files})))
-    ).scalars():
+    for plate in all_plates:
         c = counts.setdefault(plate.library_file_id, {"proposed": 0, "confirmed": 0, "unrelated_plates": []})
         if plate.yields and all(not_part(product, y.fingerprint) for y in plate.yields):
             c["unrelated_plates"].append(plate.id)  # only pieces that are not part of this product
+        elif migrated:  # ready for this product: every object one of its pieces or set aside
+            c["confirmed" if product_own.ready(plate) else "proposed"] += 1
         else:
             c[plate.status] += 1
     resolver = await PrinterModelResolver.load(db)
@@ -365,7 +379,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     def plates_of(c: FarmComponent) -> list[dict]:
         out = []
         for p in plates:
-            pieces = component_yield(c, p.yields)
+            pieces = plate_yield(c, p, shaped)
             if pieces:
                 out.append(
                     {
@@ -534,9 +548,14 @@ async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data:
         raise HTTPException(422, f"Unknown components: {', '.join(missing)}")
     if retired := [c for c in codes if by_code[c].retired_at is not None]:
         raise HTTPException(422, f"Retired components: {', '.join(retired)}")
+    for code in codes:  # its own from now on; another product's: 409, products never share components
+        await adopt(db, by_code[code], project.id)
 
     product.skus, product.asins, product.variants, product.updated_at = skus, asins, variants, _now()
     for old in (await db.execute(select(FarmProductPart).where(FarmProductPart.project_id == project.id))).scalars():
+        gone = await db.get(FarmComponent, old.component_id)
+        if gone is not None and gone.code not in by_code and gone.project_id == project.id:
+            gone.retired_at = gone.retired_at or _now()  # taken out: Seller Hub stops counting it
         await db.delete(old)
     await db.flush()
     for i, p in enumerate(data.parts):
@@ -550,9 +569,18 @@ async def _apply(db: AsyncSession, project: Project, product: FarmProduct, data:
     shapes = await _shape_names(db)
     for color in dict.fromkeys(v["color"] for v in variants if v["color"]):
         for shape_id in dict.fromkeys(by_code[c].shape_id for c in codes if by_code[c].shape_id):
-            if await _colored(db, shape_id, color) is None:
-                db.add(FarmComponent(code=await _next_code(db), name=f"{shapes[shape_id]} – {color}",
-                                     shape_id=shape_id, color=color))
+            if (found := await _colored(db, shape_id, color)) is not None:
+                await adopt(db, found, project.id)  # the colour of its own piece: its own component
+            else:
+                db.add(
+                    FarmComponent(
+                        code=await _next_code(db),
+                        name=f"{shapes[shape_id]} – {color}",
+                        shape_id=shape_id,
+                        color=color,
+                        project_id=project.id,
+                    )
+                )
                 await db.flush()
 
 
@@ -693,7 +721,19 @@ async def create_component(data: ComponentIn, db: AsyncSession = Depends(get_db)
     name = _clean(data.name or default, 200)
     if not name:
         raise HTTPException(422, "Name, or shape and colour, required")
-    component = FarmComponent(code=await _next_code(db), name=name, shape_id=data.shape_id, color=color)
+    project_id = data.project_id
+    if data.shape_id is not None:
+        owner = (await db.get(FarmShape, data.shape_id)).project_id
+        if owner is not None and project_id not in (None, owner):
+            raise HTTPException(409, "The shape is a piece of another product")
+        project_id = project_id or owner
+    if project_id is not None and await db.get(FarmProduct, project_id) is None:
+        raise HTTPException(404, "Product not found")
+    if project_id is not None and data.shape_id is not None:
+        await _adopt_shape(db, await db.get(FarmShape, data.shape_id), project_id)
+    component = FarmComponent(
+        code=await _next_code(db), name=name, shape_id=data.shape_id, color=color, project_id=project_id
+    )
     db.add(component)
     await db.commit()
     return _component_dict(component, shapes)
@@ -720,6 +760,8 @@ async def update_component(code: str, data: ComponentUpdate, db: AsyncSession = 
             await _check_shape(db, shapes, shape_id, color, component.code)
         elif shape_id is not None and shape_id not in shapes:
             raise HTTPException(422, "Unknown shape")
+        if shape_id is not None and component.project_id is not None:
+            await _adopt_shape(db, await db.get(FarmShape, shape_id), component.project_id, component.code)
         component.shape_id, component.color = shape_id, color
     await db.commit()
     return _component_dict(component, shapes)
@@ -744,6 +786,10 @@ async def merge_component(code: str, data: MergeIn, db: AsyncSession = Depends(g
         raise HTTPException(404, "Component not found")
     if code == data.into or found[data.into].retired_at is not None:
         raise HTTPException(422, "Merge into another, active component")
+    if None not in (found[code].project_id, found[data.into].project_id) and (
+        found[code].project_id != found[data.into].project_id
+    ):
+        raise HTTPException(409, "Components of two products are never merged")
     kept = await _merge_component(db, found[code], found[data.into])
     await db.commit()
     return {"merged": code, "into": data.into, "products": kept}
@@ -773,17 +819,28 @@ async def _merge_component(db: AsyncSession, old: FarmComponent, new: FarmCompon
     return len(kept)
 
 
+async def _name_taken(db: AsyncSession, name: str, project_id: int | None, shape_id: int | None = None) -> bool:
+    """Another shape of the same product already has this name (names repeat across products)."""
+    owner = FarmShape.project_id.is_(None) if project_id is None else FarmShape.project_id == project_id
+    query = select(FarmShape.id).where(func.lower(FarmShape.name) == name.lower(), owner)
+    if shape_id is not None:
+        query = query.where(FarmShape.id != shape_id)
+    return await db.scalar(query) is not None
+
+
 @router.post("/shapes", dependencies=[_create])
-async def create_shape(data: ShapeIn, db: AsyncSession = Depends(get_db)) -> dict:
+async def create_shape(data: ShapeCreate, db: AsyncSession = Depends(get_db)) -> dict:
     name = _clean(data.name, 200)
     if not name:
         raise HTTPException(422, "Name is required")
-    if await db.scalar(select(FarmShape).where(func.lower(FarmShape.name) == name.lower())):
+    if data.project_id is not None and await db.get(FarmProduct, data.project_id) is None:
+        raise HTTPException(404, "Product not found")
+    if await _name_taken(db, name, data.project_id):
         raise HTTPException(409, "A shape with this name already exists")
-    shape = FarmShape(name=name)
+    shape = FarmShape(name=name, project_id=data.project_id)
     db.add(shape)
     await db.commit()
-    return {"id": shape.id, "name": shape.name}
+    return {"id": shape.id, "name": shape.name, "project_id": shape.project_id}
 
 
 @router.patch("/shapes/{shape_id}", dependencies=[_update])
@@ -792,11 +849,11 @@ async def rename_shape(shape_id: int, data: ShapeIn, db: AsyncSession = Depends(
     if shape is None:
         raise HTTPException(404, "Shape not found")
     name = _clean(data.name, 200) or shape.name
-    if await db.scalar(select(FarmShape).where(func.lower(FarmShape.name) == name.lower(), FarmShape.id != shape_id)):
+    if await _name_taken(db, name, shape.project_id, shape_id):
         raise HTTPException(409, "A shape with this name already exists")
     shape.name = name
     await db.commit()
-    return {"id": shape.id, "name": shape.name}
+    return {"id": shape.id, "name": shape.name, "project_id": shape.project_id}
 
 
 class ShapeMergeIn(BaseModel):
@@ -816,6 +873,10 @@ async def merge_shape(shape_id: int, data: ShapeMergeIn, db: AsyncSession = Depe
         raise HTTPException(404, "Shape not found")
     if old.id == new.id:
         raise HTTPException(422, "Merge into another shape")
+    if old.project_id != new.project_id:
+        raise HTTPException(409, "Shapes of two products are never merged")
+    new.fingerprints = [*(new.fingerprints or []), *(old.fingerprints or [])]
+    new.object_names = [*(new.object_names or []), *(old.object_names or [])] or None
     moved = 0
     for y in (await db.execute(select(FarmPlateYield).where(FarmPlateYield.shape_id == old.id))).scalars():
         y.shape_id, moved = new.id, moved + 1

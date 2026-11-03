@@ -6,11 +6,12 @@ All meshes are generated, all names made up.
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.app.api.routes import library
 from backend.app.core.database import Base
+from backend.app.farm.products.models import FarmComponent, FarmProductPart
 from backend.tests.integration.test_farm_library import add_external, scan
 from backend.tests.integration.test_farm_pieces import box, make_mesh_project, tetra
 
@@ -28,7 +29,7 @@ async def ok(r):
 
 
 @pytest.fixture
-async def shared(async_client, tmp_path):
+async def shared(async_client, db_session, tmp_path):
     """Set di 2 and Set di 5 on the same 3MF sharing two codes; Audi and gutters on one shape by mistake."""
     nas = tmp_path / "nas"
     make_mesh_project(nas / "Tartufi" / "tartufi.3mf", {1: [("Sopra", tetra(), None), ("Sotto", box(10, 20, 5), None)]})
@@ -72,8 +73,12 @@ async def shared(async_client, tmp_path):
         ("Audi", "audi.3mf", [("audi", 2)]),
         ("Gronde", "gronde.3mf", [("gronde", 1)]),
     ):
-        body = {"name": name, "parts": [{"component_code": codes[k], "quantity": q} for k, q in parts]}
-        ids[name] = (await ok(await async_client.post(f"{API}/products", json=body)))["project_id"]
+        ids[name] = (await ok(await async_client.post(f"{API}/products", json={"name": name})))["project_id"]
+        # Shared as before the move (the API refuses it now): straight into the tables.
+        for i, (k, q) in enumerate(parts):
+            comp = await db_session.scalar(select(FarmComponent).where(FarmComponent.code == codes[k]))
+            db_session.add(FarmProductPart(project_id=ids[name], component_id=comp.id, quantity=q, sort_order=i))
+        await db_session.commit()
         fid = await folder_of(folder_file)
         await ok(await async_client.put(f"{API}/products/{ids[name]}/folders/{fid}", json={"linked": True}))
     return {"shapes": shapes, "codes": codes, "ids": ids}
@@ -147,3 +152,109 @@ async def test_shape_names_repeat_across_products_in_an_older_database():
         await conn.run_sync(Base.metadata.create_all)  # a second start-up leaves it alone
     await engine.dispose()
     assert [tuple(r) for r in rows] == [(7, "Tartufo sopra", None), (8, "Tartufo sopra", 2)]
+
+
+async def snapshot(client, pid: int) -> dict:
+    """What a product shows and prints, without ids that a re-saved 3MF renews."""
+    view = await ok(await client.get(f"{API}/products/{pid}/view"))
+    pieces = (await ok(await client.get(f"{API}/products/{pid}/pieces")))["pieces"]
+    return {
+        "kind": view["kind"],
+        "disabled": view["disabled"],
+        "parts": [
+            (
+                p["code"],
+                p["name"],
+                p["quantity"],
+                p["shape"],
+                p["color"],
+                p["retired"],
+                [(r["shape"], r["quantity"]) for r in p["recipe"] or []],
+                sorted((x["plate"], x["yield"]) for x in p["plates"]),
+            )
+            for p in view["parts"]
+        ],
+        "pieces": sorted((p["shape"] or "", p["quantity"] or 0, p["not_part"]) for p in pieces),
+        "shapes": sorted(s["name"] for s in await ok(await client.get(f"{API}/shapes?project_id={pid}"))),
+        "components": sorted(
+            (c["code"], c["name"], c["retired"])
+            for c in await ok(await client.get(f"{API}/components?project_id={pid}"))
+        ),
+    }
+
+
+@pytest.mark.integration
+async def test_nothing_done_on_one_product_changes_another(async_client, tmp_path):
+    """Set di 2 and Set di 5 on the same 3MF: every action on one leaves the other exactly as it was."""
+    nas = tmp_path / "nas"
+    project = nas / "Tartufi" / "tartufi.3mf"
+    make_mesh_project(project, {1: [("Sopra", tetra(), None), ("Sotto", box(10, 20, 5), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    [lib] = await ok(await async_client.get(f"{API}/library/files"))
+    tartufi = (await ok(await async_client.get(f"/api/v1/library/files/{lib['library_file_id']}")))["folder_id"]
+
+    ids = {}
+    for name in ("Set di 2", "Set di 5"):
+        ids[name] = (await ok(await async_client.post(f"{API}/products", json={"name": name})))["project_id"]
+        await ok(await async_client.put(f"{API}/products/{ids[name]}/folders/{tartufi}", json={"linked": True}))
+        for piece in (await ok(await async_client.get(f"{API}/products/{ids[name]}/pieces")))["pieces"]:
+            body = {"yield_ids": piece["yield_ids"], "quantity": 1, "shape_name": piece["names"][0], "color": "Nero"}
+            await ok(await async_client.put(f"{API}/products/{ids[name]}/pieces", json=body))
+    a, b = ids["Set di 2"], ids["Set di 5"]
+    before = await snapshot(async_client, b)
+    assert [p[3] for p in before["parts"]] == ["Sopra", "Sotto"]
+    assert all(p[7] == [(1, 1)] for p in before["parts"])
+
+    async def pieces_of_a():
+        return {p["names"][0]: p for p in (await ok(await async_client.get(f"{API}/products/{a}/pieces")))["pieces"]}
+
+    async def unchanged(action: str):
+        assert await snapshot(async_client, b) == before, action
+
+    sopra = (await pieces_of_a())["Sopra"]
+    await ok(
+        await async_client.put(f"{API}/products/{a}/pieces", json={"yield_ids": sopra["yield_ids"], "quantity": 3})
+    )
+    await unchanged("Salva")
+
+    sotto = (await pieces_of_a())["Sotto"]
+    await ok(
+        await async_client.put(f"{API}/products/{a}/pieces", json={"yield_ids": sotto["yield_ids"], "quantity": 0})
+    )
+    await unchanged("Non fa parte")
+    await ok(await async_client.put(f"{API}/products/{a}/pieces/restore", json={"yield_ids": sotto["yield_ids"]}))
+    body = {"yield_ids": sotto["yield_ids"], "quantity": 1, "shape_name": "Sotto", "color": "Nero"}
+    await ok(await async_client.put(f"{API}/products/{a}/pieces", json=body))
+    await unchanged("Rimetti")
+
+    for kind in ("set", "kit", "set"):
+        await ok(await async_client.put(f"{API}/products/{a}/kind", json={"kind": kind}))
+        await unchanged(f"kind {kind}")
+
+    shapes = {s["name"]: s["id"] for s in await ok(await async_client.get(f"{API}/shapes?project_id={a}"))}
+    await ok(await async_client.patch(f"{API}/shapes/{shapes['Sopra']}", json={"name": "Sopra grande"}))
+    await unchanged("rinomina")
+    await ok(await async_client.post(f"{API}/shapes/{shapes['Sotto']}/merge", json={"into": shapes["Sopra"]}))
+    await unchanged("Stessa forma di")
+    of_b = await ok(await async_client.get(f"{API}/shapes?project_id={b}"))
+    r = await async_client.post(f"{API}/shapes/{shapes['Sopra']}/merge", json={"into": of_b[0]["id"]})
+    assert r.status_code == 409  # never into another product
+
+    for active in (False, True):
+        await ok(await async_client.put(f"{API}/products/{a}/active", json={"active": active}))
+        await unchanged(f"attivo {active}")
+
+    for part in (await ok(await async_client.get(f"{API}/products/{a}/view")))["parts"]:
+        await ok(await async_client.put(f"{API}/products/{a}/parts/{part['code']}", json={"quantity": 0}))
+    await unchanged("Togli")
+
+    # The 3MF saved again with the objects renamed: recognised by geometry, for both products.
+    make_mesh_project(project, {1: [("Sopra v2", tetra(), None), ("Sotto v2", box(10, 20, 5), None)]})
+    await scan(async_client, folder)
+    await unchanged("3MF salvato di nuovo")
+
+    await ok(await async_client.delete(f"{API}/products/{a}"))
+    await unchanged("Rimuovi")
+    assert await ok(await async_client.get(f"{API}/checks/isolation")) == {"ok": True, "problems": []}

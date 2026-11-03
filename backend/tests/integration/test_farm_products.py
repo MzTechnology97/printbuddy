@@ -137,13 +137,16 @@ class TestProducts:
 
     @pytest.mark.asyncio
     async def test_a_component_prints_only_from_its_products_3mfs(self, async_client, db_session):
-        """Audi hooks and Land Rover gutters on one shape by mistake: neither takes the other's plates."""
-        shape = (await async_client.post(f"{API}/shapes", json={"name": "Assemblaggio"})).json()["id"]
+        """Audi hooks and Land Rover gutters, both called "Assemblaggio": neither takes the other's plates."""
         codes, plates = {}, {}
         for name in ("Audi", "Grondaie"):
-            r = await async_client.post(f"{API}/components", json={"shape_id": shape, "color": name})
+            pid = await product(async_client, name=name)
+            body = {"name": "Assemblaggio", "project_id": pid}
+            shape = (await async_client.post(f"{API}/shapes", json=body)).json()["id"]
+            r = await async_client.post(f"{API}/components", json={"shape_id": shape, "color": "Nero"})
             codes[name] = r.json()["code"]
-            pid = await product(async_client, name=name, parts=[{"component_code": codes[name]}])
+            assert r.json()["project_id"] == pid
+            await async_client.put(f"{API}/products/{pid}/parts/{codes[name]}", json={"quantity": 1})
             [file_id] = await product_files(db_session, [pid])
             plate = FarmPlate(library_file_id=file_id, plate_index=1, printer_model="A1", materials=["PLA"])
             plate.status = "confirmed"
@@ -159,15 +162,19 @@ class TestProducts:
         r = await async_client.post(
             f"{API}/jobs", json={"jobs": [{"component_code": codes["Grondaie"], "plate_ids": [plates["Audi"][2]]}]}
         )
-        assert r.status_code == 422
-        assert "another product" in r.json()["detail"]
+        assert r.status_code == 422  # the Audi plate is not one of the gutters' plates
 
     @pytest.mark.asyncio
-    async def test_component_shared_by_two_products(self, async_client):
+    async def test_a_component_is_never_shared_by_two_products(self, async_client):
         hook = await component(async_client, "Gancio")
         await product(async_client, name="X", skus=["X-1"], parts=[{"component_code": hook, "quantity": 2}])
-        await product(async_client, name="Y", skus=["Y-1"], parts=[{"component_code": hook, "quantity": 1}])
-        assert [p["parts"][0]["component_code"] for p in await products(async_client)] == [hook, hook]
+        r = await async_client.post(
+            f"{API}/products", json={"name": "Y", "skus": ["Y-1"], "parts": [{"component_code": hook}]}
+        )
+        assert r.status_code == 409
+        assert [p["name"] for p in await products(async_client)] == ["X"]
+        listed = {c["code"]: c for c in (await async_client.get(f"{API}/components")).json()}
+        assert listed[hook]["project_id"] == (await products(async_client))[0]["project_id"]
 
     @pytest.mark.asyncio
     async def test_update_replaces_skus_and_parts(self, async_client):
@@ -227,13 +234,13 @@ class TestProducts:
 
     @pytest.mark.asyncio
     async def test_removing_a_product_retires_its_own_components(self, async_client):
-        own, shared = await component(async_client, "Solo suo"), await component(async_client, "Condiviso")
-        pid = await product(async_client, name="X", parts=[{"component_code": own}, {"component_code": shared}])
-        await product(async_client, name="Y", parts=[{"component_code": shared}])
+        own, other = await component(async_client, "Solo suo"), await component(async_client, "Di Y")
+        pid = await product(async_client, name="X", parts=[{"component_code": own}])
+        await product(async_client, name="Y", parts=[{"component_code": other}])
         r = await async_client.delete(f"{API}/products/{pid}")
         assert r.json() == {"project_id": pid, "retired": [own]}
         retired = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
-        assert (retired[own], retired[shared]) == (True, False)
+        assert (retired[own], retired[other]) == (True, False)
 
     @pytest.mark.asyncio
     async def test_deleting_project_drops_product_rows(self, async_client, db_session):

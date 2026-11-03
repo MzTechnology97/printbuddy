@@ -107,21 +107,24 @@ def component_shapes(c: FarmComponent) -> set[int]:
     return {c.shape_id} if c.shape_id else set()
 
 
-def component_yield(c: FarmComponent, yields) -> int:
+def component_yield(c: FarmComponent, yields, shape_of=None) -> int:
     """Units of the component a plate's yields give: complete sets for a set, else its pieces.
 
-    Before shapes, plates named components by code (``component_code``); those still count.
+    ``shape_of(yield)``: the shape of each object (its product's, see ``shapes``); by default the
+    old link on the object. Before shapes, plates named components by code (``component_code``);
+    those still count.
     """
+    shape_of = shape_of or (lambda y: y.shape_id)
     if c.recipe:
         have: dict[int, int] = {}
         for y in yields:
-            if y.shape_id is not None:
-                have[y.shape_id] = have.get(y.shape_id, 0) + y.quantity
+            if (shape_id := shape_of(y)) is not None:
+                have[shape_id] = have.get(shape_id, 0) + y.quantity
         return min(have.get(r["shape_id"], 0) // r["quantity"] for r in c.recipe)
     return sum(
         y.quantity
         for y in yields
-        if (c.shape_id and y.shape_id == c.shape_id) or (not c.shape_id and y.component_code == c.code)
+        if (c.shape_id and shape_of(y) == c.shape_id) or (not c.shape_id and y.component_code == c.code)
     )
 
 
