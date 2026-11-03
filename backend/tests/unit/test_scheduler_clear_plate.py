@@ -341,3 +341,34 @@ class TestSchedulerQueueCheckLogging:
 
         queue_logs = [r for r in caplog.records if "Queue check" in r.message]
         assert len(queue_logs) == 0
+
+
+class TestPlateClearAlwaysRequired:
+    """Fork (printfarm): the queue always waits for the plate-clear confirmation, even with the setting off."""
+
+    @pytest.mark.asyncio
+    @patch("backend.app.services.print_scheduler.printer_manager")
+    async def test_check_queue_gates_on_the_plate_with_the_setting_off(self, mock_pm):
+        scheduler = PrintScheduler()
+        mock_item = MagicMock(
+            id=7, printer_id=1, archive_id=None, library_file_id=1, scheduled_time=None, manual_start=False
+        )
+        mock_pm.is_connected.return_value = True
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_item]
+
+        with (
+            patch("backend.app.services.print_scheduler.async_session") as mock_session_ctx,
+            patch.object(scheduler, "_get_bool_setting", AsyncMock(return_value=False)),  # the setting saved off
+            patch.object(scheduler, "_is_printer_idle", MagicMock(return_value=False)) as idle,
+            patch.object(scheduler, "_start_print", AsyncMock()) as start,
+        ):
+            mock_db = AsyncMock()
+            mock_db.execute = AsyncMock(return_value=mock_result)
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await scheduler.check_queue()
+
+        assert idle.call_args_list and all(c.args[1] is True for c in idle.call_args_list)
+        start.assert_not_awaited()

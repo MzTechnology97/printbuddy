@@ -4493,14 +4493,17 @@ export function SettingsPage() {
                     {t('settings.requirePlateClear', 'Require plate-clear confirmation')}
                   </p>
                   <p className="text-xs text-bambu-gray mt-1">
-                    {t('settings.requirePlateClearDescription', 'When enabled, the scheduler waits for per-printer plate-clear confirmation before starting queued prints on printers with finished jobs. Disabling this also hides the plate status badge and the "Mark plate as cleared" button on printer cards.')}
+                    {t('settings.requirePlateClearAlways', 'Always on in this print farm: a queued print never starts on a printer that finished a job until someone confirms the plate is clear.')}
                   </p>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-not-allowed">
+                  {/* fork (printfarm): always on, see print_scheduler.check_queue */}
                   <input
                     type="checkbox"
-                    checked={localSettings.require_plate_clear ?? false}
-                    onChange={(e) => updateSetting('require_plate_clear', e.target.checked)}
+                    checked
+                    disabled
+                    readOnly
+                    aria-label={t('settings.requirePlateClear', 'Require plate-clear confirmation')}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>

@@ -1827,6 +1827,7 @@ export default {
     staggeredStartDescription: '複数プリンターのバッチ開始を段階的に行う際のデフォルトのグループサイズと間隔。プリントモーダルでバッチごとに上書き可能。',
     plateClear: 'プレートクリア確認',
     requirePlateClear: 'プレートクリア確認を必須にする',
+    requirePlateClearAlways: 'このプリントファームでは常に有効です。ジョブを終えたプリンターでは、誰かがプレートが空いていることを確認するまで、キューの次の印刷は始まりません。',
     requirePlateClearDescription: '有効にすると、スケジューラーは完了したプリンターでキューの印刷を開始する前に、プリンターごとのプレートクリア確認を待ちます。無効にすると、プリンターカード上のプレート状態バッジと「プレートをクリア済みにする」ボタンも非表示になります。',
     gcodeInjection: 'G-codeインジェクション',
     gcodeInjectionDescription: 'Farmloop、SwapMod、AutoClear、Printflow 3Dなどの自動印刷システム用に、印刷の開始と終了時にカスタムG-codeを挿入します。スニペットはプリンターモデルごとに設定し、キューアイテム��「G-codeを挿入」を有効にすると適用されます。',

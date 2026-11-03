@@ -1828,6 +1828,7 @@ export default {
     staggeredStartDescription: 'Taille de groupe et intervalle par défaut lors de l\'échelonnement des démarrages de lots multi-imprimantes. Modifiable par lot dans la fenêtre d\'impression.',
     plateClear: 'Confirmation de plateau libre',
     requirePlateClear: 'Exiger la confirmation de plateau libre',
+    requirePlateClearAlways: 'Toujours activé dans cette ferme d’impression : une impression en file ne démarre jamais sur une imprimante qui a terminé un travail tant que personne n’a confirmé que le plateau est libre.',
     requirePlateClearDescription: 'Lorsque cette option est activée, le planificateur attend une confirmation de plateau libre par imprimante avant de lancer les impressions en file d\'attente sur les imprimantes ayant terminé. La désactiver masque également le badge d\'état du plateau et le bouton « Marquer le plateau comme dégagé » sur les cartes d\'imprimante.',
     gcodeInjection: 'Injection de G-code',
     gcodeInjectionDescription: 'Configurez du G-code personnalisé à injecter au début et/ou à la fin des impressions pour les systèmes d\'auto-impression comme Farmloop, SwapMod, AutoClear et Printflow 3D. Les snippets sont configurés par modèle d\'imprimante et appliqués lorsque « Injecter le G-code » est activé sur un élément de file d\'attente.',

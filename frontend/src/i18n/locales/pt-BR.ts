@@ -1828,6 +1828,7 @@ export default {
     staggeredStartDescription: 'Tamanho de grupo e intervalo padrão ao escalonar inícios de lotes multi-impressora. Pode ser sobrescrito por lote no modal de impressão.',
     plateClear: 'Confirmação de placa livre',
     requirePlateClear: 'Exigir confirmação de placa livre',
+    requirePlateClearAlways: 'Sempre ativado nesta fazenda de impressão: uma impressão na fila nunca começa em uma impressora que terminou um trabalho até que alguém confirme que a mesa está livre.',
     requirePlateClearDescription: 'Quando ativado, o agendador aguarda uma confirmação de placa livre por impressora antes de iniciar impressões na fila em impressoras com trabalhos concluídos. Desativar isso também oculta o indicador de status da placa e o botão "Marcar placa como liberada" nos cartões das impressoras.',
     gcodeInjection: 'Injeção de G-code',
     gcodeInjectionDescription: 'Configure G-code personalizado para injetar no início e/ou no final das impressões para sistemas de impressão automática como Farmloop, SwapMod, AutoClear e Printflow 3D. Os snippets são configurados por modelo de impressora e aplicados quando "Injetar G-code" está ativado em um item da fila.',
