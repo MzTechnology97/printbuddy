@@ -550,7 +550,7 @@ def test_moonraker_connect_tries_7125_when_fluidd_ui_url_is_pasted(monkeypatch):
     assert requested_urls == [
         "http://neptune.local/server/info",
         "http://neptune.local:7125/server/info",
-        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
+        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed&gcode_move",
         "http://neptune.local:7125/printer/objects/list",
         "http://neptune.local:7125/server/webcams/list",
     ]
@@ -579,7 +579,7 @@ def test_moonraker_connect_tries_no_port_proxy_when_7125_fails(monkeypatch):
     assert requested_urls == [
         "http://neptune.local:7125/server/info",
         "http://neptune.local/server/info",
-        "http://neptune.local/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
+        "http://neptune.local/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed&gcode_move",
         "http://neptune.local/printer/objects/list",
         "http://neptune.local/server/webcams/list",
     ]
@@ -620,7 +620,7 @@ def test_moonraker_status_update_populates_printbuddy_status_fields(monkeypatch)
             )
         assert requested_url == (
             "http://neptune.local:7125/printer/objects/query?"
-            "webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed"
+            "webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed&gcode_move"
         )
         return httpx.Response(
             200,
@@ -770,10 +770,10 @@ def test_moonraker_connect_fetches_status_and_check_staleness_keeps_connected(mo
     assert client.state.connected is True
     assert requested_urls == [
         "http://neptune.local:7125/server/info",
-        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
+        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed&gcode_move",
         "http://neptune.local:7125/printer/objects/list",
         "http://neptune.local:7125/server/webcams/list",
-        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed",
+        "http://neptune.local:7125/printer/objects/query?webhooks&print_stats&virtual_sdcard&display_status&extruder&heater_bed&gcode_move",
         "http://neptune.local:7125/printer/objects/list",
     ]
 
