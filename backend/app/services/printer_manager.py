@@ -688,10 +688,15 @@ class PrinterManager:
         filament: str = "",
         rotate_tray: bool = False,
     ) -> bool:
-        """Send AMS drying command to printer."""
+        """Send AMS drying command to printer (truthy: the sequence_id of its reply, see ``drying_result``)."""
         if printer_id not in self._clients:
             return False
         return self._clients[printer_id].send_drying_command(ams_id, temp, duration, mode, filament, rotate_tray)
+
+    def drying_result(self, printer_id: int, sequence_id: str) -> str | None:
+        """The printer's ``result`` ("success"/"fail") for a drying command, once it has answered."""
+        client = self._clients.get(printer_id)
+        return getattr(client, "drying_results", {}).get(str(sequence_id))
 
     def request_status_update(self, printer_id: int) -> bool:
         """Request a full status update from the printer.
