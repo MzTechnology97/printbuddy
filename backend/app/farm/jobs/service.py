@@ -32,7 +32,7 @@ import re
 import time
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -71,6 +71,10 @@ ACTIVE_QUEUE = ("pending", "printing")
 EXTRACTED_VERSION = 2  # 2: with the plate's preview and layer info; older extractions are redone
 QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection")
 USED_COLORS_KEY = "farm_used_colors"  # in a print's archive extra_data: {colour: samples taken while printing}
+SURE_SAMPLES = 10  # a colour picks between components only after 5 minutes of samples...
+SURE_SHARE = 0.9  # ...nearly all of them that colour
+PRINT_MAX_AGE = 7 * 24 * 3600  # an archive still "printing" older than this is a leftover, not the print
+HEX_RE = re.compile(r"[0-9a-f]{6}|[0-9a-f]{3}")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
 
@@ -344,19 +348,42 @@ def _loaded_trays(printer_id: int) -> list[dict]:
     return scheduler._build_loaded_filaments(status) if status is not None and status.raw_data else []
 
 
-def colour_name(color: str, colors: dict[str, str], tolerance: int) -> str:
-    """The colour table's name nearest a spool's colour, as components name it ("Nero"); else ``#rrggbb``."""
-    color = color.lstrip("#").lower()[:6]
-    near = min(colors.items(), key=lambda kv: plan.color_distance(kv[1], color), default=None)
+def colour_name(color: str, colors: dict[str, str], tolerance: int) -> str | None:
+    """The colour table's name nearest a spool's colour, as components name it ("Nero"); else ``#rrggbb``.
+
+    ``fff`` is ``ffffff``; RGBA keeps its RGB. None when it is not a colour.
+    """
+    color = (color or "").strip().lstrip("#").lower()
+    if not HEX_RE.fullmatch(color[:6] if len(color) >= 6 else color):
+        return None
+    color = "".join(c * 2 for c in color) if len(color) == 3 else color[:6]
+    table = {name: hex_ for name, hex_ in colors.items() if HEX_RE.fullmatch(hex_ or "") and len(hex_) == 6}
+    near = min(table.items(), key=lambda kv: plan.color_distance(kv[1], color), default=None)
     if near is not None and plan.color_distance(near[1], color) <= tolerance:
         return near[0].capitalize()
     return f"#{color}"
 
 
-def used_color(extra: dict | None) -> str | None:
-    """The colour most sampled while the print ran (see ``record_used_colors``)."""
+def used_color(extra: dict | None, sure: bool = False) -> str | None:
+    """The colour most sampled while the print ran (see ``record_used_colors``).
+
+    ``sure``: only when there are enough samples and nearly all of them say it, as to pick a component.
+    """
     samples = (extra or {}).get(USED_COLORS_KEY) or {}
-    return max(samples, key=samples.get) if samples else None
+    if not samples:
+        return None
+    best = max(samples, key=samples.get)
+    total = sum(samples.values())
+    if sure and (total < SURE_SAMPLES or samples[best] < SURE_SHARE * total):
+        return None
+    return best
+
+
+def _same_file(a: str | None, b: str | None) -> bool:
+    """One print's file under its names: ``Sopra__1a2b3c4d.3mf``, ``Sopra``, ``/data/Sopra.gcode.3mf``."""
+    from backend.app.farm.jobs.outside import _core
+
+    return bool(a and b and _core(a) and _core(a) == _core(b))
 
 
 async def record_used_colors(db: AsyncSession) -> int:
@@ -382,11 +409,23 @@ async def record_used_colors(db: AsyncSession) -> int:
             name = by_hand[printer.id].color_name
         else:
             continue
-        archive = await db.scalar(
+        if not name:
+            continue  # a slot reporting no real colour
+        # The archive of the print running now: the newest "printing" one of the file the printer reports.
+        printing = getattr(status, "subtask_name", None) or getattr(status, "gcode_file", None)
+        recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PRINT_MAX_AGE)
+        candidates = await db.execute(
             select(PrintArchive)
-            .where(PrintArchive.printer_id == printer.id, PrintArchive.status == "printing")
+            .where(
+                PrintArchive.printer_id == printer.id,
+                PrintArchive.status == "printing",
+                PrintArchive.created_at >= recent,
+            )
             .order_by(PrintArchive.id.desc())
-            .limit(1)
+        )
+        archive = next(
+            (a for a in candidates.scalars() if _same_file(printing, a.filename) or _same_file(printing, a.print_name)),
+            None,
         )
         if archive is None:
             continue
@@ -590,6 +629,14 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
     await db.commit()
 
 
+async def _guarded(db: AsyncSession, what: str, step) -> None:
+    try:
+        await step(db)
+    except Exception:
+        logger.exception("Farm %s failed", what)
+        await db.rollback()
+
+
 class FarmJobDispatcher:
     """Periodic placement of farm jobs (same pattern as the farm library scheduler)."""
 
@@ -617,11 +664,12 @@ class FarmJobDispatcher:
                 async with database.async_session() as db:
                     await dispatch_once(db)
                     await alerts.check(db)  # never raises
-                    await record_used_colors(db)
-                    await outside.scan_archives(db)
+                    # Each on its own: one failing never stops the dispatch or the others.
+                    await _guarded(db, "colour sampling", record_used_colors)
+                    await _guarded(db, "prints outside the queue", outside.scan_archives)
                     if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
                         last_history = time.monotonic()
-                        await outside.scan_klipper_history(db)
+                        await _guarded(db, "Klipper history", outside.scan_klipper_history)
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)

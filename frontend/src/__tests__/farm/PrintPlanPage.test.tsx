@@ -242,14 +242,25 @@ describe('PrintPlanPage', () => {
       { ...outsideJob, id: 9, print_name: 'Sopra plate 2.3mf',
         proposal: [{ component_code: 'C-0121', name: 'Sopra', pieces: 15, color: 'Nero', plate_id: 1 }] },
       { ...outsideJob, id: 10, print_name: 'Regalo.3mf', proposal: null },
+      { ...outsideJob, id: 12, print_name: 'Sopra__abcdef12.3mf',
+        proposal: [
+          { component_code: 'C-0121', name: 'Sopra', pieces: 15, color: 'Nero', plate_id: 1, alternative: true },
+          { component_code: 'C-0122', name: 'Sotto', pieces: 15, color: 'Nero', plate_id: 1, alternative: true },
+        ] },
     ];
     const user = userEvent.setup();
     render(<PrintPlanPage />);
-    expect(await screen.findByText('2 prints outside the queue to assign')).toBeInTheDocument();
+    expect(await screen.findByText('3 prints outside the queue to assign')).toBeInTheDocument();
+    // Alternatives: the product is chosen, but no pieces are filled in.
+    expect(
+      screen.getByText('It is one of these, not all: C-0121 Sopra ×15 / C-0122 Sotto ×15. Say which, with its pieces.'),
+    ).toBeInTheDocument();
     expect(screen.getByText('From its name it looks like: C-0121 Sopra ×15')).toBeInTheDocument();
     // The proposed product is chosen, with the proposed pieces; the user adds the bottoms.
-    expect(await screen.findByLabelText('Pieces C-0121')).toHaveValue(15);
-    await user.type(screen.getByLabelText('Pieces C-0122'), '14');
+    await waitFor(() => expect(screen.getAllByLabelText('Pieces C-0121')).toHaveLength(2));
+    expect(screen.getAllByLabelText('Pieces C-0121')[0]).toHaveValue(15);
+    expect(screen.getAllByLabelText('Pieces C-0121')[1]).toHaveValue(null);
+    await user.type(screen.getAllByLabelText('Pieces C-0122')[0], '14');
     await user.click(screen.getAllByRole('button', { name: 'Save the pieces' })[0]);
     await user.click(screen.getAllByRole('button', { name: 'Not production' })[1]);
     await waitFor(() =>
