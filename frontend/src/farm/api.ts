@@ -181,7 +181,21 @@ export interface FarmJob {
   printer: string | null;
   queue_item_id: number | null;
   pieces: number;
+  scheduled_time: string | null; // UTC
   created_at: string;
+}
+
+/** One print of a component, with upstream's queue options as its print dialog sets them. */
+export interface FarmJobIn {
+  component_code: string;
+  plate_ids: number[];
+  printer_id?: number;
+  ams_mapping?: number[]; // global tray ids by the plate's filament order: needs printer_id and one plate
+  scheduled_time?: string;
+  manual_start?: boolean;
+  require_previous_success?: boolean;
+  auto_off_after?: boolean;
+  gcode_injection?: boolean;
 }
 
 export interface FarmPrinterSpool {
@@ -336,8 +350,11 @@ export const farmApi = {
     farmRequest<FarmPrinterSpool>(`/printer-spools/${printerId}`, { method: 'PUT', body: JSON.stringify(data) }),
   clearPrinterSpool: (printerId: number) =>
     farmRequest<{ printer_id: number }>(`/printer-spools/${printerId}`, { method: 'DELETE' }),
-  createJobs: (jobs: { component_code: string; plate_ids: number[]; printer_id?: number }[]) =>
+  createJobs: (jobs: FarmJobIn[]) =>
     farmRequest<FarmJob[]>('/jobs', { method: 'POST', body: JSON.stringify({ jobs }) }),
+  getPlateFilaments: (plateId: number) =>
+    farmRequest<{ plate_id: number; sliced: boolean; filaments: { slot_id: number; type: string; color: string;
+      used_grams: number; used_meters?: number; nozzle_id?: number }[] }>(`/plates/${plateId}/filaments`),
   cancelJob: (id: number) => farmRequest<{ id: number; state: string }>(`/jobs/${id}`, { method: 'DELETE' }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
   savePlanSettings: (data: FarmPlanSettings) =>

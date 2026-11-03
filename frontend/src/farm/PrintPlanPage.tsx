@@ -7,6 +7,9 @@ import { AlertTriangle, ClipboardList, ListPlus, Loader2, RefreshCw, Settings2, 
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
+import { useAuth } from '../contexts/AuthContext';
+import { ScheduleOptionsPanel } from '../components/PrintModal/ScheduleOptions';
+import { DEFAULT_SCHEDULE_OPTIONS, type ScheduleOptions } from '../components/PrintModal/types';
 import {
   farmApi,
   type FarmJob,
@@ -16,6 +19,7 @@ import {
   type FarmPrinterSpool,
 } from './api';
 import { PlateThumb } from './PlatesPanel';
+import { PrinterSlots } from './PrinterSlots';
 import './i18n';
 
 const INPUT =
@@ -218,7 +222,25 @@ function SettingsCard({ settings, onClose }: { settings: FarmPlanSettings; onClo
   );
 }
 
-/** ``byHand``: printing a product whatever Seller Hub asks, so components already covered are kept. */
+/** The component's picture from its 3MF pieces; its code when there is none. */
+function ComponentImage({ c }: { c: FarmPlanComponent }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className="w-16 h-16 shrink-0 rounded bg-gray-300 flex items-center justify-center overflow-hidden">
+      {failed ? (
+        <span className="text-xs font-mono text-bambu-dark">{c.code}</span>
+      ) : (
+        <img src={farmApi.componentImageUrl(c.code, c.color_hex)} alt={c.name} loading="lazy"
+          className="w-full h-full object-contain" onError={() => setFailed(true)} />
+      )}
+    </div>
+  );
+}
+
+/** ``byHand``: printing a product whatever Seller Hub asks, so components already covered are kept.
+ *
+ * Like upstream's print dialog: which components, the printer with what it has loaded, its AMS/CFS
+ * slots and when to start. The farm still picks the 3MF by material and slices what is missing. */
 export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
   components: FarmPlanComponent[];
   onClose: () => void;
@@ -227,18 +249,59 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  const { hasPermission } = useAuth();
   const queryClient = useQueryClient();
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
   const usable = components.filter((c) => c.plates.length > 0 && (byHand || c.missing > 0));
+  // Ticked: what is still missing, else everything (the plan's selection, a product nobody asks for); all can change.
+  const [picked, setPicked] = useState(() => {
+    const missing = usable.filter((c) => c.missing > 0);
+    return new Set((byHand && missing.length ? missing : usable).map((c) => c.code));
+  });
   const [chosen, setChosen] = useState<Record<string, number>>({}); // component -> printer; none: first free
   const [chosenPlate, setChosenPlate] = useState<Record<string, number>>({}); // none: the loaded material decides
+  const [slots, setSlots] = useState<Record<string, Record<number, number>>>({}); // slots picked by hand
+  const [amsMappings, setAmsMappings] = useState<Record<string, number[] | undefined>>({});
+  const [schedule, setSchedule] = useState<ScheduleOptions>(DEFAULT_SCHEDULE_OPTIONS);
   const platesFor = (c: FarmPlanComponent) =>
     chosen[c.code] ? c.plates.filter((p) => p.printers.some((pr) => pr.id === chosen[c.code])) : c.plates;
+  // The plate the slots are chosen for: the one picked, else the proposed one (then pinned to it).
+  const slotPlate = (c: FarmPlanComponent) =>
+    platesFor(c).find((p) => p.plate_id === chosenPlate[c.code]) ?? platesFor(c)[0];
+  const selected = usable.filter((c) => picked.has(c.code));
+  const toggle = (code: string) => {
+    const next = new Set(picked);
+    if (next.has(code)) next.delete(code);
+    else next.add(code);
+    setPicked(next);
+  };
+  const resetSlots = (code: string) => {
+    setSlots((prev) => ({ ...prev, [code]: {} }));
+    setAmsMappings((prev) => ({ ...prev, [code]: undefined }));
+  };
+  const scheduledTime = schedule.scheduleType === 'scheduled' && schedule.scheduledTime
+    ? new Date(schedule.scheduledTime).toISOString()
+    : undefined;
   const create = useMutation({
     mutationFn: () =>
       farmApi.createJobs(
-        usable.map((c) => {
-          const plateIds = chosenPlate[c.code] ? [chosenPlate[c.code]] : platesFor(c).map((p) => p.plate_id);
-          return { component_code: c.code, plate_ids: plateIds, printer_id: chosen[c.code] || undefined };
+        selected.map((c) => {
+          const ams = chosen[c.code] ? amsMappings[c.code] : undefined;
+          const plateIds = chosenPlate[c.code]
+            ? [chosenPlate[c.code]]
+            : ams ? [slotPlate(c).plate_id] : platesFor(c).map((p) => p.plate_id);
+          return {
+            component_code: c.code,
+            plate_ids: plateIds,
+            printer_id: chosen[c.code] || undefined,
+            ams_mapping: ams,
+            scheduled_time: scheduledTime,
+            // Only what is set: the backend defaults the rest as upstream's queue does.
+            manual_start: schedule.scheduleType === 'manual' || undefined,
+            require_previous_success: schedule.requirePreviousSuccess || undefined,
+            auto_off_after: schedule.autoOffAfter || undefined,
+            gcode_injection: schedule.gcodeInjection || undefined,
+          };
         }),
       ),
     onSuccess: (jobs) => {
@@ -261,72 +324,114 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
         </div>
         <div className="p-4 space-y-4 overflow-y-auto">
           <p className="text-sm text-bambu-gray">{t('farm.jobs.summaryIntro')}</p>
+          {usable.length > 1 && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-bambu-gray">
+              {t('farm.jobs.pickHint')}
+              <Button size="sm" variant="ghost" onClick={() => setPicked(new Set(usable.map((c) => c.code)))}>
+                {t('farm.jobs.pickAll')}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setPicked(new Set())}>{t('farm.jobs.pickNone')}</Button>
+            </div>
+          )}
           {usable.map((c) => {
+            const on = picked.has(c.code);
             const best = c.plates[0];
             const printers = [...new Map(c.plates.flatMap((p) => p.printers).map((pr) => [pr.id, pr])).values()];
+            const plate = slotPlate(c);
             return (
-              <section key={c.code} className="space-y-2">
-                <p className="text-white flex items-center gap-2">
-                  {c.color_hex && (
-                    <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60"
-                      style={{ background: `#${c.color_hex}` }} />
-                  )}
-                  <span className="font-mono text-bambu-green">{c.code}</span> {c.name}
-                </p>
-                <p className="text-xs text-bambu-gray">
-                  {byHand
-                    ? t('farm.jobs.onePrintByHand', { pieces: best.yield })
-                    : t('farm.jobs.onePrint', { pieces: best.yield, missing: c.missing })}
-                  {best.print_time_seconds ? ` · ${duration(best.print_time_seconds)}` : ''}
-                  {best.filament_grams ? ` · ${Math.round(best.filament_grams)} g` : ''}
-                </p>
-                <label className="flex flex-wrap items-center gap-2 text-sm text-white">
-                  {t('farm.jobs.printer')}
-                  <select className={`${INPUT} py-1`} value={chosen[c.code] ?? ''}
-                    onChange={(e) => {
-                      setChosen({ ...chosen, [c.code]: Number(e.target.value) || 0 });
-                      setChosenPlate({ ...chosenPlate, [c.code]: 0 });
-                    }}>
-                    <option value="">{t('farm.jobs.firstFree')}</option>
-                    {printers.map((pr) => (
-                      <option key={pr.id} value={pr.id}>
-                        {pr.name} · {pr.idle ? t('farm.plan.free') : t('farm.plan.busy')}
-                      </option>
-                    ))}
-                  </select>
+              <section key={c.code} className={`space-y-2 rounded-lg p-2 ${on ? 'bg-bambu-dark/40' : 'opacity-70'}`}>
+                <label className="flex items-center gap-3 text-white cursor-pointer">
+                  <input type="checkbox" className="w-4 h-4 accent-bambu-green" checked={on} onChange={() => toggle(c.code)}
+                    aria-label={t('farm.jobs.pick', { code: c.code })} />
+                  <ComponentImage c={c} />
+                  <span className="flex items-center gap-2 flex-wrap">
+                    {c.color_hex && (
+                      <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60"
+                        style={{ background: `#${c.color_hex}` }} />
+                    )}
+                    <span className="font-mono text-bambu-green">{c.code}</span> {c.name}
+                  </span>
                 </label>
-                {chosen[c.code] ? <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p> : null}
-                <label className="flex flex-wrap items-center gap-2 text-sm text-white">
-                  {t('farm.jobs.plate')}
-                  <select className={`${INPUT} py-1 max-w-full`} value={chosenPlate[c.code] || ''}
-                    onChange={(e) => setChosenPlate({ ...chosenPlate, [c.code]: Number(e.target.value) || 0 })}>
-                    <option value="">{t('farm.jobs.anyPlate')}</option>
-                    {platesFor(c).map((p) => (
-                      <option key={p.plate_id} value={p.plate_id}>
-                        {fileName(p.file)} · {t('farm.plates.plate', { index: p.plate })} · {p.printer_model} · {p.material}
-                        {' · '}{t('farm.plan.yield', { count: p.yield })}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <ul className="space-y-2">
-                  {platesFor(c)
-                    .filter((p) => !chosenPlate[c.code] || p.plate_id === chosenPlate[c.code])
-                    .map((p, i) => (
-                      <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
-                    ))}
-                </ul>
+                {on && (
+                  <>
+                    <p className="text-xs text-bambu-gray">
+                      {byHand
+                        ? t('farm.jobs.onePrintByHand', { pieces: best.yield })
+                        : t('farm.jobs.onePrint', { pieces: best.yield, missing: c.missing })}
+                      {best.print_time_seconds ? ` · ${duration(best.print_time_seconds)}` : ''}
+                      {best.filament_grams ? ` · ${Math.round(best.filament_grams)} g` : ''}
+                    </p>
+                    <label className="flex flex-wrap items-center gap-2 text-sm text-white">
+                      {t('farm.jobs.printer')}
+                      <select className={`${INPUT} py-1`} value={chosen[c.code] ?? ''}
+                        onChange={(e) => {
+                          setChosen({ ...chosen, [c.code]: Number(e.target.value) || 0 });
+                          setChosenPlate({ ...chosenPlate, [c.code]: 0 });
+                          resetSlots(c.code);
+                        }}>
+                        <option value="">{t('farm.jobs.firstFree')}</option>
+                        {printers.map((pr) => (
+                          <option key={pr.id} value={pr.id}>
+                            {pr.name} · {pr.idle ? t('farm.plan.free') : t('farm.plan.busy')}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {chosen[c.code] ? <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p> : null}
+                    <label className="flex flex-wrap items-center gap-2 text-sm text-white">
+                      {t('farm.jobs.plate')}
+                      <select className={`${INPUT} py-1 max-w-full`} value={chosenPlate[c.code] || ''}
+                        onChange={(e) => {
+                          setChosenPlate({ ...chosenPlate, [c.code]: Number(e.target.value) || 0 });
+                          resetSlots(c.code);
+                        }}>
+                        <option value="">{t('farm.jobs.anyPlate')}</option>
+                        {platesFor(c).map((p) => (
+                          <option key={p.plate_id} value={p.plate_id}>
+                            {fileName(p.file)} · {t('farm.plates.plate', { index: p.plate })} · {p.printer_model} · {p.material}
+                            {' · '}{t('farm.plan.yield', { count: p.yield })}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {chosen[c.code] && plate ? (
+                      <PrinterSlots key={`${chosen[c.code]}-${plate.plate_id}`} printerId={chosen[c.code]}
+                        plateId={plate.plate_id}
+                        plateLabel={`${fileName(plate.file)} · ${t('farm.plates.plate', { index: plate.plate })}`}
+                        mappings={slots[c.code] || {}}
+                        onMappings={(m) => setSlots((prev) => ({ ...prev, [c.code]: m }))}
+                        onAmsMapping={(m) => setAmsMappings((prev) => ({ ...prev, [c.code]: m }))} />
+                    ) : null}
+                    <ul className="space-y-2">
+                      {platesFor(c)
+                        .filter((p) => !chosenPlate[c.code] || p.plate_id === chosenPlate[c.code])
+                        .map((p, i) => (
+                          <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
+                        ))}
+                    </ul>
+                  </>
+                )}
               </section>
             );
           })}
           {usable.length < components.length && (
             <p className="text-xs text-amber-400">{t(byHand ? 'farm.jobs.skippedByHand' : 'farm.jobs.skipped')}</p>
           )}
+          {usable.length > 0 && (
+            <section className="space-y-2">
+              <h3 className="text-sm font-semibold text-white">{t('farm.jobs.when')}</h3>
+              <ScheduleOptionsPanel options={schedule} onChange={setSchedule}
+                dateFormat={settings.data?.date_format || 'system'} timeFormat={settings.data?.time_format || 'system'}
+                canControlPrinter={hasPermission('printers:control')} showStagger={false}
+                hasGcodeSnippets={!!settings.data?.gcode_snippets} />
+            </section>
+          )}
         </div>
         <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>
-          <Button disabled={!usable.length || create.isPending} onClick={() => create.mutate()}>
-            {create.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t('farm.jobs.confirm', { count: usable.length })}
+          <Button disabled={!selected.length || create.isPending || (schedule.scheduleType === 'scheduled' && !scheduledTime)}
+            onClick={() => create.mutate()}>
+            {create.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t('farm.jobs.confirm', { count: selected.length })}
           </Button>
         </div>
       </div>

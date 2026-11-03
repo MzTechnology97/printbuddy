@@ -10,6 +10,11 @@ confirmation still applies: nothing prints without the user saying the plate is 
 A job created for a printer the user chose (``printer_id`` set while waiting) goes into that
 printer's queue as soon as its plate is sliced, busy or not, and with a manual start when the
 loaded spool can't be matched: the user picked the printer, the upstream queue waits for it.
+
+The print dialog's choices ride on the job (``queue_options``) to the queue item: AMS/CFS slots
+chosen by hand (then no spool check and no forced colour), start time, manual start and the
+other upstream queue flags. A job for the first free printer waits for its start time here,
+so it doesn't hold a printer; one for a chosen printer waits in that printer's queue.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import re
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -51,6 +57,7 @@ TICK_SECONDS = 30
 CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
 RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
+QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
 
@@ -97,8 +104,29 @@ def _plate_model(resolver: PrinterModelResolver, plate: FarmPlate) -> str:
     return (resolver.resolve(plate.printer_model).target_model or plate.printer_model or "").lower()
 
 
+def _utc(value: datetime | str | None) -> datetime | None:
+    """Naive UTC, as upstream stores ``scheduled_time``."""
+    if not value:
+        return None
+    when = datetime.fromisoformat(value) if isinstance(value, str) else value
+    return when.astimezone(timezone.utc).replace(tzinfo=None) if when.tzinfo else when
+
+
+def _queue_options(req: dict, printer_id: int | None, plates: list[FarmPlate]) -> dict | None:
+    options = {k: True for k in QUEUE_FLAGS if req.get(k)}
+    if when := _utc(req.get("scheduled_time")):
+        options["scheduled_time"] = when.isoformat()
+    if req.get("ams_mapping"):
+        # Slots follow one plate's filament order on one printer's AMS/CFS.
+        if printer_id is None or len(plates) != 1:
+            raise HTTPException(422, "Chosen slots need a chosen printer and one plate")
+        options["ams_mapping"] = list(req["ams_mapping"])
+    return options or None
+
+
 async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJob]:
-    """One job per request ``{component_code, plate_ids, printer_id?}``; plates not sliced yet are sliced now.
+    """One job per request ``{component_code, plate_ids, printer_id?, ...queue options}``; plates not
+    sliced yet are sliced now.
 
     With ``printer_id`` only the plates of that printer's model are kept.
     """
@@ -136,6 +164,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             plate_ids=[p.id for p in plates],
             expected_pieces=_pieces(plates[0], comp),
             printer_id=printer_id,
+            queue_options=_queue_options(req, printer_id, plates),
         )
         db.add(job)
         jobs.append(job)
@@ -144,6 +173,15 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
                 await ask_slicing(db, plate)
     await db.commit()
     return jobs
+
+
+async def plate_filaments(db: AsyncSession, plate: FarmPlate) -> list[dict] | None:
+    """The filament slots of the plate's sliced output (what AMS/CFS slots are chosen for); None until sliced."""
+    sliced = await sliced_file(db, plate)
+    if sliced is None:
+        return None
+    path = await _local_path(db, sliced)
+    return await asyncio.to_thread(extract_filament_requirements, path, _plate_in_file(path, plate.plate_index))
 
 
 async def queued_pieces(db: AsyncSession) -> dict[str, int]:
@@ -272,6 +310,12 @@ async def dispatch_once(db: AsyncSession) -> int:
         if comp is None or color_hex is None:
             job.note = f"No reference colour for '{job.color}'"
             continue
+        options = job.queue_options or {}
+        start_at = _utc(options.get("scheduled_time"))
+        if job.printer_id is None and start_at and start_at > datetime.now(timezone.utc).replace(tzinfo=None):
+            job.note = f"Starts at {start_at:%Y-%m-%d %H:%M} UTC"
+            continue
+        mapped = options.get("ams_mapping")  # slots chosen by hand: no spool check, nothing forced
         reasons = []
         placed = False
         slicing = False
@@ -306,10 +350,10 @@ async def dispatch_once(db: AsyncSession) -> int:
                     unreadable = klipper and not printer["loaded"]
                     spool = (
                         None
-                        if unreadable
+                        if unreadable or mapped
                         else _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
                     )
-                    if spool is None and not unreadable and strict:
+                    if spool is None and not unreadable and not mapped and strict:
                         reasons.append(f"{printer['name']}: no {job.color} {'+'.join(plate.materials or [])} loaded")
                         continue
                     path = await _local_path(db, sliced)
@@ -339,7 +383,12 @@ async def dispatch_once(db: AsyncSession) -> int:
                     item = PrintQueueItem(
                         printer_id=printer["id"],
                         library_file_id=send.id,
-                        manual_start=spool is None,
+                        manual_start=bool(options.get("manual_start")) or (spool is None and not mapped),
+                        scheduled_time=start_at,
+                        require_previous_success=bool(options.get("require_previous_success")),
+                        auto_off_after=bool(options.get("auto_off_after")),
+                        gcode_injection=bool(options.get("gcode_injection")),
+                        ams_mapping=json.dumps(mapped) if mapped else None,
                         plate_id=plate_no,
                         position=position + 1,
                         required_filament_types=json.dumps(sorted({s.get("type") for s in slots if s.get("type")})),
@@ -352,7 +401,9 @@ async def dispatch_once(db: AsyncSession) -> int:
                     job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
                     job.note = (
-                        None if spool else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
+                        None
+                        if spool or mapped
+                        else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
                     )
                     busy.add(printer["id"])
                     created += 1

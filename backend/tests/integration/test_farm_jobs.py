@@ -308,3 +308,70 @@ async def test_klipper_gcode_follows_a_new_slice_of_the_output(db_session, tmp_p
 
     # The extracted G-code carries the output's metadata but is not an output of the project.
     assert (await _latest_slices(db_session, SimpleNamespace(id=99), "v1")) == {1: sliced}
+
+
+@pytest.mark.asyncio
+async def test_print_dialog_options_reach_the_queue_item(async_client, db_session, farm):
+    """Slots chosen by hand, start time and queue flags go to the queue item; no spool check then."""
+    a1_two = farm["printers"][1]
+    farm["snapshot"][1]["loaded"] = [{"type": "PLA", "color": "ffffff"}]  # white: no match, but slots are chosen
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {
+                    "component_code": farm["code"],
+                    "plate_ids": farm["plates"][:1],
+                    "printer_id": a1_two,
+                    "ams_mapping": [2],
+                    "scheduled_time": "2030-01-02T10:30:00+01:00",
+                    "require_previous_success": True,
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["scheduled_time"] == "2030-01-02T09:30:00"
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert (item.printer_id, json.loads(item.ams_mapping), item.filament_overrides) == (a1_two, [2], None)
+    assert (item.manual_start, item.require_previous_success, str(item.scheduled_time)) == (
+        False,
+        True,
+        "2030-01-02 09:30:00",
+    )
+    assert (await db_session.get(FarmPrintJob, r.json()[0]["id"])).note is None
+
+    # Slots belong to a chosen printer.
+    job = {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "ams_mapping": [0]}
+    assert (await async_client.post(f"{API}/jobs", json={"jobs": [job]})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_first_free_printer_job_waits_for_its_start_time(async_client, db_session, farm):
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {"component_code": farm["code"], "plate_ids": farm["plates"], "scheduled_time": "2999-01-01T08:00:00Z"},
+                {"component_code": farm["code"], "plate_ids": farm["plates"], "manual_start": True},
+            ]
+        },
+    )
+    later, manual = r.json()
+    assert await service.dispatch_once(db_session) == 1  # only the one without a start time
+    assert (await db_session.get(FarmPrintJob, later["id"])).note == "Starts at 2999-01-01 08:00 UTC"
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert item.id == (await db_session.get(FarmPrintJob, manual["id"])).queue_item_id
+    assert item.manual_start is True  # black is loaded, but the user asked to start it by hand
+
+
+@pytest.mark.asyncio
+async def test_plate_filaments_for_the_slot_mapping(async_client, farm):
+    a1, p1s = farm["plates"]
+    assert (await async_client.get(f"{API}/plates/{a1}/filaments")).json() == {
+        "plate_id": a1,
+        "sliced": True,
+        "filaments": [{"slot_id": 1, "type": "PLA"}],
+    }
+    assert (await async_client.get(f"{API}/plates/{p1s}/filaments")).json()["sliced"] is False
+    assert (await async_client.get(f"{API}/plates/99999/filaments")).status_code == 404
