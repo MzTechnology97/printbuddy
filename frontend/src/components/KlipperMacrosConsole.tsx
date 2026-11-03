@@ -1,25 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Send, Terminal } from 'lucide-react';
+import { Play, RefreshCw, Send, Terminal } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
+import { useAuth } from '../contexts/AuthContext';
 import { ConfirmModal } from './ConfirmModal';
 
 type ToastType = 'success' | 'error' | 'warning' | 'info' | 'loading';
 
 interface Props {
   printerId: number;
+  connected?: boolean;
   showToast: (msg: string, type?: ToastType) => void;
 }
 
 /** Klipper macros (run after a confirm) and the G-code console (Moonraker's gcode_store, polled while shown). */
-export function KlipperMacrosConsole({ printerId, showToast }: Props) {
+export function KlipperMacrosConsole({ printerId, connected, showToast }: Props) {
   const { t } = useTranslation();
+  const { hasPermission } = useAuth();
   const queryClient = useQueryClient();
   const [macroToRun, setMacroToRun] = useState<string | null>(null);
+  const [riskyCommand, setRiskyCommand] = useState<string | null>(null);
   const [command, setCommand] = useState('');
   const logRef = useRef<HTMLDivElement>(null);
   const consoleKey = ['klipperConsole', printerId];
+  const canUseConsole = hasPermission('printers:console');
 
   const macros = useQuery({
     queryKey: ['klipperMacros', printerId],
@@ -29,8 +34,14 @@ export function KlipperMacrosConsole({ printerId, showToast }: Props) {
   const consoleLines = useQuery({
     queryKey: consoleKey,
     queryFn: () => api.klipperConsole(printerId, 100),
-    refetchInterval: 2000,
+    retry: false,
+    // After an error, stop asking the printer: polling resumes when it comes back online or on a user action.
+    refetchInterval: (query) => (query.state.status === 'error' ? false : 2000),
   });
+  const { isError: consoleFailed, refetch: refetchConsole } = consoleLines;
+  useEffect(() => {
+    if (connected && consoleFailed) refetchConsole();
+  }, [connected, consoleFailed, refetchConsole]);
 
   const refreshConsole = () => queryClient.invalidateQueries({ queryKey: consoleKey });
   const runMacro = useMutation({
@@ -40,9 +51,13 @@ export function KlipperMacrosConsole({ printerId, showToast }: Props) {
     onSettled: refreshConsole,
   });
   const sendCommand = useMutation({
-    mutationFn: (script: string) => api.klipperConsoleSend(printerId, script),
+    mutationFn: ({ script, confirm }: { script: string; confirm?: boolean }) =>
+      api.klipperConsoleSend(printerId, script, confirm),
     onSuccess: () => setCommand(''),
-    onError: (error: Error) => showToast(error.message, 'error'),
+    onError: (error: Error, { script }) => {
+      if (error instanceof ApiError && error.code === 'console_confirm_while_printing') setRiskyCommand(script);
+      else showToast(error.message, 'error');
+    },
     onSettled: refreshConsole,
   });
 
@@ -52,7 +67,7 @@ export function KlipperMacrosConsole({ printerId, showToast }: Props) {
   }, [lines.length]);
 
   const send = () => {
-    if (command.trim() && !sendCommand.isPending) sendCommand.mutate(command.trim());
+    if (command.trim() && !sendCommand.isPending) sendCommand.mutate({ script: command.trim() });
   };
   const lineClass = (line: (typeof lines)[number]) =>
     line.type === 'command'
@@ -103,28 +118,43 @@ export function KlipperMacrosConsole({ printerId, showToast }: Props) {
             </div>
           ))}
         </div>
-        <div className="flex gap-2">
-          <input
-            type="text"
-            aria-label={t('printers.klipper.consoleCommand', 'G-code command')}
-            className="flex-1 min-w-0 rounded px-2 py-1 text-sm font-mono bg-[var(--bg-primary)] border border-[var(--border-color)] focus:outline-none focus:border-[var(--accent)]"
-            placeholder="G28, QUERY_ENDSTOPS…"
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') send();
-            }}
-          />
-          <button
-            type="button"
-            aria-label={t('printers.klipper.consoleSend', 'Send')}
-            className="flex items-center justify-center px-3 rounded border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors disabled:opacity-40"
-            disabled={!command.trim() || sendCommand.isPending}
-            onClick={send}
-          >
-            <Send size={14} />
-          </button>
-        </div>
+        {consoleFailed && (
+          <div className="flex items-center gap-2 text-xs text-red-400">
+            <span className="flex-1">{t('printers.klipper.consoleUnavailable', 'Console unavailable: not refreshing')}</span>
+            <button
+              type="button"
+              className="flex items-center gap-1 px-2 py-1 rounded border border-[var(--border-color)] text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors"
+              onClick={() => refetchConsole()}
+            >
+              <RefreshCw size={12} />
+              {t('printers.klipper.consoleRetry', 'Retry')}
+            </button>
+          </div>
+        )}
+        {canUseConsole && (
+          <div className="flex gap-2">
+            <input
+              type="text"
+              aria-label={t('printers.klipper.consoleCommand', 'G-code command')}
+              className="flex-1 min-w-0 rounded px-2 py-1 text-sm font-mono bg-[var(--bg-primary)] border border-[var(--border-color)] focus:outline-none focus:border-[var(--accent)]"
+              placeholder="G28, QUERY_ENDSTOPS…"
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') send();
+              }}
+            />
+            <button
+              type="button"
+              aria-label={t('printers.klipper.consoleSend', 'Send')}
+              className="flex items-center justify-center px-3 rounded border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors disabled:opacity-40"
+              disabled={!command.trim() || sendCommand.isPending}
+              onClick={send}
+            >
+              <Send size={14} />
+            </button>
+          </div>
+        )}
       </div>
 
       {macroToRun && (
@@ -141,6 +171,23 @@ export function KlipperMacrosConsole({ printerId, showToast }: Props) {
             setMacroToRun(null);
           }}
           onCancel={() => setMacroToRun(null)}
+        />
+      )}
+
+      {riskyCommand && (
+        <ConfirmModal
+          title={t('printers.klipper.riskyCommandTitle', 'The printer is printing')}
+          message={t('printers.klipper.riskyCommandMessage', {
+            command: riskyCommand,
+            defaultValue: '{{command}} stops or restarts the printer and ends the current print. Send it anyway?',
+          })}
+          confirmText={t('printers.klipper.riskyCommandSend', 'Send anyway')}
+          variant="danger"
+          onConfirm={() => {
+            sendCommand.mutate({ script: riskyCommand, confirm: true });
+            setRiskyCommand(null);
+          }}
+          onCancel={() => setRiskyCommand(null)}
         />
       )}
     </div>

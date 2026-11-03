@@ -1287,3 +1287,12 @@ def test_moonraker_console_reads_the_gcode_store(monkeypatch):
     monkeypatch.setattr(client, "_get", lambda path, **kwargs: asked.append(path) or {"gcode_store": lines})
     assert client.gcode_store(50) == lines
     assert asked == ["server/gcode_store?count=50"]
+
+
+def test_moonraker_chamber_without_a_known_limit_still_refuses_a_negative_target(monkeypatch):
+    client, sent = _klipper_controls_client(monkeypatch, ["heater_generic chamber_heater"], {})
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: {})  # no max_temp in the config
+    with pytest.raises(ValueError, match="≥ 0"):
+        client.set_chamber_temperature(-5)
+    assert client.set_chamber_temperature(60) is True
+    assert sent == ["SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=60"]

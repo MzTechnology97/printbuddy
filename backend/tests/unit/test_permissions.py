@@ -112,3 +112,15 @@ class TestInventoryViewAssignmentsPermission:
         """Administrators should have all permissions including view_assignments."""
         admins = DEFAULT_GROUPS["Administrators"]
         assert "inventory:view_assignments" in admins["permissions"]
+
+
+def test_console_permission_is_admin_only_and_never_for_api_keys():
+    from backend.app.core.auth import _APIKEY_DENIED_PERMISSIONS
+    from backend.app.core.permissions import DEFAULT_GROUPS, PERMISSION_CATEGORIES
+
+    assert Permission.PRINTERS_CONSOLE == "printers:console"
+    assert Permission.PRINTERS_CONSOLE in PERMISSION_CATEGORIES["Printers"]
+    assert "printers:console" in DEFAULT_GROUPS["Administrators"]["permissions"]
+    assert "printers:console" not in DEFAULT_GROUPS["Operators"]["permissions"]
+    assert "printers:console" not in DEFAULT_GROUPS["Viewers"]["permissions"]
+    assert Permission.PRINTERS_CONSOLE in _APIKEY_DENIED_PERMISSIONS

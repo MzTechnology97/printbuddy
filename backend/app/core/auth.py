@@ -44,6 +44,7 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.GITHUB_BACKUP,
         Permission.GITHUB_RESTORE,
         Permission.FIRMWARE_UPDATE,
+        Permission.PRINTERS_CONSOLE,  # raw G-code can restart Klipper or run shell macros
     }
 )
 

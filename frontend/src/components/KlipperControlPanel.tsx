@@ -615,7 +615,7 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
         </div>
       </div>
 
-      <KlipperMacrosConsole printerId={printer.id} showToast={showToast} />
+      <KlipperMacrosConsole printerId={printer.id} connected={status?.connected} showToast={showToast} />
     </div>
   );
 }

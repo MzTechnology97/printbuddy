@@ -1,9 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { render } from '../utils';
 import { KlipperControlPanel } from '../../components/KlipperControlPanel';
-import { api } from '../../api/client';
+import { http, HttpResponse } from 'msw';
+import { server } from '../mocks/server';
+import { api, ApiError, setAuthToken } from '../../api/client';
 import type { Printer } from '../../api/client';
 
 vi.mock('../../api/client', async (importOriginal) => {
@@ -172,7 +174,61 @@ describe('KlipperControlPanel chamber, macros and console', () => {
 
     expect(await screen.findByText('!! Unknown command:"FOO"')).toBeInTheDocument();
     await user.type(screen.getByLabelText('G-code command'), 'M115{Enter}');
-    await waitFor(() => expect(api.klipperConsoleSend).toHaveBeenCalledWith(7, 'M115'));
+    await waitFor(() => expect(api.klipperConsoleSend).toHaveBeenCalledWith(7, 'M115', undefined));
     await waitFor(() => expect(screen.getByLabelText('G-code command')).toHaveValue(''));
+  });
+});
+
+describe('KlipperControlPanel console safeguards', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.klipperMacros).mockResolvedValue({ macros: [] });
+    vi.mocked(api.klipperConsole).mockResolvedValue({ lines: [] });
+  });
+  afterEach(() => {
+    server.resetHandlers();
+    setAuthToken(null);
+  });
+
+  it('asks for a confirm before sending a restart command during a print', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.klipperConsoleSend)
+      .mockRejectedValueOnce(new ApiError('confirm', 409, 'console_confirm_while_printing', null))
+      .mockResolvedValueOnce({ success: true });
+    render(<KlipperControlPanel printer={fluiddPrinter} status={{ connected: true }} showToast={vi.fn()} />);
+
+    await user.type(screen.getByLabelText('G-code command'), 'FIRMWARE_RESTART{Enter}');
+    await user.click(await screen.findByRole('button', { name: 'Send anyway' }));
+    await waitFor(() => expect(api.klipperConsoleSend).toHaveBeenLastCalledWith(7, 'FIRMWARE_RESTART', true));
+  });
+
+  it('stops polling the console after an error until the user retries', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.klipperConsole).mockRejectedValue(new Error('offline'));
+    render(<KlipperControlPanel printer={fluiddPrinter} status={{ connected: false }} showToast={vi.fn()} />);
+
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    expect(api.klipperConsole).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    expect(api.klipperConsole).toHaveBeenCalledTimes(1);
+
+    vi.mocked(api.klipperConsole).mockResolvedValue({ lines: [] });
+    await user.click(retry);
+    await waitFor(() => expect(api.klipperConsole).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument());
+  });
+
+  it('hides the console input from users without printers:console', async () => {
+    setAuthToken('test-token', 'session');
+    server.use(
+      http.get('*/api/v1/auth/status', () => HttpResponse.json({ auth_enabled: true, requires_setup: false })),
+      http.get('*/api/v1/auth/me', () =>
+        HttpResponse.json({ id: 1, username: 'operator', is_admin: false, permissions: ['printers:read', 'printers:control'] }),
+      ),
+    );
+    render(<KlipperControlPanel printer={fluiddPrinter} status={{ connected: true }} showToast={vi.fn()} />);
+
+    expect(await screen.findByRole('log')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByLabelText('G-code command')).not.toBeInTheDocument());
   });
 });
