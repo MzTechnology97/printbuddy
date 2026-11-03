@@ -54,6 +54,8 @@ DEFAULT_TOLERANCE = 80
 URGENCY = {"esaurito": 0, "urgente": 1, "da_stampare": 2}
 COMPONENT_FIELDS = ("code", "name", "status", "to_print", "stock", "need", "days_left")
 TIMEOUT_SECONDS = 15.0
+# Seller Hub computes its whole plan on every call (about 1 s), and Accoda's dialog opens often.
+CACHE_SECONDS = 60
 
 
 def _key(name: str) -> str:
@@ -111,8 +113,21 @@ async def _get_print_plan(url: str) -> dict:
         return response.json()
 
 
+def _age_seconds(fetched_at: str | None) -> float:
+    if not fetched_at:
+        return math.inf
+    when = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds()
+
+
 async def fetch_components(db: AsyncSession, url: str) -> tuple[list[dict], str | None, str | None]:
-    """Seller Hub's components, when they were read, and an error (the cached copy is used then)."""
+    """Seller Hub's components, when they were read, and an error (the cached copy is used then).
+
+    A copy of the same URL younger than ``CACHE_SECONDS`` is used without asking Seller Hub again.
+    """
+    cache = json.loads(await get_setting(db, _key("cache")) or "{}")
+    if url and cache.get("url") == url and _age_seconds(cache.get("fetched_at")) < CACHE_SECONDS:
+        return cache.get("components") or [], cache["fetched_at"], None
     if url:
         try:
             plan = await _get_print_plan(url)
@@ -120,14 +135,15 @@ async def fetch_components(db: AsyncSession, url: str) -> tuple[list[dict], str 
                 {k: c.get(k) for k in COMPONENT_FIELDS} for c in plan.get("components") or [] if isinstance(c, dict)
             ]
             fetched_at = _now()
-            await set_setting(db, _key("cache"), json.dumps({"fetched_at": fetched_at, "components": components}))
+            await set_setting(
+                db, _key("cache"), json.dumps({"url": url, "fetched_at": fetched_at, "components": components})
+            )
             await db.commit()
             return components, fetched_at, None
         except (httpx.HTTPError, ValueError) as exc:
             error = f"Seller Hub did not answer ({type(exc).__name__}: {exc})"
     else:
         error = "Seller Hub URL not set"
-    cache = json.loads(await get_setting(db, _key("cache")) or "{}")
     return cache.get("components") or [], cache.get("fetched_at"), error
 
 
