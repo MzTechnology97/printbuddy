@@ -38,7 +38,11 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
   const sameAs = useMutation({
     mutationFn: async (into: number) => {
       if (piece.shape_id) await farmApi.mergeShape(piece.shape_id, into);
-      else await farmApi.linkPiece(piece.yield_ids, into);
+      else {
+        // Its geometry joins that shape of this product (never another product's).
+        const quantity = data.pieces.find((p) => p.shape_id === into)?.quantity ?? 1;
+        await farmApi.setProductPiece(projectId, { yield_ids: piece.yield_ids, quantity, shape_id: into });
+      }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
     onError: (e: Error) => showToast(e.message, 'error'),
@@ -197,7 +201,7 @@ function AsideRow({ projectId, piece }: { projectId: number; piece: FarmProductP
 export function ProductPiecesPanel({ projectId }: { projectId: number }) {
   const { t } = useTranslation();
   const pieces = useQuery({ queryKey: ['farm', 'product-pieces', projectId], queryFn: () => farmApi.getProductPieces(projectId) });
-  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
+  const shapes = useQuery({ queryKey: ['farm', 'shapes', projectId], queryFn: () => farmApi.getShapes(projectId) });
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
   const data = pieces.data;
   const main = data?.pieces.filter((p) => !p.not_part) ?? [];

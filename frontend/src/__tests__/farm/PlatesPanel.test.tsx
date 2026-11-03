@@ -1,9 +1,9 @@
 /**
- * Printfarm (fork): confirming the plates proposed from NAS 3MF files. All data is made up.
+ * Printfarm (fork): the plates of the NAS 3MF files, read-only (pieces are linked per product). Data is made up.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
@@ -19,10 +19,7 @@ const file = (id: number, path: string, slicer = 'bambu_studio') => ({
 });
 
 describe('PlatesPanel', () => {
-  let confirmed: unknown;
-
   beforeEach(() => {
-    confirmed = undefined;
     server.use(
       http.get('/api/v1/farm/library/files', () =>
         HttpResponse.json([
@@ -67,51 +64,36 @@ describe('PlatesPanel', () => {
           },
         ]),
       ),
-      http.put('/api/v1/farm/plates/11', async ({ request }) => {
-        confirmed = await request.json();
-        return HttpResponse.json({});
-      }),
     );
   });
 
-  it('lists production files to confirm and confirms a plate with the proposed shapes', async () => {
+  it('lists production files and shows their plates, read-only', async () => {
     const user = userEvent.setup();
     render(<PlatesPanel />);
 
-    // Old/ and CAD files are hidden; a file with everything confirmed is not "to confirm".
+    // Old/ and CAD files are hidden.
     expect(await screen.findByText('A1-truffle.3mf')).toBeInTheDocument();
+    expect(screen.getByText('Ganci.3mf')).toBeInTheDocument();
     expect(screen.queryByText('Tartufi A1.3mf')).not.toBeInTheDocument();
     expect(screen.queryByText('Trurffle_sopra.3mf')).not.toBeInTheDocument();
-    expect(screen.queryByText('Ganci.3mf')).not.toBeInTheDocument();
-    expect(screen.getByText(/2 to confirm · 0 confirmed/)).toBeInTheDocument();
+    expect(screen.getByText(/2 plates/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /A1-truffle\.3mf/ }));
-    const top = await screen.findByLabelText('Shape Trurffle_sopra k2');
-    expect(top).toHaveValue('5');
-    expect(screen.getByText('proposed')).toBeInTheDocument();
+    expect(await screen.findByText('Trurffle_sopra k2')).toBeInTheDocument();
     expect(screen.getByText(/3h 20m · 151 g/)).toBeInTheDocument();
+    // Pieces are linked on each product sheet: no shape to pick and nothing to confirm here.
+    expect(screen.queryByRole('combobox', { name: /Shape/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm plate' })).not.toBeInTheDocument();
     // The plate preview comes from the 3MF and opens the 3D viewer.
     const preview = screen.getByRole('button', { name: 'Open in the 3D viewer Plate 1' });
     expect(preview.querySelector('img')?.getAttribute('src')).toContain('/library/files/1/plate-thumbnail/1');
-
-    await user.selectOptions(screen.getByLabelText('Shape Trurffle_sotto (1) (1)'), 'Tartufo sotto');
-    await user.click(screen.getByRole('button', { name: 'Confirm plate' }));
-    await waitFor(() =>
-      expect(confirmed).toEqual({
-        yields: [
-          { object_name: 'Trurffle_sopra k2', quantity: 15, shape_id: 5 },
-          { object_name: 'Trurffle_sotto (1) (1)', quantity: 15, shape_id: 6 },
-        ],
-      }),
-    );
   });
 
-  it('shows confirmed files on request', async () => {
+  it('shows every file on request', async () => {
     const user = userEvent.setup();
     render(<PlatesPanel />);
     await screen.findByText('A1-truffle.3mf');
-    await user.selectOptions(screen.getByLabelText('Filter'), 'Confirmed');
-    expect(screen.getByText('Ganci.3mf')).toBeInTheDocument();
-    expect(screen.queryByText('A1-truffle.3mf')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox'));
+    expect(screen.getByText('Tartufi A1.3mf')).toBeInTheDocument();
   });
 });
