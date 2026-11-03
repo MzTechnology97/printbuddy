@@ -76,6 +76,15 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
     monkeypatch.setattr(service, "_local_path", fake_local)
     monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 1, "type": "PLA"}])
     monkeypatch.setattr(plan, "printer_snapshot", lambda printers: snapshot)
+    # The live slots: the snapshot's loaded filaments, tray i on AMS slot i.
+    monkeypatch.setattr(
+        service,
+        "_loaded_trays",
+        lambda pid: [
+            {"type": f["type"], "color": f"#{f['color']}", "global_tray_id": i}
+            for i, f in enumerate(next(p for p in snapshot if p["id"] == pid)["loaded"])
+        ],
+    )
     return {
         "code": black["code"],
         "plates": [plates["A1"].id, plates["P1S"].id],
@@ -102,9 +111,7 @@ async def test_job_waits_then_goes_to_the_free_printer_with_the_colour(async_cli
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     a1_one = farm["printers"][0]
     assert (item.printer_id, item.plate_id, item.status) == (a1_one, 2, "pending")
-    assert json.loads(item.filament_overrides) == [
-        {"slot_id": 1, "type": "PLA", "color": "#161616", "force_color_match": True}
-    ]
+    assert (json.loads(item.ams_mapping), item.filament_overrides, item.manual_start) == ([0], None, False)
     assert json.loads(item.required_filament_types) == ["PLA"]
 
     jobs = (await async_client.get(f"{API}/jobs")).json()
@@ -160,7 +167,7 @@ async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_
     assert (gcode.filename, gcode.file_type) == ("sopra_plate2_plate2.gcode", "gcode")
     # Colour not readable: queued, but it starts only when the user starts it after checking the spool.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (farm["printers"][0], True, None)
-    assert "Check the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
+    assert "Load the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
 
     # The extracted G-code is reused for the next job on the same plate.
     await db_session.get(PrintQueueItem, item.id)
@@ -187,7 +194,7 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
     assert job.plate_ids == [farm["plates"][0]]  # only the A1 plate
     # No black spool loaded: queued anyway, started by hand after loading it.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_two, True, None)
-    assert "Check the Nero spool on A1 due" in job.note
+    assert "Load the Nero spool on A1 due" in job.note
 
     # A printer of a model without a plate is refused.
     bad = await async_client.post(
@@ -202,8 +209,10 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
 
 
 @pytest.mark.asyncio
-async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client, db_session, farm):
+async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client, db_session, farm, monkeypatch):
     """Two 3MF for the same printer, PLA and PETG: black PETG is loaded, so the PETG one goes."""
+    reads = iter([[{"slot_id": 1, "type": "PLA"}], [{"slot_id": 1, "type": "PETG"}]])  # each 3MF's slice_info
+    monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: next(reads))
     a1_two = farm["printers"][1]
     pla = await db_session.get(FarmPlate, farm["plates"][0])
     petg = FarmPlate(library_file_id=60, plate_index=1, printer_model="A1", materials=["PETG"])
@@ -220,7 +229,7 @@ async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client,
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
     assert (job.plate_id, job.pieces, item.manual_start) == (petg.id, 12, False)
-    assert json.loads(item.filament_overrides)[0]["color"] == "#141414"
+    assert (json.loads(item.ams_mapping), item.filament_overrides) == ([0], None)
 
 
 @pytest.mark.asyncio
@@ -375,3 +384,31 @@ async def test_plate_filaments_for_the_slot_mapping(async_client, farm):
     }
     assert (await async_client.get(f"{API}/plates/{p1s}/filaments")).json()["sliced"] is False
     assert (await async_client.get(f"{API}/plates/99999/filaments")).status_code == 404
+
+
+def test_slot_mapping_follows_the_component_colour_not_the_3mf():
+    """3 filaments in the 3MF, the plate uses the 3rd: the black variant goes on the black tray, the rest -1."""
+    used = [{"slot_id": 3, "type": "PETG", "color": "#FFC800"}]  # the 3MF says yellow: it doesn't count
+    trays = [
+        {"type": "PETG", "color": "#FFC800", "global_tray_id": 0},
+        {"type": "PLA", "color": "#111111", "global_tray_id": 1},  # black, wrong material
+        {"type": "PETG", "color": "#121212", "global_tray_id": 2},
+        {"type": "PETG", "color": "#FF7A00", "global_tray_id": 3},
+    ]
+    assert service._slot_mapping(used, trays, "111111", 80) == [-1, -1, 2]
+    assert service._slot_mapping(used, trays[:2], "111111", 80) is None  # no black PETG loaded
+
+
+@pytest.mark.asyncio
+async def test_job_waits_without_a_tray_of_the_component_colour(async_client, db_session, farm, monkeypatch):
+    monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 3, "type": "PLA"}])
+    farm["snapshot"][0]["loaded"] = [{"type": "PLA", "color": "ffc800"}, {"type": "PLA", "color": "ff7a00"}]
+    farm["snapshot"][1]["idle"] = False
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 0  # no black PLA: not sent by itself
+    assert "A1 uno: no Nero PLA loaded" in (await db_session.get(FarmPrintJob, job["id"])).note
+
+    farm["snapshot"][0]["loaded"].append({"type": "PLA", "color": "161616"})
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert (json.loads(item.ams_mapping), item.manual_start) == ([-1, -1, 2], False)

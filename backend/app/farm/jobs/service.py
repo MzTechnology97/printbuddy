@@ -11,6 +11,11 @@ A job created for a printer the user chose (``printer_id`` set while waiting) go
 printer's queue as soon as its plate is sliced, busy or not, and with a manual start when the
 loaded spool can't be matched: the user picked the printer, the upstream queue waits for it.
 
+Slots are mapped here, not left to the upstream scheduler: each filament the sliced plate really
+uses (its slice_info) goes on a loaded AMS/CFS tray of the COMPONENT's colour and a compatible
+material, the others to -1. The colour written in the 3MF doesn't count. No such tray: the job
+waits (a chosen printer gets it for a manual start).
+
 The print dialog's choices ride on the job (``queue_options``) to the queue item: AMS/CFS slots
 chosen by hand (then no spool check and no forced colour), start time, manual start and the
 other upstream queue flags. A job for the first free printer waits for its start time here,
@@ -48,7 +53,8 @@ from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 from backend.app.services.filament_requirements import extract_filament_requirements
-from backend.app.services.print_scheduler import _canonical_filament_type
+from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
+from backend.app.services.printer_manager import printer_manager
 from backend.app.services.printer_providers.factory import normalize_provider
 
 logger = logging.getLogger(__name__)
@@ -277,6 +283,33 @@ def _matching_spool(printer: dict, materials: list[str], color_hex: str, toleran
     return min(spools, key=lambda f: plan.color_distance(f["color"], color_hex)) if spools else None
 
 
+def _loaded_trays(printer_id: int) -> list[dict]:
+    """The printer's loaded slots with their global tray ids: AMS, K2 CFS, external spool."""
+    status = printer_manager.get_status(printer_id)
+    return scheduler._build_loaded_filaments(status) if status is not None and status.raw_data else []
+
+
+def _slot_mapping(used: list[dict], trays: list[dict], color_hex: str, tolerance: int) -> list[int] | None:
+    """Each filament the plate uses on a tray of the component's colour and a compatible material, the others
+    -1 (position = slot_id - 1, as upstream's ``ams_mapping``); None when one of them has no such tray."""
+
+    def distance(tray: dict) -> float:
+        return plan.color_distance(tray["color"].lstrip("#").lower()[:6], color_hex)
+
+    mapping = [-1] * max(f["slot_id"] for f in used)
+    for f in used:
+        want = _canonical_filament_type(f.get("type") or "")
+        fits = [
+            t
+            for t in trays
+            if t.get("color") and (not want or _canonical_filament_type(t["type"]) == want) and distance(t) <= tolerance
+        ]
+        if not fits:
+            return None
+        mapping[f["slot_id"] - 1] = min(fits, key=distance)["global_tray_id"]
+    return mapping
+
+
 async def dispatch_once(db: AsyncSession) -> int:
     """Place waiting jobs on free printers that fit; returns how many queue items were created."""
     jobs = list(
@@ -337,6 +370,7 @@ async def dispatch_once(db: AsyncSession) -> int:
                     reasons.append(f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced")
                     continue
                 model = _plate_model(resolver, plate)
+                read: tuple | None = None  # (path, plate number, used filaments) of the sliced file, once
                 for printer in snapshot:
                     if printer["model"].lower() != model:
                         continue
@@ -348,47 +382,54 @@ async def dispatch_once(db: AsyncSession) -> int:
                     klipper = normalize_provider(printers_by_id[printer["id"]].provider) != "bambu"
                     # Single-spool Klipper printers don't report what is loaded: queued for a manual start.
                     unreadable = klipper and not printer["loaded"]
-                    spool = (
-                        None
-                        if unreadable or mapped
-                        else _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
-                    )
-                    if spool is None and not unreadable and not mapped and strict:
-                        reasons.append(f"{printer['name']}: no {job.color} {'+'.join(plate.materials or [])} loaded")
+                    if read is None:
+                        path = await _local_path(db, sliced)
+                        plate_no = _plate_in_file(path, plate.plate_index)
+                        read = (path, plate_no, await asyncio.to_thread(extract_filament_requirements, path, plate_no))
+                    path, plate_no, slots = read
+                    auto = None  # trays of the component's colour for the filaments the plate uses
+                    spool = None  # a spool of that colour, when the slots can't be mapped
+                    if not (unreadable or mapped):
+                        if slots and not printer.get("by_hand"):
+                            auto = _slot_mapping(slots, _loaded_trays(printer["id"]), color_hex, config["tolerance"])
+                        else:  # no slice_info, or a spool set by hand on a Klipper: the colour check only
+                            spool = _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
+                    fits = bool(mapped or auto or spool)
+                    if not fits and not unreadable and strict:
+                        used = sorted({f.get("type") for f in slots if f.get("type")}) or plate.materials or []
+                        reasons.append(f"{printer['name']}: no {job.color} {'+'.join(used)} loaded")
                         continue
-                    path = await _local_path(db, sliced)
-                    plate_no = _plate_in_file(path, plate.plate_index)
                     send = sliced
                     if klipper and not sliced.filename.endswith(".gcode"):
                         send = await gcode_for_klipper(db, sliced, path, plate_no)
                         if send is None:
                             reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
                             continue
-                    slots = await asyncio.to_thread(extract_filament_requirements, path, plate_no)
-                    # A spool set by hand isn't in the printer's status: nothing to force there.
+                    ams = mapped or auto
+                    # Slots unknown: the upstream scheduler maps them at start, forced to the spool's colour.
                     overrides = (
                         []
                         if spool is None or printer.get("by_hand")
                         else [
                             {
-                                "slot_id": s["slot_id"],
-                                "type": s.get("type") or spool["type"],
+                                "slot_id": f["slot_id"],
+                                "type": f.get("type") or spool["type"],
                                 "color": f"#{spool['color']}",
                                 "force_color_match": True,
                             }
-                            for s in slots
+                            for f in slots
                         ]
                     )
                     position = (await db.scalar(select(func.max(PrintQueueItem.position)))) or 0
                     item = PrintQueueItem(
                         printer_id=printer["id"],
                         library_file_id=send.id,
-                        manual_start=bool(options.get("manual_start")) or (spool is None and not mapped),
+                        manual_start=bool(options.get("manual_start")) or not fits,
                         scheduled_time=start_at,
                         require_previous_success=bool(options.get("require_previous_success")),
                         auto_off_after=bool(options.get("auto_off_after")),
                         gcode_injection=bool(options.get("gcode_injection")),
-                        ams_mapping=json.dumps(mapped) if mapped else None,
+                        ams_mapping=json.dumps(ams) if ams else None,
                         plate_id=plate_no,
                         position=position + 1,
                         required_filament_types=json.dumps(sorted({s.get("type") for s in slots if s.get("type")})),
@@ -400,11 +441,7 @@ async def dispatch_once(db: AsyncSession) -> int:
                     await db.flush()
                     job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
-                    job.note = (
-                        None
-                        if spool or mapped
-                        else f"Check the {job.color} spool on {printer['name']}, then start it"[:255]
-                    )
+                    job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
                     busy.add(printer["id"])
                     created += 1
                     placed = True

@@ -396,7 +396,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
                     </label>
                     {chosen[c.code] && plate ? (
                       <PrinterSlots key={`${chosen[c.code]}-${plate.plate_id}`} printerId={chosen[c.code]}
-                        plateId={plate.plate_id}
+                        plateId={plate.plate_id} colorHex={c.color_hex}
                         plateLabel={`${fileName(plate.file)} · ${t('farm.plates.plate', { index: plate.plate })}`}
                         mappings={slots[c.code] || {}}
                         onMappings={(m) => setSlots((prev) => ({ ...prev, [c.code]: m }))}

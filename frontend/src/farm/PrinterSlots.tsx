@@ -1,5 +1,5 @@
 // Printfarm (fork): what a chosen printer has loaded, and the plate's AMS/CFS slots, with upstream's mapping.
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
@@ -43,9 +43,10 @@ function Loaded({ printerId }: { printerId: number }) {
 }
 
 /** Upstream's slot mapping for this plate on this printer; reports the AMS mapping when slots were chosen by hand. */
-export function PrinterSlots({ printerId, plateId, plateLabel, mappings, onMappings, onAmsMapping }: {
+export function PrinterSlots({ printerId, plateId, plateLabel, colorHex, mappings, onMappings, onAmsMapping }: {
   printerId: number;
   plateId: number;
+  colorHex: string | null; // the component's colour, which the automatic proposal looks for
   plateLabel: string;
   mappings: Record<number, number>;
   onMappings: (m: Record<number, number>) => void;
@@ -56,7 +57,14 @@ export function PrinterSlots({ printerId, plateId, plateLabel, mappings, onMappi
   const status = useQuery({ queryKey: ['printer-status', printerId], queryFn: () => api.getPrinterStatus(printerId) });
   const assignments = useQuery({ queryKey: ['spool-assignments', printerId], queryFn: () => api.getAssignments(printerId) });
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
-  const filamentReqs = reqs.data as FilamentReqsData | undefined; // the sliced plate's slice_info filaments
+  // The filaments the sliced plate uses, in the component's colour: one 3MF serves every colour variant.
+  const filamentReqs = useMemo(
+    () => reqs.data && ({
+      filaments: reqs.data.filaments.map((f) => ({ ...f, used_meters: f.used_meters ?? 0, tray_info_idx: '',
+        color: colorHex ? `#${colorHex}` : f.color })),
+    } as FilamentReqsData),
+    [reqs.data, colorHex],
+  );
   const { amsMapping } = useFilamentMapping(filamentReqs, status.data, mappings, settings.data?.prefer_lowest_filament,
     assignments.data, printerId);
   const manual = Object.keys(mappings).length > 0;

@@ -218,7 +218,8 @@ describe('PrintPlanPage', () => {
         HttpResponse.json({
           plate_id: Number(params.id),
           sliced: true,
-          filaments: [{ slot_id: 1, type: 'PLA', color: '#6B4226', used_grams: 150, used_meters: 50 }],
+          // The 3MF says yellow: the proposal still looks for the component's brown.
+          filaments: [{ slot_id: 1, type: 'PLA', color: '#FFC800', used_grams: 150, used_meters: 50 }],
         }),
       ),
       http.get('/api/v1/printers/1/status', () =>
