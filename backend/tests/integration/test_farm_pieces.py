@@ -350,8 +350,6 @@ async def test_product_printed_as_a_set(async_client, tmp_path):
     )
     view = (await async_client.get(f"{API}/products/{pid}/view")).json()
     assert sorted(x["yield"] for x in view["parts"][0]["plates"]) == [2, 2]
-    r = await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "kit"})
-    assert r.status_code == 409  # two pieces in the set
 
     # A wrong shape taken out of the set from the sheet: its piece goes back to "to decide".
     bottom = next(r["shape_id"] for r in view["parts"][0]["recipe"] if r["shape"] == "Bottom")
@@ -566,3 +564,30 @@ async def test_pieces_not_part_of_the_product_step_aside(async_client, tmp_path)
     assert [(p["quantity"], p["not_part"]) for p in pieces] == [(None, False), (None, False)]
     [f] = (await async_client.get(f"{API}/products/{pid}/view")).json()["files"]
     assert (f["proposed"], f["unrelated_plates"]) == (2, [])
+
+
+async def test_a_set_printed_on_separate_plates_becomes_a_kit(async_client):
+    """Base, frame and cap printed apart and in different numbers: the set is split, one part per piece."""
+    names = ("Base", "Cornice", "Tappo")
+    shapes = {n: (await async_client.post(f"{API}/shapes", json={"name": n})).json()["id"] for n in names}
+    cap = (await async_client.post(f"{API}/components", json={"shape_id": shapes["Tappo"], "color": "Bianco"})).json()
+    pid = (await async_client.post(f"{API}/products", json={"name": "Urmet 825"})).json()["project_id"]
+    await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})
+    r = await async_client.post(f"{API}/components", json={"name": "Urmet 825", "color": "Bianco"})
+    the_set = r.json()["code"]
+    await async_client.put(f"{API}/products/{pid}/parts/{the_set}", json={"quantity": 1})
+    await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})  # the part becomes the set
+    for n, q in (("Base", 2), ("Cornice", 2), ("Tappo", 2)):
+        await async_client.put(f"{API}/products/{pid}/recipe/{shapes[n]}", json={"quantity": q})
+
+    r = await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "kit"})
+    assert r.json() == {"project_id": pid, "kind": "kit"}
+    parts = (await async_client.get(f"{API}/products/{pid}/view")).json()["parts"]
+    assert [(p["shape"], p["quantity"], p["color"]) for p in parts] == [
+        ("Base", 2, "Bianco"),
+        ("Cornice", 2, "Bianco"),
+        ("Tappo", 2, "Bianco"),
+    ]
+    assert parts[2]["code"] == cap["code"]  # the white cap already existed: reused
+    status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+    assert status[the_set] is True  # its stock counted sets: not handed to a piece

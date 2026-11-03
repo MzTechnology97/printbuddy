@@ -528,6 +528,31 @@ describe('FarmProductGate', () => {
     );
   });
 
+  it('warns when no plate holds a whole set, and splits it into a kit after confirming', async () => {
+    const user = userEvent.setup();
+    let sent: unknown;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const recipe = [
+      { shape_id: 1, shape: 'Base', quantity: 2 },
+      { shape_id: 2, shape: 'Cornice', quantity: 2 },
+    ];
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () =>
+        HttpResponse.json({ ...view, kind: 'set', parts: [{ ...view.parts[1], code: 'C-0140', shape_id: null, recipe }] }),
+      ),
+      http.put('/api/v1/farm/products/65/kind', async ({ request }) => {
+        sent = await request.json();
+        return HttpResponse.json({ project_id: 65, kind: 'kit' });
+      }),
+    );
+    sheet(65);
+    expect(await screen.findByText(/No plate holds every piece of the set/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Kit of parts printed apart' }));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('The set code C-0140 is retired'));
+    await waitFor(() => expect(sent).toEqual({ kind: 'kit' }));
+    confirm.mockRestore();
+  });
+
   it('keeps the upstream panels for normal projects', async () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),
