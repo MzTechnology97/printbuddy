@@ -172,6 +172,102 @@ async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_
     assert files == [gcode.id, gcode.id]
 
 
+@pytest.mark.asyncio
+async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_session, farm):
+    a1_two = farm["printers"][1]
+    farm["snapshot"][1].update(idle=False, loaded=[{"type": "PLA", "color": "ffffff"}])  # busy, white loaded
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={"jobs": [{"component_code": farm["code"], "plate_ids": farm["plates"], "printer_id": a1_two}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["state"] == "pending"  # in the printer's queue right away, no tick needed
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
+    assert job.plate_ids == [farm["plates"][0]]  # only the A1 plate
+    # No black spool loaded: queued anyway, started by hand after loading it.
+    assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_two, True, None)
+    assert "Check the Nero spool on A1 due" in job.note
+
+    # A printer of a model without a plate is refused.
+    bad = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "printer_id": farm["printers"][2]}
+            ]
+        },
+    )
+    assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client, db_session, farm):
+    """Two 3MF for the same printer, PLA and PETG: black PETG is loaded, so the PETG one goes."""
+    a1_two = farm["printers"][1]
+    pla = await db_session.get(FarmPlate, farm["plates"][0])
+    petg = FarmPlate(library_file_id=60, plate_index=1, printer_model="A1", materials=["PETG"])
+    petg.status = "confirmed"
+    petg.yields = [FarmPlateYield(object_name="sopra", quantity=12, shape_id=pla.yields[0].shape_id)]
+    db_session.add(petg)
+    await db_session.commit()
+    farm["snapshot"][1].update(idle=False, loaded=[{"type": "PETG", "color": "141414"}])
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={"jobs": [{"component_code": farm["code"], "plate_ids": [pla.id, petg.id], "printer_id": a1_two}]},
+    )
+    assert r.status_code == 200, r.text
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
+    assert (job.plate_id, job.pieces, item.manual_start) == (petg.id, 12, False)
+    assert json.loads(item.filament_overrides)[0]["color"] == "#141414"
+
+
+@pytest.mark.asyncio
+async def test_klipper_without_cfs_uses_the_spool_set_by_hand(async_client, db_session, farm):
+    from backend.app.models.printer import Printer
+
+    a1_one = farm["printers"][0]
+    (await db_session.get(Printer, a1_one)).provider = "klipper"
+    await db_session.commit()
+    farm["snapshot"][0]["loaded"] = []  # single spool: nothing reported
+    farm["snapshot"][1]["idle"] = False
+
+    spools = (await async_client.get(f"{API}/printer-spools")).json()
+    assert [(s["name"], s["material"]) for s in spools] == [("A1 uno", None)]  # Bambu printers aren't listed
+    r = await async_client.put(f"{API}/printer-spools/{a1_one}", json={"material": "pla", "color_name": "Nero"})
+    assert r.json() == {"printer_id": a1_one, "material": "PLA", "color_name": "Nero", "color": "111111"}
+    assert (
+        await async_client.put(f"{API}/printer-spools/{a1_one}", json={"material": "PLA", "color_name": "Viola?"})
+    ).status_code == 422
+    assert (
+        await async_client.put(
+            f"{API}/printer-spools/{farm['printers'][2]}", json={"material": "PLA", "color_name": "Nero"}
+        )
+    ).status_code == 404
+
+    await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    # Black PLA said to be loaded: it starts by itself after the plate-clear OK, nothing forced on the status.
+    assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_one, False, None)
+
+    assert (await async_client.delete(f"{API}/printer-spools/{a1_one}")).status_code == 200
+    assert (await async_client.get(f"{API}/printer-spools")).json()[0]["material"] is None
+
+
+@pytest.mark.asyncio
+async def test_chosen_printer_waits_for_the_slice(async_client, db_session, farm):
+    p1s = farm["printers"][2]
+    r = await async_client.post(
+        f"{API}/jobs", json={"jobs": [{"component_code": farm["code"], "plate_ids": farm["plates"], "printer_id": p1s}]}
+    )
+    job = r.json()[0]
+    assert (job["state"], job["printer_id"]) == ("waiting", p1s)
+    assert "being sliced" in (await db_session.get(FarmPrintJob, job["id"])).note
+    assert (await db_session.execute(select(PrintQueueItem))).first() is None
+
+
 async def test_klipper_gcode_follows_a_new_slice_of_the_output(db_session, tmp_path, monkeypatch):
     """An output sliced again keeps its row: the extracted G-code is refreshed in its own row too."""
     import hashlib

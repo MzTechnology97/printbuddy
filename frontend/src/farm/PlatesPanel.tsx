@@ -23,7 +23,12 @@ type Show = 'todo' | 'confirmed' | 'all';
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 
 /** The plate's preview from the 3MF (``Metadata/plate_N.png``); a click opens the 3MF in the 3D viewer. */
-function PlateThumb({ plate, fileName }: { plate: FarmPlateDetail; fileName: string }) {
+export function PlateThumb({ fileId, plateIndex, fileName, className = 'w-full sm:w-32 h-32' }: {
+  fileId: number;
+  plateIndex: number;
+  fileName: string;
+  className?: string;
+}) {
   const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
@@ -32,15 +37,15 @@ function PlateThumb({ plate, fileName }: { plate: FarmPlateDetail; fileName: str
       <button
         type="button"
         title={t('farm.plates.open3d')}
-        aria-label={`${t('farm.plates.open3d')} ${t('farm.plates.plate', { index: plate.plate_index })}`}
+        aria-label={`${t('farm.plates.open3d')} ${t('farm.plates.plate', { index: plateIndex })}`}
         onClick={() => setOpen(true)}
-        className="w-full sm:w-32 h-32 rounded bg-bambu-dark-secondary shrink-0 flex items-center justify-center text-sm text-bambu-gray hover:ring-2 hover:ring-bambu-green"
+        className={`${className} rounded bg-bambu-dark-secondary shrink-0 flex items-center justify-center text-sm text-bambu-gray hover:ring-2 hover:ring-bambu-green`}
       >
         {failed ? (
           t('farm.plates.view3d')
         ) : (
           <img
-            src={api.getLibraryFilePlateThumbnail(plate.library_file_id, plate.plate_index)}
+            src={api.getLibraryFilePlateThumbnail(fileId, plateIndex)}
             alt=""
             loading="lazy"
             className="w-full h-full object-contain rounded"
@@ -49,7 +54,7 @@ function PlateThumb({ plate, fileName }: { plate: FarmPlateDetail; fileName: str
         )}
       </button>
       {open && (
-        <ModelViewerModal libraryFileId={plate.library_file_id} title={fileName} fileType="3mf" onClose={() => setOpen(false)} />
+        <ModelViewerModal libraryFileId={fileId} title={fileName} fileType="3mf" onClose={() => setOpen(false)} />
       )}
     </>
   );
@@ -110,7 +115,7 @@ function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
 
   return (
     <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
-      <PlateThumb plate={plate} fileName={fileName} />
+      <PlateThumb fileId={plate.library_file_id} plateIndex={plate.plate_index} fileName={fileName} />
       <div className="flex-1 min-w-0 space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-white">

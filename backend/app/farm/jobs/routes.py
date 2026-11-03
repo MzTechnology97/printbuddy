@@ -28,6 +28,7 @@ RECENT = timedelta(days=2)
 class JobIn(BaseModel):
     component_code: str = Field(min_length=1, max_length=12)
     plate_ids: list[int] = Field(min_length=1, max_length=50)
+    printer_id: int | None = None  # None: the first free printer that fits
 
 
 class JobsIn(BaseModel):
@@ -55,7 +56,9 @@ def _job_dict(job: FarmPrintJob, item_status: str | None, printer: str | None) -
 @router.post("/jobs", dependencies=[_create])
 async def create_jobs(data: JobsIn, db: AsyncSession = Depends(get_db)) -> list[dict]:
     jobs = await service.create_jobs(db, [j.model_dump() for j in data.jobs])
-    return [_job_dict(j, None, None) for j in jobs]
+    if any(j.printer_id for j in jobs):
+        await service.dispatch_once(db)  # a chosen printer's queue gets it now, not at the next tick
+    return [_job_dict(j, "pending" if j.status == "queued" else None, None) for j in jobs]
 
 
 @router.get("/jobs", dependencies=[_read])

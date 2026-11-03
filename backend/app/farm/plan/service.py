@@ -20,10 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.products.models import FarmComponent, FarmShape
+from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.printer import Printer
+from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
 from backend.app.services.printer_manager import printer_manager
 
@@ -150,6 +152,17 @@ def printer_snapshot(printers: list[Printer]) -> list[dict]:
     return out
 
 
+async def with_spools_set_by_hand(db: AsyncSession, snapshot: list[dict]) -> list[dict]:
+    """Printers reporting no filament (Klipper without CFS) get the spool the user said is on them."""
+    spools = {s.printer_id: s for s in (await db.execute(select(FarmPrinterSpool))).scalars()}
+    return [
+        {**p, "loaded": [{"type": spools[p["id"]].material, "color": spools[p["id"]].color}], "by_hand": True}
+        if p["id"] in spools and not p["loaded"]
+        else p
+        for p in snapshot
+    ]
+
+
 def printer_fit(printer: dict, materials: list[str], color_hex: str | None, tolerance: int) -> dict:
     """Is the plate's material loaded, and a spool of the component's colour in that material?"""
     wanted = {_canonical_filament_type(m) for m in materials if m}
@@ -173,6 +186,7 @@ def printer_fit(printer: dict, materials: list[str], color_hex: str | None, tole
         "idle": printer["idle"],
         "material_ok": material_ok,
         "color_ok": color_ok,
+        "by_hand": printer.get("by_hand", False),
     }
 
 
@@ -213,9 +227,25 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
         ).all()
     )
     shape_names = dict((await db.execute(select(FarmShape.id, FarmShape.name))).all())
+    # The products using each component, colour variants included (a variant takes the component of each
+    # shaped part in its colour): their names and covers help tell the piece apart from its title.
+    by_shape = {(c.shape_id, (c.color or "").lower()): c.id for c in ours.values() if c.shape_id}
+    used_in: dict[int, list[dict]] = {}
+    for product, name, cover, component_id, shape_id in await db.execute(
+        select(FarmProduct, Project.name, Project.cover_image_filename, FarmComponent.id, FarmComponent.shape_id)
+        .join(FarmProductPart, FarmProductPart.project_id == FarmProduct.project_id)
+        .join(FarmComponent, FarmComponent.id == FarmProductPart.component_id)
+        .join(Project, Project.id == FarmProduct.project_id)
+        .order_by(Project.cover_image_filename.is_(None), Project.name)
+    ):
+        entry = {"project_id": product.project_id, "name": name, "has_cover": bool(cover)}
+        variants = {by_shape.get((shape_id, (v.get("color") or "").lower())) for v in product.variants or []}
+        for target in ({component_id} | (variants if shape_id else set())) - {None}:
+            if entry not in used_in.setdefault(target, []):
+                used_in[target].append(entry)
     resolver = await PrinterModelResolver.load(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
-    printers = printer_snapshot(active)
+    printers = await with_spools_set_by_hand(db, printer_snapshot(active))
     queued = queued or {}
 
     rows = []
@@ -270,6 +300,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None) -> 
                 "shape": shape_names.get(comp.shape_id) if comp and comp.shape_id else None,
                 "shape_id": comp.shape_id if comp else None,
                 "known": comp is not None,
+                "products": used_in.get(comp.id, []) if comp else [],
                 "in_queue": in_queue,
                 "missing": max(0, c["to_print"] - in_queue),
                 "plates": options,
