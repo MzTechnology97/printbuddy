@@ -30,8 +30,10 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
   const [component, setComponent] = useState('');
   const [quantity, setQuantity] = useState(piece.quantity != null ? String(piece.quantity) : '');
   const [imageFailed, setImageFailed] = useState(false);
-  const linked = piece.component != null;
-  const hex = piece.component?.color_hex || colors[color.toLowerCase()] || null;
+  const isSet = data.kind === 'set';
+  const linked = piece.component != null || (isSet && data.set != null);
+  const qtyLabel = t(isSet ? 'farm.productPieces.perSetInput' : 'farm.productPieces.perProduct');
+  const hex = piece.component?.color_hex || data.set?.color_hex || colors[color.toLowerCase()] || null;
 
   const save = useMutation({
     mutationFn: () =>
@@ -91,7 +93,8 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
           {linked ? (
             <span className="text-bambu-gray flex items-center gap-1">
               {hex && <span aria-hidden className="w-3 h-3 rounded-full border border-bambu-gray/60" style={{ background: `#${hex}` }} />}
-              <span className="font-mono text-bambu-green">{piece.component!.code}</span> {piece.component!.name}
+              <span className="font-mono text-bambu-green">{(piece.component ?? data.set)!.code}</span>{' '}
+              {(piece.component ?? data.set)!.name}
             </span>
           ) : (
             <>
@@ -102,7 +105,7 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
                   <option key={c} value={capitalize(c)}>{capitalize(c)}</option>
                 ))}
               </select>
-              {data.unshaped_parts.length > 0 && (
+              {!isSet && data.unshaped_parts.length > 0 && (
                 <select aria-label={`${t('farm.productPieces.component')} ${label}`} className={`${INPUT} max-w-full`}
                   value={component} onChange={(e) => setComponent(e.target.value)}>
                   <option value="">{t('farm.productPieces.newComponent')}</option>
@@ -114,8 +117,8 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
             </>
           )}
           <label className="flex items-center gap-1 text-bambu-gray">
-            {t('farm.productPieces.perProduct')}
-            <input type="number" min={0} max={1000} aria-label={`${t('farm.productPieces.perProduct')} ${label}`}
+            {qtyLabel}
+            <input type="number" min={0} max={1000} aria-label={`${qtyLabel} ${label}`}
               className={`${INPUT} w-20`} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
           </label>
           <Button size="sm" disabled={quantity === '' || (!piece.shape_id && !name.trim()) || save.isPending}

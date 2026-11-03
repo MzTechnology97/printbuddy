@@ -269,3 +269,89 @@ async def test_product_leaves_a_3mf_out(async_client, tmp_path):
     assert [p["id"] for p in back] == lid_plates  # kept, as they were before the exclusion
     assert [y["object_name"] for y in back[0]["yields"]] == ["Lid"]
     assert (await async_client.put(f"{API}/products/{pid}/files/999999", json={"excluded": True})).status_code == 404
+
+
+async def test_product_printed_as_a_set(async_client, tmp_path):
+    """A set has one component; plates yield complete sets (4 tops + 3 bottoms = 3 sets)."""
+    top, bottom = box(10, 20, 5), box(30, 30, 2)
+    nas = tmp_path / "nas"
+    make_mesh_project(
+        nas / "Set" / "set.3mf",
+        {
+            1: [("Top", top, None)] * 4 + [("Bottom", bottom, None)] * 4,
+            2: [("Top", top, None)] * 4 + [("Bottom", bottom, None)] * 3,
+        },
+    )
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    file_id = (await async_client.get(f"{API}/library/files")).json()[0]["library_file_id"]
+    set_folder = (await async_client.get(f"/api/v1/library/files/{file_id}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Tartufi"})).json()["project_id"]
+    await async_client.put(f"{API}/folders/{set_folder}/projects", json={"project_ids": [pid]})
+
+    r = await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})
+    assert r.json() == {"project_id": pid, "kind": "set"}
+    pieces = {p["names"][0]: p for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]}
+    codes = set()
+    for name in ("Top", "Bottom"):
+        r = await async_client.put(
+            f"{API}/products/{pid}/pieces",
+            json={"yield_ids": pieces[name]["yield_ids"], "quantity": 1, "shape_name": name, "color": "Nero"},
+        )
+        codes.add(r.json()["component_code"])
+    assert len(codes) == 1  # one component: the set
+    code = codes.pop()
+
+    body = (await async_client.get(f"{API}/products/{pid}/pieces")).json()
+    assert (body["kind"], body["set"]["code"], body["unshaped_parts"]) == ("set", code, [])
+    assert {p["names"][0]: (p["quantity"], p["component"]["code"]) for p in body["pieces"]} == {
+        "Top": (1, code),
+        "Bottom": (1, code),
+    }
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert [(p["code"], p["quantity"], sorted(x["yield"] for x in p["plates"])) for p in view["parts"]] == [
+        (code, 1, [3, 4])
+    ]
+    assert sorted(r["quantity"] for r in view["parts"][0]["recipe"]) == [1, 1]
+    contract = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["project_id"] == pid)
+    assert contract["kind"] == "set"
+    assert sorted(x["yield"] for x in contract["parts"][0]["plates"]) == [3, 4]
+
+    # Two tops per set: plate 1 gives 2 sets, plate 2 gives 2.
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces", json={"yield_ids": pieces["Top"]["yield_ids"], "quantity": 2}
+    )
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert sorted(x["yield"] for x in view["parts"][0]["plates"]) == [2, 2]
+    r = await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "kit"})
+    assert r.status_code == 409  # two pieces in the set
+
+
+async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client):
+    shapes = [(await async_client.post(f"{API}/shapes", json={"name": n})).json()["id"] for n in ("SX", "DX")]
+    comps = [
+        (await async_client.post(f"{API}/components", json={"shape_id": s, "color": "Nero"})).json()["code"]
+        for s in shapes
+    ]
+    r = await async_client.post(
+        f"{API}/products",
+        json={"name": "Coppia", "parts": [{"component_code": comps[0]}, {"component_code": comps[1]}]},
+    )
+    pid = r.json()["project_id"]
+    other = await async_client.post(
+        f"{API}/products", json={"name": "Solo DX", "parts": [{"component_code": comps[1]}]}
+    )
+    assert other.status_code == 200
+
+    assert (await async_client.put(f"{API}/products/{pid}/kind", json={"kind": "set"})).status_code == 200
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    # The first code is kept; both shapes go into the set.
+    assert [(p["code"], p["quantity"], p["shape_id"]) for p in view["parts"]] == [(comps[0], 1, None)]
+    recipe = sorted((r["shape_id"], r["quantity"]) for r in view["parts"][0]["recipe"])
+    assert recipe == [(shapes[0], 1), (shapes[1], 1)]
+    status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+    assert status[comps[1]] is False  # still used by "Solo DX"
+    # A component Seller Hub knows can't be given a single shape back by mistake.
+    r = await async_client.patch(f"{API}/components/{comps[0]}", json={"shape_id": shapes[0]})
+    assert r.status_code == 422

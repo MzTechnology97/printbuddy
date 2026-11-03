@@ -37,7 +37,7 @@ from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.service import _latest_slices
 from backend.app.farm.products.folders import excluded_files
-from backend.app.farm.products.models import FarmComponent
+from backend.app.farm.products.models import FarmComponent, component_yield
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
@@ -55,11 +55,7 @@ _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when 
 
 
 def _pieces(plate: FarmPlate, comp: FarmComponent) -> int:
-    return sum(
-        y.quantity
-        for y in plate.yields
-        if (comp.shape_id and y.shape_id == comp.shape_id) or (not comp.shape_id and y.component_code == comp.code)
-    )
+    return component_yield(comp, plate.yields)
 
 
 async def sliced_file(db: AsyncSession, plate: FarmPlate) -> LibraryFile | None:

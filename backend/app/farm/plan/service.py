@@ -24,7 +24,14 @@ from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.products.folders import excluded_files
-from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
+from backend.app.farm.products.models import (
+    FarmComponent,
+    FarmProduct,
+    FarmProductPart,
+    FarmShape,
+    component_shapes,
+    component_yield,
+)
 from backend.app.models.printer import Printer
 from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
@@ -222,7 +229,9 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         .all()
     }
     plates = await _confirmed_plates(
-        db, {c.shape_id for c in ours.values() if c.shape_id}, {c.code for c in ours.values() if not c.shape_id}
+        db,
+        {s for c in ours.values() for s in component_shapes(c)},
+        {c.code for c in ours.values() if not component_shapes(c)},
     )
     paths = dict(
         (
@@ -262,15 +271,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         color_hex = config["colors"].get((comp.color or "").lower()) if comp and comp.color else None
         options = []
         for plate in plates:
-            pieces = sum(
-                y.quantity
-                for y in plate.yields
-                if comp
-                and (
-                    (comp.shape_id and y.shape_id == comp.shape_id)
-                    or (not comp.shape_id and y.component_code == comp.code)
-                )
-            )
+            pieces = component_yield(comp, plate.yields) if comp else 0
             if not pieces:
                 continue
             model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""

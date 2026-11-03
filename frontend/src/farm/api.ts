@@ -44,7 +44,10 @@ export interface FarmComponent {
   shape: string | null;
   color: string | null;
   retired: boolean;
+  recipe?: { shape_id: number; shape: string | null; quantity: number }[] | null; // a set printed together
 }
+
+export type FarmProductKind = 'set' | 'kit' | null;
 
 export interface FarmPlateSummary {
   id: number;
@@ -87,6 +90,7 @@ export interface FarmLibraryFileState {
 
 export interface FarmProductView {
   project_id: number;
+  kind: FarmProductKind;
   skus: string[];
   asins: string[];
   parts: (FarmComponent & {
@@ -228,6 +232,8 @@ export interface FarmProductPiece {
 }
 
 export interface FarmProductPieces {
+  kind: FarmProductKind;
+  set: { code: string; name: string; color: string | null; color_hex: string | null } | null;
   default_color: string | null;
   unshaped_parts: { code: string; name: string; quantity: number }[];
   pieces: FarmProductPiece[];
@@ -342,6 +348,11 @@ export const farmApi = {
       { method: 'PUT', body: JSON.stringify({ excluded }) },
     ),
   getProductPieces: (projectId: number) => farmRequest<FarmProductPieces>(`/products/${projectId}/pieces`),
+  setProductKind: (projectId: number, kind: 'set' | 'kit') =>
+    farmRequest<{ project_id: number; kind: FarmProductKind }>(`/products/${projectId}/kind`, {
+      method: 'PUT',
+      body: JSON.stringify({ kind }),
+    }),
   setProductPiece: (projectId: number, data: FarmProductPieceInput) =>
     farmRequest<{ shape_id: number | null; component_code: string | null; quantity: number; plates_confirmed: number }>(
       `/products/${projectId}/pieces`,

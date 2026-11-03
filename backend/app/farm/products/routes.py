@@ -28,9 +28,16 @@ from backend.app.core.auth import (
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.plates.models import FarmPlateYield
-from backend.app.farm.plates.service import plates_by_component, plates_by_shape
+from backend.app.farm.plates.service import plates_for
 from backend.app.farm.products.folders import linked_project_ids, set_linked_projects
-from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
+from backend.app.farm.products.models import (
+    FarmComponent,
+    FarmProduct,
+    FarmProductPart,
+    FarmShape,
+    component_shapes,
+    component_yield,
+)
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.print_queue import PrintQueueItem
@@ -156,12 +163,12 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
     parts_by_product: dict[int, list[FarmProductPart]] = {}
     for part in (await db.execute(select(FarmProductPart).order_by(FarmProductPart.sort_order))).scalars():
         parts_by_product.setdefault(part.project_id, []).append(part)
-    # Plates yield shapes, so a component (shape + colour) gets every plate of its shape.
-    by_shape = await plates_by_shape(db, [c.shape_id for c in components.values() if c.shape_id])
-    by_code = await plates_by_component(db, [c.code for c in components.values() if not c.shape_id])
+    # Plates yield shapes, so a component (shape + colour) gets every plate of its shape; a set, its sets.
+    used = {p.component_id for parts in parts_by_product.values() for p in parts}
+    by_component = await plates_for(db, [c for c in components.values() if c.id in used or c.shape_id])
 
     def plates(c: FarmComponent) -> list[dict]:
-        return by_shape.get(c.shape_id, []) if c.shape_id else by_code.get(c.code, [])
+        return by_component.get(c.id, [])
 
     def line(c: FarmComponent, quantity: int) -> dict:
         # Confirmed plates (file × printer model × material) and their yield of this component.
@@ -178,7 +185,11 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
         variants = []
         for i, v in enumerate(product.variants or [], start=1):
             color = v.get("color")
-            resolved = [colored.get((c.shape_id, color.casefold())) if color and c.shape_id else c for c, _ in own]
+            # shortcut: a set has no component per colour yet, so its variants get no parts; add set colours if sold.
+            resolved = [
+                (colored.get((c.shape_id, color.casefold())) if c.shape_id else None if c.recipe else c) if color else c
+                for c, _ in own
+            ]
             variants.append(
                 {
                     "key": f"{project.id}:{i}",
@@ -199,6 +210,7 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "name": project.name,
                 "skus": product.skus or [],
                 "asins": product.asins or [],
+                "kind": product.kind,
                 "updated_at": serialize_utc_datetime(max(product.updated_at, project.updated_at)),
                 "parts": [line(c, q) for c, q in own],
                 "variants": variants,
@@ -222,6 +234,13 @@ def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
         "shape": shapes.get(c.shape_id) if c.shape_id else None,
         "color": c.color,
         "retired": c.retired_at is not None,
+        # A set printed together: its pieces per set.
+        "recipe": [
+            {"shape_id": r["shape_id"], "shape": shapes.get(r["shape_id"]), "quantity": r["quantity"]}
+            for r in c.recipe
+        ]
+        if c.recipe
+        else None,
     }
 
 
@@ -262,8 +281,8 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         )
     ).all()
     shapes = await _shape_names(db)
-    shape_ids = {c.shape_id for _, c in parts if c.shape_id}
-    codes = {c.code for _, c in parts if not c.shape_id}
+    shape_ids = {s for _, c in parts for s in component_shapes(c)}
+    codes = {c.code for _, c in parts if not component_shapes(c)}
     plates = list(
         (
             await db.execute(
@@ -314,11 +333,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     def plates_of(c: FarmComponent) -> list[dict]:
         out = []
         for p in plates:
-            pieces = sum(
-                y.quantity
-                for y in p.yields
-                if (c.shape_id and y.shape_id == c.shape_id) or (not c.shape_id and y.component_code == c.code)
-            )
+            pieces = component_yield(c, p.yields)
             if pieces:
                 out.append(
                     {
@@ -338,6 +353,7 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
 
     return {
         "project_id": project_id,
+        "kind": product.kind,
         "skus": product.skus or [],
         "asins": product.asins or [],
         "parts": [
@@ -615,6 +631,8 @@ async def update_component(code: str, data: ComponentUpdate, db: AsyncSession = 
     if data.retired is not None:
         component.retired_at = (component.retired_at or _now()) if data.retired else None
     shapes = await _shape_names(db)
+    if component.recipe and data.shape_id is not None:
+        raise HTTPException(422, "A set has no single shape: set its pieces from the product page")
     if {"shape_id", "color"} & data.model_fields_set:
         shape_id = data.shape_id if "shape_id" in data.model_fields_set else component.shape_id
         color = component.color

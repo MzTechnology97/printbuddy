@@ -5,6 +5,9 @@ the 3MF files of the product's linked folders, each with a picture of the piece 
 "how many per product" links the piece to a shape everywhere, gets the component of that shape
 in the product's colour (an existing one without a shape can take it, keeping its code) and
 sets the product's part.
+
+A product printed and sold as a set (``kind == "set"``) has one component, the set: "how many
+per set" goes into its recipe instead, and plates yield complete sets.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import asyncio
 import hashlib
 import os
 from collections import Counter
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -33,6 +37,7 @@ from backend.app.farm.products import routes as products
 from backend.app.farm.products.folders import excluded_by, project_folders
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.library import LibraryFile
+from backend.app.models.project import Project
 
 router = APIRouter(tags=["farm"])  # mounted under /farm by the products router
 
@@ -51,15 +56,89 @@ async def _parts(db: AsyncSession, project_id: int) -> list[tuple[FarmProductPar
                 select(FarmProductPart, FarmComponent)
                 .join(FarmComponent, FarmComponent.id == FarmProductPart.component_id)
                 .where(FarmProductPart.project_id == project_id)
+                .order_by(FarmProductPart.sort_order)
             )
         ).all()
     )
 
 
+async def _used_elsewhere(db: AsyncSession, component_id: int, project_id: int) -> bool:
+    return bool(
+        await db.scalar(
+            select(func.count())
+            .select_from(FarmProductPart)
+            .where(FarmProductPart.component_id == component_id, FarmProductPart.project_id != project_id)
+        )
+    )
+
+
+async def _make_set(db: AsyncSession, product: FarmProduct, project: Project) -> FarmComponent | None:
+    """Turn the product's parts into one set component; None when it has no parts yet.
+
+    The first part only this product uses keeps its code (Seller Hub's stock stays on it); the
+    shapes of every part go into its recipe with their quantities; the other parts leave the
+    product, and components no other product uses are retired.
+    """
+    parts = await _parts(db, product.project_id)
+    if not parts:
+        return None
+    if keep := next((c for p, c in parts if c.recipe is not None), None):
+        return keep  # already a set
+    recipe: dict[int, int] = {}
+    for part, comp in parts:
+        for shape_id in products.component_shapes(comp):
+            recipe[shape_id] = recipe.get(shape_id, 0) + part.quantity
+    own = [(p, c) for p, c in parts if not await _used_elsewhere(db, c.id, product.project_id)]
+    if own:
+        keep_part, keep = own[0]
+    else:
+        keep = FarmComponent(code=await products._next_code(db), name=project.name[:200], color=parts[0][1].color)
+        db.add(keep)
+        await db.flush()
+        keep_part = FarmProductPart(project_id=product.project_id, component_id=keep.id, sort_order=0)
+        db.add(keep_part)
+    keep.recipe = [{"shape_id": s, "quantity": q} for s, q in recipe.items()]
+    keep.shape_id = None
+    keep_part.quantity = 1
+    for part, comp in parts:
+        if comp.id == keep.id:
+            continue
+        await db.delete(part)
+        if not await _used_elsewhere(db, comp.id, product.project_id):
+            comp.retired_at = comp.retired_at or products._now()
+    return keep
+
+
+class KindIn(BaseModel):
+    kind: Literal["set", "kit"]
+
+
+@router.put("/products/{project_id}/kind", dependencies=[products._update])
+async def set_kind(project_id: int, data: KindIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Printed and sold as a set (one component, pieces per set) or as a kit (parts printed apart)."""
+    product = await _product(db, project_id)
+    if data.kind == "set":
+        await _make_set(db, product, await db.get(Project, project_id))
+    elif any(c.recipe and len(c.recipe) > 1 for _, c in await _parts(db, project_id)):
+        raise HTTPException(409, "This set has several pieces: make each one a part before calling it a kit")
+    else:
+        for part, comp in await _parts(db, project_id):
+            if comp.recipe:  # a set of one piece: back to that shape x its quantity
+                shape_id, quantity = comp.recipe[0]["shape_id"], comp.recipe[0]["quantity"]
+                await products._check_shape(db, await products._shape_names(db), shape_id, comp.color, comp.code)
+                comp.shape_id, comp.recipe, part.quantity = shape_id, None, quantity
+            elif comp.recipe == []:
+                comp.recipe = None
+    product.kind = data.kind
+    product.updated_at = products._now()
+    await db.commit()
+    return {"project_id": project_id, "kind": product.kind}
+
+
 @router.get("/products/{project_id}/pieces", dependencies=[products._read])
 async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
     """Distinct pieces in the 3MF projects of the product's folders, with their part in the product."""
-    await _product(db, project_id)
+    product = await _product(db, project_id)
     folders = await project_folders(db, project_id)
     files = dict(
         (
@@ -81,9 +160,18 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
     ).all()
     rows = [r for r in rows if r[0].fingerprint]  # filtered before grouping: same pieces as the Pieces tab
     parts = await _parts(db, project_id)
+    set_comp = next((c for _, c in parts if c.recipe is not None), None) if product.kind == "set" else None
     by_shape = {c.shape_id: (part, c) for part, c in parts if c.shape_id}
     shapes = await products._shape_names(db)
     colors = (await plan.load_config(db))["colors"]
+
+    def comp_dict(comp: FarmComponent | None) -> dict | None:
+        if comp is None:
+            return None
+        hex_ = colors.get((comp.color or "").lower())
+        return {"code": comp.code, "name": comp.name, "color": comp.color, "color_hex": hex_}
+
+    per_set = {r["shape_id"]: r["quantity"] for r in (set_comp.recipe or [])} if set_comp else {}
     resolver = await PrinterModelResolver.load(db)
     product_colors = Counter(c.color for _, c in parts if c.color)
 
@@ -94,6 +182,8 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
         shape_counts = Counter(y.shape_id for y, _, _ in items if y.shape_id is not None)
         shape_id = shape_counts.most_common(1)[0][0] if shape_counts else None
         part, comp = by_shape.get(shape_id, (None, None))
+        if product.kind == "set":
+            part, comp = None, set_comp if shape_id in per_set else None
         models = {resolver.resolve(m).target_model or m for _, _, m in items if m}
         pieces.append(
             {
@@ -109,15 +199,8 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
                 "shape": shapes.get(shape_id) if shape_id else None,
                 "mixed": len(shape_counts) > 1,
                 "suggested_shape_id": None,
-                "quantity": part.quantity if part else None,
-                "component": None
-                if comp is None
-                else {
-                    "code": comp.code,
-                    "name": comp.name,
-                    "color": comp.color,
-                    "color_hex": colors.get((comp.color or "").lower()),
-                },
+                "quantity": per_set.get(shape_id) if product.kind == "set" else part.quantity if part else None,
+                "component": comp_dict(comp),
             }
         )
     open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
@@ -127,12 +210,14 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
             p["suggested_shape_id"] = next((proposals[n] for n in p["names"] if n in proposals), None)
     pieces.sort(key=lambda p: (p["quantity"] is not None, -p["plates"]))  # still to decide first
     return {
+        "kind": product.kind,
+        "set": comp_dict(set_comp),
         "default_color": product_colors.most_common(1)[0][0] if product_colors else None,
         # Parts imported without a shape (whole products from Seller Hub): a piece can take one of them.
         "unshaped_parts": [
             {"code": c.code, "name": c.name, "quantity": part.quantity}
             for part, c in parts
-            if c.shape_id is None and c.retired_at is None
+            if c.shape_id is None and c.recipe is None and c.retired_at is None and product.kind != "set"
         ],
         "pieces": pieces,
     }
@@ -218,6 +303,28 @@ async def set_product_piece(project_id: int, data: ProductPieceIn, db: AsyncSess
     await db.flush()
     plates = list((await db.execute(select(FarmPlate).where(FarmPlate.id.in_({y.plate_id for y in yields})))).scalars())
     confirmed = await link_by_geometry(db, plates)
+
+    if product.kind == "set":
+        project = await db.get(Project, project_id)
+        comp = await _make_set(db, product, project)
+        if comp is None:  # first piece of the set: its component, named as the product
+            color = products._clean(data.color or "", 50) or None
+            comp = FarmComponent(code=await products._next_code(db), name=project.name[:200], color=color, recipe=[])
+            db.add(comp)
+            await db.flush()
+            db.add(FarmProductPart(project_id=project_id, component_id=comp.id, quantity=1, sort_order=0))
+        recipe = [r for r in comp.recipe or [] if r["shape_id"] != shape_id]
+        if data.quantity:
+            recipe.append({"shape_id": shape_id, "quantity": data.quantity})
+        comp.recipe = recipe
+        product.updated_at = products._now()
+        await db.commit()
+        return {
+            "shape_id": shape_id,
+            "component_code": comp.code,
+            "quantity": data.quantity,
+            "plates_confirmed": confirmed,
+        }
 
     parts = await _parts(db, project_id)
     part, comp = next(((p, c) for p, c in parts if c.shape_id == shape_id), (None, None))
