@@ -12,7 +12,7 @@ import { server } from '../mocks/server';
 import { Route, Routes } from 'react-router-dom';
 import { FarmProductGate, ProductPage } from '../../farm/ProductProjectPanel';
 
-const part = { shape_id: 1, color: 'Nero', retired: false, quantity: 2 };
+const part = { shape_id: 1, color: 'Nero', retired: false, quantity: 2, used_by: [] as { project_id: number; name: string }[] };
 const view = {
   project_id: 65,
   name: 'Tappi Paraspifferi AMI',
@@ -342,7 +342,8 @@ describe('FarmProductGate', () => {
     await user.clear(qty);
     await user.type(qty, '4');
     await user.tab();
-    await user.click(screen.getAllByRole('button', { name: 'Remove' })[0]);
+    await user.click(screen.getByRole('button', { name: 'Remove C-0118' }));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('No other product uses it: it is retired'));
     await user.selectOptions(screen.getByLabelText('Add component'), 'C-0200'); // C-0118 is already in
     await user.click(screen.getByRole('button', { name: 'Add' }));
     await waitFor(() =>
@@ -448,6 +449,42 @@ describe('FarmProductGate', () => {
     await user.click(screen.getByRole('button', { name: 'Remove product' }));
     await waitFor(() => expect(sent).toEqual([['active', { active: true }], ['delete']]));
     await waitFor(() => expect(window.location.pathname).toBe('/farm/products'));
+    confirm.mockRestore();
+  });
+
+  it('takes a component or a wrong shape out of a set, saying what happens to the code', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const recipe = [
+      { shape_id: 1, shape: 'Tappo Bouchon porte', quantity: 2 },
+      { shape_id: 7, shape: 'Forma sbagliata', quantity: 1 },
+    ];
+    const setPart = {
+      ...view.parts[0],
+      shape_id: null,
+      recipe,
+      used_by: [{ project_id: 66, name: 'Tappi AMI bianchi' }],
+    };
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json({ ...view, kind: 'set', parts: [setPart] })),
+      http.put('/api/v1/farm/products/65/recipe/:shape', async ({ request, params }) => {
+        sent.push(['recipe', params.shape, await request.json()]);
+        return HttpResponse.json({ component_code: 'C-0118', recipe: [] });
+      }),
+      http.put('/api/v1/farm/products/65/parts/:code', async ({ request, params }) => {
+        sent.push(['part', params.code, await request.json()]);
+        return HttpResponse.json({});
+      }),
+    );
+    sheet(65);
+    await user.click(await screen.findByRole('button', { name: 'Take out of the set Forma sbagliata' }));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('Take Forma sbagliata out of the set?'));
+    await user.click(screen.getByRole('button', { name: 'Remove C-0118' }));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('It stays, because Tappi AMI bianchi also use it.'));
+    await waitFor(() =>
+      expect(sent).toEqual([['recipe', '7', { quantity: 0 }], ['part', 'C-0118', { quantity: 0 }]]),
+    );
     confirm.mockRestore();
   });
 

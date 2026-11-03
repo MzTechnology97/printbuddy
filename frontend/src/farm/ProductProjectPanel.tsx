@@ -58,6 +58,16 @@ function PartRow({ part, view, colors }: { part: Part; view: FarmProductView; co
   });
   const setQty = useMutation({ mutationFn: (q: number) => farmApi.setPart(view.project_id, part.code, q), ...done });
   const isSet = part.recipe != null;
+  const recipe = useMutation({
+    mutationFn: (shapeId: number) => farmApi.setRecipeEntry(view.project_id, shapeId, 0),
+    ...done,
+  });
+  const askRemove = () =>
+    window.confirm(
+      part.used_by.length
+        ? t('farm.project.removeKeepConfirm', { code: part.code, products: part.used_by.map((u) => u.name).join(', ') })
+        : t('farm.project.removeConfirm', { code: part.code }),
+    ) && setQty.mutate(0);
   const hex = part.color ? colors[part.color.toLowerCase()] ?? null : null;
   return (
     <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
@@ -82,26 +92,39 @@ function PartRow({ part, view, colors }: { part: Part; view: FarmProductView; co
             </select>
           </label>
           {!isSet && (
-            <>
-              <label className="flex items-center gap-1">
-                {t('farm.project.perUnit')}
-                <input type="number" min={1} max={1000} aria-label={`${t('farm.project.perUnit')} ${part.code}`}
-                  className={`${INPUT} w-20`} value={quantity} onChange={(e) => setQuantity(e.target.value)}
-                  onBlur={() => Number(quantity) >= 1 && Number(quantity) !== part.quantity && setQty.mutate(Number(quantity))} />
-              </label>
-              <Button size="sm" variant="secondary" disabled={setQty.isPending}
-                onClick={() => window.confirm(t('farm.project.removeConfirm', { code: part.code })) && setQty.mutate(0)}>
-                {t('farm.project.removePart')}
-              </Button>
-            </>
+            <label className="flex items-center gap-1">
+              {t('farm.project.perUnit')}
+              <input type="number" min={1} max={1000} aria-label={`${t('farm.project.perUnit')} ${part.code}`}
+                className={`${INPUT} w-20`} value={quantity} onChange={(e) => setQuantity(e.target.value)}
+                onBlur={() => Number(quantity) >= 1 && Number(quantity) !== part.quantity && setQty.mutate(Number(quantity))} />
+            </label>
           )}
+          <Button size="sm" variant="secondary" disabled={setQty.isPending} onClick={askRemove}
+            aria-label={`${t('farm.project.removePart')} ${part.code}`}>
+            {t('farm.project.removePart')}
+          </Button>
         </div>
         {isSet && part.recipe!.length > 0 && (
-          <p className="text-xs text-bambu-gray">
-            {t('farm.project.perSet', {
-              pieces: part.recipe!.map((r) => `${r.quantity}× ${r.shape ?? r.shape_id}`).join(' + '),
-            })}
-          </p>
+          <div className="space-y-1">
+            <p className="text-xs text-bambu-gray">
+              {t('farm.project.perSet', {
+                pieces: part.recipe!.map((r) => `${r.quantity}× ${r.shape ?? r.shape_id}`).join(' + '),
+              })}
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {part.recipe!.map((r) => (
+                <button key={r.shape_id} type="button" disabled={recipe.isPending}
+                  aria-label={`${t('farm.project.removeFromSet')} ${r.shape ?? r.shape_id}`}
+                  className="text-xs bg-bambu-dark-tertiary text-bambu-gray hover:text-red-400 rounded px-2 py-0.5"
+                  onClick={() =>
+                    window.confirm(t('farm.project.removeFromSetConfirm', { shape: r.shape ?? r.shape_id })) &&
+                    recipe.mutate(r.shape_id)
+                  }>
+                  × {r.shape ?? r.shape_id}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
         {part.plates.length === 0 ? (
           <p className="text-xs text-amber-400 flex items-center gap-1">

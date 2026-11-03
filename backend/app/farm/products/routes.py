@@ -346,6 +346,20 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
         counts.setdefault(file_id, {"proposed": 0, "confirmed": 0})[status] = n
     resolver = await PrinterModelResolver.load(db)
 
+    used_by: dict[int, list[dict]] = {}
+    for component_id, pid, name in (
+        await db.execute(
+            select(FarmProductPart.component_id, Project.id, Project.name)
+            .join(Project, Project.id == FarmProductPart.project_id)
+            .where(
+                FarmProductPart.component_id.in_([c.id for _, c in parts]),
+                FarmProductPart.project_id != project_id,
+            )
+            .order_by(Project.name)
+        )
+    ).all():
+        used_by.setdefault(component_id, []).append({"project_id": pid, "name": name})
+
     def plates_of(c: FarmComponent) -> list[dict]:
         out = []
         for p in plates:
@@ -380,6 +394,8 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
                 **_component_dict(c, shapes),
                 "quantity": part.quantity,
                 "plates": plates_of(c),
+                # Other products with this component: taking it out of this one then keeps it (not retired).
+                "used_by": used_by.get(c.id, []),
             }
             for part, c in parts
         ],

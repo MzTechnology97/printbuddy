@@ -431,6 +431,30 @@ async def component_image(code: str, db: AsyncSession = Depends(get_db)):
     return _png(await asyncio.to_thread(_side_by_side, pngs))
 
 
+class RecipeEntryIn(BaseModel):
+    quantity: int = Field(ge=0, le=products.QTY_MAX)  # pieces of the shape in one set; 0: out of the set
+
+
+@router.put("/products/{project_id}/recipe/{shape_id}", dependencies=[products._update])
+async def set_recipe_entry(
+    project_id: int, shape_id: int, data: RecipeEntryIn, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Change how many of a shape go in the product's set, or take a wrong shape out of it (0)."""
+    product = await _product(db, project_id)
+    comp = next((c for _, c in await _parts(db, project_id) if c.recipe is not None), None)
+    if comp is None:
+        raise HTTPException(404, "This product has no set")
+    recipe = [r for r in comp.recipe if r["shape_id"] != shape_id]
+    if data.quantity:
+        if shape_id not in await products._shape_names(db):
+            raise HTTPException(422, "Unknown shape")
+        recipe.append({"shape_id": shape_id, "quantity": data.quantity})
+    comp.recipe = recipe
+    product.updated_at = products._now()
+    await db.commit()
+    return {"component_code": comp.code, "recipe": comp.recipe}
+
+
 class PartQuantityIn(BaseModel):
     quantity: int = Field(ge=0, le=products.QTY_MAX)  # 0: out of the product
 
