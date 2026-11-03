@@ -2080,7 +2080,14 @@ class NotificationService:
             return False
         title, message = await self._build_message_from_template(db, event_type, dict(variables))
         # A Telegram bot that takes commands (telegram_bot) confirms the clear plate from the message.
-        buttons = [[("✅ Piatto libero", f"clear:{printer_id}")]] if event_type == "farm_plate_to_clear" else None
+        # The button carries when this printer's check was raised: one from an earlier finish is refused.
+        buttons = None
+        if event_type == "farm_plate_to_clear" and printer_id is not None:
+            from backend.app.services.printer_manager import printer_manager
+
+            raised = printer_manager.plate_clear_raised_at(printer_id)
+            if raised is not None:
+                buttons = [[("✅ Piatto libero", f"clear:{printer_id}:{int(raised)}")]]
         delivered = await self._send_to_providers(
             providers, title, message, db, event_type, printer_id, printer_name, variables=variables, buttons=buttons
         )

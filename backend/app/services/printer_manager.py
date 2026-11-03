@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import traceback
 from collections.abc import Callable
 
@@ -216,6 +217,9 @@ class PrinterManager:
         # Persisted to DB (printers.awaiting_plate_clear) so the gate survives restarts/power
         # cycles — see issue #961. Loaded into this set at startup via load_awaiting_plate_clear_from_db().
         self._awaiting_plate_clear: set[int] = set()
+        # fork: when each printer's gate was raised (epoch seconds; 0 for gates loaded at startup), so a
+        # Telegram "Piatto libero" button from an earlier finish can be refused (services/telegram_bot.py).
+        self._plate_clear_raised_at: dict[int, float] = {}
 
     def get_printer(self, printer_id: int) -> PrinterInfo | None:
         """Get printer info by ID."""
@@ -239,6 +243,12 @@ class PrinterManager:
         """
         return printer_id in self._awaiting_plate_clear
 
+    def plate_clear_raised_at(self, printer_id: int) -> float | None:
+        """When the plate-clear gate was raised (0: before this start); None when not awaiting."""
+        if printer_id not in self._awaiting_plate_clear:
+            return None
+        return self._plate_clear_raised_at.get(printer_id, 0.0)
+
     def set_awaiting_plate_clear(self, printer_id: int, awaiting: bool):
         """Set/clear the awaiting-plate-clear gate and persist it to DB.
 
@@ -260,8 +270,10 @@ class PrinterManager:
         """
         if awaiting:
             self._awaiting_plate_clear.add(printer_id)
+            self._plate_clear_raised_at[printer_id] = time.time()
         else:
             self._awaiting_plate_clear.discard(printer_id)
+            self._plate_clear_raised_at.pop(printer_id, None)
         # Only create the coroutine when there is a loop to run it on — otherwise Python
         # emits "coroutine was never awaited" warnings (e.g. in sync unit tests).
         if self._loop and self._loop.is_running():

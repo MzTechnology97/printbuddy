@@ -302,6 +302,7 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
           { key: 'message_thread_id', label: 'Topic / Thread ID', placeholder: 'Optional forum topic ID, e.g. 17585', type: 'text', required: false },
           { key: 'commands_enabled', label: 'Accept commands (/stato, /coda, /pausa…)', type: 'checkbox', required: false, helperText: 'The bot answers commands by long polling; only one Printbuddy may poll a bot' },
           { key: 'allowed_chat_ids', label: 'Allowed chat IDs', placeholder: 'Comma-separated; empty = the Chat ID above', type: 'text', required: false, showIf: (cfg: Record<string, string>) => cfg.commands_enabled === 'true' },
+          { key: 'allowed_user_ids', label: 'Allowed user IDs', placeholder: 'Comma-separated; empty = the private chats above', type: 'text', required: false, helperText: 'In a group only these users can give commands', showIf: (cfg: Record<string, string>) => cfg.commands_enabled === 'true' },
         ];
       case 'email':
         return [
