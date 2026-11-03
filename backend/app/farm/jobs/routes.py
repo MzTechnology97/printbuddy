@@ -67,7 +67,10 @@ def _job_dict(
     return {
         "id": job.id,
         "component_code": job.component_code,
-        "color": job.color,
+        # The batch's colour: the filament the printer fed when known, else the component's
+        "color": job.used_color or job.color,
+        "component_color": job.color,
+        "color_from_printer": job.used_color is not None,
         # waiting -> pending (in the queue, waiting for the plate-clear OK) -> printing -> completed/failed;
         # outside the queue: to_assign -> completed, or not_production
         "state": state,

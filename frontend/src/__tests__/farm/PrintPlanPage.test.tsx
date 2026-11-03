@@ -198,12 +198,17 @@ describe('PrintPlanPage', () => {
         created_at: '' },
       { id: 8, component_code: 'C-0121', color: 'Marrone', state: 'pending', note: null, plate_ids: [1], plate_id: 1,
         printer_id: 1, printer: 'A1 due', queue_item_id: 3, pieces: 15, created_at: '' },
+      { id: 11, component_code: 'C-0121', color: 'Nero', component_color: 'Marrone', color_from_printer: true,
+        state: 'printing', note: null, plate_ids: [1], plate_id: 1, printer_id: 1, printer: 'A1 uno', queue_item_id: 4,
+        pieces: 15, created_at: '' },
     ];
     const user = userEvent.setup();
     render(<PrintPlanPage />);
     expect(await screen.findByText('waiting for a printer')).toBeInTheDocument();
     expect(screen.getByText('A1 uno: no Marrone PLA loaded')).toBeInTheDocument();
     expect(screen.getByText('in the queue (confirm the plate is clear)')).toBeInTheDocument();
+    // The printer fed another colour than the component: the batch says so.
+    expect(screen.getByText('(printed in this colour: the component is Marrone)')).toBeInTheDocument();
     await user.click(screen.getAllByRole('button', { name: 'Cancel' })[0]);
     await waitFor(() => expect(cancelled).toBe('7'));
   });
