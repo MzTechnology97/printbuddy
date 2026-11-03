@@ -5,8 +5,10 @@ A new slice of a plate replaces the previous output: same library row, same file
 the printer gets it under the same name, replacing the old copy in its cache or storage. Plates
 then take time and grams from the new output.
 
-Only plates that already had an output are re-sliced. If the project is saved again while its
-re-slice runs, the job slices the newest version once more before finishing (the last save wins).
+Only plates that already had an output are re-sliced, and only those still in the project: a
+version saved with fewer plates leaves the outputs of the vanished ones alone. If the project is
+saved again while its re-slice runs, the job slices the newest version once more before finishing
+(the last save wins).
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, li
 
 
 async def _reslice(db: AsyncSession, project_id: int, plates: list[int | None], job_id: int) -> dict:
+    from backend.app.farm.plates.models import FarmPlate
     from backend.app.farm.plates.service import PlateReadError, refresh_plates
     from backend.app.farm.slicing import slice_embedded
     from backend.app.services.slice_dispatch import http_exception_to_job_error
@@ -53,7 +56,17 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[int | None], 
         if lib_file is None or state is None:
             return {"resliced": results}
         version = state.sha256
+        try:
+            await refresh_plates(db, lib_file, state)  # the plates of this version
+        except PlateReadError as exc:
+            logger.info("Auto re-slice: plates of %s not read: %s", lib_file.filename, exc)
+        current = set(
+            (await db.execute(select(FarmPlate.plate_index).where(FarmPlate.library_file_id == project_id))).scalars()
+        )
         for plate in plates:
+            if current and (plate or 1) not in current:
+                logger.info("Auto re-slice of %s: plate %s is no longer in the project", lib_file.filename, plate)
+                continue
             try:
                 response = await slice_embedded(db, lib_file=lib_file, state=state, plate=plate, job_id=job_id)
                 results.append(response.model_dump())
