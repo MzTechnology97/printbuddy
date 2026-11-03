@@ -115,7 +115,12 @@ def fingerprint(V: np.ndarray, F: np.ndarray) -> list[float]:
 
 
 def object_fingerprints(zf: zipfile.ZipFile, names: dict[str, str]) -> dict[str, list[float]]:
-    """Fingerprint per object name (first object of each name), printed parts only.
+    """Fingerprint per object name (first object of each name), printed parts only."""
+    return {name: fingerprint(V, F) for name, (V, F) in object_meshes(zf, names).items()}
+
+
+def object_meshes(zf: zipfile.ZipFile, names: dict[str, str]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Mesh ``(V, F)`` per object name (first object of each name), printed parts only, as placed.
 
     ``names`` maps the build's object ids to names (from model_settings). Modifiers,
     negative volumes and support blockers/enforcers are not printed, so they don't count.
@@ -130,7 +135,7 @@ def object_fingerprints(zf: zipfile.ZipFile, names: dict[str, str]) -> dict[str,
             subtypes[obj.get("id", "")] = {p.get("id"): p.get("subtype") or "normal_part" for p in obj.findall("part")}
 
     objs, main_root = models["/" + MAIN_MODEL]
-    out: dict[str, list[float]] = {}
+    out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for build in (e for e in main_root if _tag(e) == "build"):
         for item in build:
             oid = item.get("objectid")
@@ -148,8 +153,10 @@ def object_fingerprints(zf: zipfile.ZipFile, names: dict[str, str]) -> dict[str,
                 _collect(models, "/" + MAIN_MODEL, oid, A, t, meshes)
             if meshes:
                 offsets = np.cumsum([0] + [len(V) for V, _ in meshes[:-1]])
-                out[name] = fingerprint(np.vstack([V for V, _ in meshes]),
-                                        np.vstack([F + off for (_, F), off in zip(meshes, offsets)]))
+                out[name] = (
+                    np.vstack([V for V, _ in meshes]),
+                    np.vstack([F + off for (_, F), off in zip(meshes, offsets)]),
+                )
     return out
 
 

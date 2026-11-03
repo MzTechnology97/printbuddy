@@ -138,3 +138,78 @@ async def test_link_a_piece_once_for_all_its_plates_and_learn_it(async_client, t
     assert [(p["status"], [(y["object_name"], y["quantity"], y["shape_id"]) for y in p["yields"]]) for p in plates] == [
         ("confirmed", [("Gancio v2 (1)", 3, gancio["id"])])
     ]
+
+
+@pytest.mark.integration
+async def test_product_pieces_mapped_from_the_product_page(async_client, tmp_path):
+    """Only the pieces of the product's folders; one save links the shape, the component and the part."""
+    hook, lid, spring = box(10, 20, 5), box(30, 30, 2), tetra()
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Kit" / "kit.3mf", {1: [("Hook", hook, None)] * 2 + [("Lid", lid, None)]})
+    make_mesh_project(nas / "Other" / "other.3mf", {1: [("Spring", spring, None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
+    }
+    kit_folder = (await async_client.get(f"/api/v1/library/files/{files['kit.3mf']}")).json()["folder_id"]
+
+    # Imported from Seller Hub as a whole: a component without a shape, already in the bill of materials.
+    whole = (await async_client.post(f"{API}/components", json={"name": "Coperchio kit"})).json()
+    r = await async_client.post(
+        f"{API}/products", json={"name": "Kit", "parts": [{"component_code": whole["code"], "quantity": 1}]}
+    )
+    pid = r.json()["project_id"]
+    r = await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid]})
+    assert r.status_code == 200, r.text
+
+    body = (await async_client.get(f"{API}/products/{pid}/pieces")).json()
+    by_name = {p["names"][0]: p for p in body["pieces"]}
+    assert sorted(by_name) == ["Hook", "Lid"]  # the spring is in another folder
+    assert body["unshaped_parts"] == [{"code": whole["code"], "name": "Coperchio kit", "quantity": 1}]
+    assert (by_name["Hook"]["quantity"], by_name["Hook"]["shape_id"], by_name["Hook"]["plates"]) == (None, None, 1)
+
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces",
+        json={"yield_ids": by_name["Hook"]["yield_ids"], "quantity": 2, "shape_name": "Gancio", "color": "Nero"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["plates_confirmed"] == 0  # the lid is still unknown
+    hook_code = r.json()["component_code"]
+    # The lid takes the existing component: same code, so Seller Hub's stock stays where it is.
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces",
+        json={
+            "yield_ids": by_name["Lid"]["yield_ids"],
+            "quantity": 1,
+            "shape_name": "Coperchio",
+            "component_code": whole["code"],
+        },
+    )
+    assert (r.json()["component_code"], r.json()["plates_confirmed"]) == (whole["code"], 1)
+
+    body = (await async_client.get(f"{API}/products/{pid}/pieces")).json()
+    assert body["unshaped_parts"] == []
+    assert body["default_color"] == "Nero"
+    got = {p["names"][0]: (p["shape"], p["quantity"], p["component"]["code"]) for p in body["pieces"]}
+    assert got == {"Hook": ("Gancio", 2, hook_code), "Lid": ("Coperchio", 1, whole["code"])}
+    product = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["project_id"] == pid)
+    assert sorted((part["component_code"], part["quantity"]) for part in product["parts"]) == sorted(
+        [(hook_code, 2), (whole["code"], 1)]
+    )
+
+    # The piece alone, in its colour; the same picture next time.
+    url = f"{API}/pieces/{by_name['Hook']['image_yield_id']}/image?color=111111"
+    first = await async_client.get(url)
+    assert (first.status_code, first.content[:4]) == (200, b"\x89PNG")
+    assert (await async_client.get(url)).content == first.content
+
+    # 0: not part of the product any more.
+    r = await async_client.put(
+        f"{API}/products/{pid}/pieces", json={"yield_ids": by_name["Hook"]["yield_ids"], "quantity": 0}
+    )
+    assert r.status_code == 200
+    product = next(p for p in (await async_client.get(f"{API}/products")).json()["products"] if p["project_id"] == pid)
+    assert [part["component_code"] for part in product["parts"]] == [whole["code"]]
+    assert (await async_client.get(f"{API}/products/9999/pieces")).status_code == 404

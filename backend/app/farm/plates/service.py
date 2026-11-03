@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
-from backend.app.farm.plates.geometry import object_fingerprints, same_piece
+from backend.app.farm.plates.geometry import object_fingerprints, object_meshes, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.models import FarmShape
@@ -62,6 +62,29 @@ def _int(value: str | None) -> int | None:
         return None
 
 
+def _model_settings(zf: zipfile.ZipFile):
+    # Orca writes embossed-text parts as <slic3rpe:shape> without declaring the prefix.
+    return ET.fromstring(re.sub(rb"<(/?)([A-Za-z_][\w.-]*):", rb"<\1\2_", zf.read(MODEL_SETTINGS_ENTRY)))
+
+
+def _model_objects(root) -> dict[str, tuple[str, set[int]]]:
+    """``{object id: (name, extruders)}`` from model_settings."""
+    objects: dict[str, tuple[str, set[int]]] = {}
+    for obj in root.findall("object"):
+        extruders = {_int(_meta(el, "extruder")) for el in [obj, *obj.findall("part")]} - {None}
+        objects[obj.get("id", "")] = (_meta(obj, "name") or f"Object {obj.get('id')}", extruders)
+    return objects
+
+
+def object_mesh(fh, object_name: str):
+    """The mesh of one object of a project 3MF (as :func:`parse_plates` names it), or None."""
+    with zipfile.ZipFile(fh) as zf:
+        if MODEL_SETTINGS_ENTRY not in zf.namelist():
+            return None
+        objects = _model_objects(_model_settings(zf))
+        return object_meshes(zf, {oid: name for oid, (name, _) in objects.items()}).get(object_name)
+
+
 def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
     """Plates of a project 3MF and its nozzle diameter. Identical copies count separately."""
     with zipfile.ZipFile(path) as zf:
@@ -81,12 +104,8 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
         if MODEL_SETTINGS_ENTRY not in names:
             return [], nozzle
 
-        # Orca writes embossed-text parts as <slic3rpe:shape> without declaring the prefix.
-        root = ET.fromstring(re.sub(rb"<(/?)([A-Za-z_][\w.-]*):", rb"<\1\2_", zf.read(MODEL_SETTINGS_ENTRY)))
-        objects: dict[str, tuple[str, set[int]]] = {}
-        for obj in root.findall("object"):
-            extruders = {_int(_meta(el, "extruder")) for el in [obj, *obj.findall("part")]} - {None}
-            objects[obj.get("id", "")] = (_meta(obj, "name") or f"Object {obj.get('id')}", extruders)
+        root = _model_settings(zf)
+        objects = _model_objects(root)
 
         plates: dict[int, ParsedPlate] = {}
         for plate_elem in root.findall("plate"):

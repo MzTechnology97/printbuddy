@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertTriangle, FileBox, Package } from 'lucide-react';
 import { Card, CardContent } from '../components/Card';
 import { farmApi, type FarmProductView } from './api';
+import { ProductPiecesPanel } from './ProductPiecesPanel';
 import './i18n';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
@@ -31,6 +32,8 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
             {view.asins.length > 0 && ` — ASIN ${view.asins.join(' · ')}`}
           </p>
         )}
+
+        <ProductPiecesPanel projectId={view.project_id} />
 
         <section className="space-y-2">
           <h3 className="text-sm font-semibold text-white">{t('farm.project.parts')}</h3>
