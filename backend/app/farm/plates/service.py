@@ -25,7 +25,7 @@ from backend.app.farm.plates.geometry import object_fingerprints, object_meshes,
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
-from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes, component_yield
+from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
@@ -146,11 +146,14 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
     return sorted(plates.values(), key=lambda p: p.index), nozzle
 
 
-async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | None) -> dict[int, LibraryFile]:
-    """Sliced outputs of this exact file version, by plate number.
+async def _latest_slices(
+    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None
+) -> dict[int, LibraryFile]:
+    """Sliced outputs of this exact file version, by plate number (the plain ones, or one colour variant).
 
     Any folder: NAS outputs live in the project's ``Printbuddy`` subfolder. An output sliced
     without a plate number is the project's default plate (1); "all plates" (0) is no single plate.
+    ``colour`` is a variant's ``sliced_color`` (see ``farm.variants``).
     """
     rows = (
         await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
@@ -160,7 +163,11 @@ async def _latest_slices(db: AsyncSession, lib_file: LibraryFile, sha256: str | 
         meta = out.file_metadata or {}
         if "extracted_from_library_file_id" in meta:
             continue  # a Klipper .gcode taken out of an output, not an output itself
-        if meta.get("sliced_from_library_file_id") == lib_file.id and meta.get("sliced_from_sha256") == sha256:
+        if (
+            meta.get("sliced_from_library_file_id") == lib_file.id
+            and meta.get("sliced_from_sha256") == sha256
+            and ((meta.get("sliced_color") or "").strip().lower() or None) == colour
+        ):
             plate = 1 if meta.get("sliced_plate") is None else meta["sliced_plate"]
             if plate:
                 by_plate[plate] = out  # later ids win
@@ -352,30 +359,21 @@ async def plates_for(db: AsyncSession, components: list[FarmComponent]) -> dict[
     A plate of a shape serves every colour of it; a set's plate yields its complete sets. Only
     the 3MFs of the component's products count.
     """
+    from backend.app.farm.products.shapes import candidate_plates, plate_yield, product_shapes
+
     result: dict[int, list[dict]] = {c.id: [] for c in components}
-    shapes = {s for c in components for s in component_shapes(c)}
-    codes = {c.code for c in components if not component_shapes(c)}
-    if not shapes and not codes:
-        return result
-    plates = (
-        await db.execute(
-            select(FarmPlate)
-            .where(
-                FarmPlate.status == "confirmed",
-                FarmPlate.yields.any(FarmPlateYield.shape_id.in_(shapes) | FarmPlateYield.component_code.in_(codes)),
-                FarmPlate.library_file_id.notin_(await excluded_files(db)),
-            )
-            .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
-        )
-    ).scalars()
-    resolver = await PrinterModelResolver.load(db)
     files = await component_files(db)
+    plates = await candidate_plates(db, components, files)
+    if not plates:
+        return result
+    own = await product_shapes(db, {c.project_id for c in components if c.project_id is not None})
+    resolver = await PrinterModelResolver.load(db)
     for plate in plates:
         model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
         for c in components:
             if not may_print(files, c.id, plate.library_file_id):
                 continue
-            if n := component_yield(c, plate.yields):
+            if n := plate_yield(c, plate, own):
                 result[c.id].append(
                     {
                         "library_file_id": plate.library_file_id,

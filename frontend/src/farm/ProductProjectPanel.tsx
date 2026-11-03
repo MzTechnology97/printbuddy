@@ -63,11 +63,7 @@ function PartRow({ part, view, colors }: { part: Part; view: FarmProductView; co
     ...done,
   });
   const askRemove = () =>
-    window.confirm(
-      part.used_by.length
-        ? t('farm.project.removeKeepConfirm', { code: part.code, products: part.used_by.map((u) => u.name).join(', ') })
-        : t('farm.project.removeConfirm', { code: part.code }),
-    ) && setQty.mutate(0);
+    window.confirm(t('farm.project.removeConfirm', { code: part.code })) && setQty.mutate(0);
   const hex = part.color ? colors[part.color.toLowerCase()] ?? null : null;
   return (
     <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
@@ -176,7 +172,10 @@ function AddPart({ view }: { view: FarmProductView }) {
     onError: (e: Error) => showToast(e.message, 'error'),
   });
   const mine = new Set(view.parts.map((p) => p.code));
-  const choices = (components.data || []).filter((c) => !c.retired && !mine.has(c.code));
+  // Its own components, or ones of no product yet: another product's are never shared.
+  const choices = (components.data || []).filter(
+    (c) => !c.retired && !mine.has(c.code) && (c.project_id == null || c.project_id === view.project_id),
+  );
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <span className="text-bambu-gray">{t('farm.project.addPart')}</span>
@@ -201,8 +200,6 @@ function AddPart({ view }: { view: FarmProductView }) {
 /** The plates of the product's 3MF files, those to confirm first, each file opened in place. */
 function ProductPlates({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const files = view.files
     .filter((f) => !f.excluded)
     .sort((a, b) => Number(b.proposed > 0 || !b.opened) - Number(a.proposed > 0 || !a.opened));
@@ -228,13 +225,11 @@ function ProductPlates({ view }: { view: FarmProductView }) {
                     <span className="text-xs text-bambu-gray block">{f.folder}</span>
                   </span>
                   <span className={`text-xs shrink-0 ${todo ? 'text-amber-400' : 'text-bambu-gray'}`}>
-                    {f.opened ? t('farm.plates.counts', { todo: f.proposed, done: f.confirmed }) : t('farm.plates.notOpened')}
+                    {f.opened ? t('farm.project.plateCounts', { todo: f.proposed, done: f.confirmed }) : t('farm.plates.notOpened')}
                   </span>
                 </button>
                 {isOpen && (
-                  <FilePlates file={{ library_file_id: f.library_file_id, path: f.path }} shapes={shapes.data || []}
-                    aside={f.unrelated_plates}
-                    onShapeCreated={() => queryClient.invalidateQueries({ queryKey: ['farm', 'shapes'] })} />
+                  <FilePlates file={{ library_file_id: f.library_file_id, path: f.path }} aside={f.unrelated_plates} />
                 )}
               </li>
             );

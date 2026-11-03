@@ -343,7 +343,7 @@ describe('FarmProductGate', () => {
     await user.type(qty, '4');
     await user.tab();
     await user.click(screen.getByRole('button', { name: 'Remove C-0118' }));
-    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('No other product uses it: it is retired'));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('It is retired (the code stays in the history)'));
     await user.selectOptions(screen.getByLabelText('Add component'), 'C-0200'); // C-0118 is already in
     await user.click(screen.getByRole('button', { name: 'Add' }));
     await waitFor(() =>
@@ -464,7 +464,6 @@ describe('FarmProductGate', () => {
       ...view.parts[0],
       shape_id: null,
       recipe,
-      used_by: [{ project_id: 66, name: 'Tappi AMI bianchi' }],
     };
     server.use(
       http.get('/api/v1/farm/products/65/view', () => HttpResponse.json({ ...view, kind: 'set', parts: [setPart] })),
@@ -481,7 +480,7 @@ describe('FarmProductGate', () => {
     await user.click(await screen.findByRole('button', { name: 'Take out of the set Forma sbagliata' }));
     expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('Take Forma sbagliata out of the set?'));
     await user.click(screen.getByRole('button', { name: 'Remove C-0118' }));
-    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('It stays, because Tappi AMI bianchi also use it.'));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('It is retired'));
     await waitFor(() =>
       expect(sent).toEqual([['recipe', '7', { quantity: 0 }], ['part', 'C-0118', { quantity: 0 }]]),
     );
@@ -576,9 +575,9 @@ describe('FarmProductGate', () => {
         sent.push(['merge', await request.json()]);
         return HttpResponse.json({ merged: 58, into: 57, objects: 4, components_merged: [] });
       }),
-      http.put('/api/v1/farm/pieces', async ({ request }) => {
-        sent.push(['link', await request.json()]);
-        return HttpResponse.json({ linked: 1, plates_confirmed: 0 });
+      http.put('/api/v1/farm/products/65/pieces', async ({ request }) => {
+        sent.push(['piece', await request.json()]);
+        return HttpResponse.json({ shape_id: 58, component_code: 'C-0118', quantity: 2, plates_confirmed: 0 });
       }),
     );
     sheet(65);
@@ -588,7 +587,7 @@ describe('FarmProductGate', () => {
     await waitFor(() =>
       expect(sent).toEqual([
         ['merge', { into: 57 }],
-        ['link', { yield_ids: [3], shape_id: 58 }],
+        ['piece', { yield_ids: [3], quantity: 2, shape_id: 58 }], // its geometry joins the product's Base
       ]),
     );
     confirm.mockRestore();

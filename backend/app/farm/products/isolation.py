@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +80,34 @@ def _geometry(objects: list) -> tuple[list, list]:
         elif not any(same_piece(fp, f) for f in fps):
             fps.append(fp)
     return fps, names
+
+
+async def adopt(db: AsyncSession, comp: FarmComponent, project_id: int) -> None:
+    """A component going into a product becomes its own, with its shapes; another product's: 409.
+
+    A shape without a product is taken over with the geometries found in the product's 3MFs.
+    """
+    if comp.project_id == project_id:
+        return
+    if comp.project_id is not None:
+        raise HTTPException(409, f"{comp.code} is a component of another product: products don't share components")
+    for sid in sorted(component_shapes(comp)):
+        shape = await db.get(FarmShape, sid)
+        if shape is not None:
+            await adopt_shape(db, shape, project_id, comp.code)
+    comp.project_id = project_id
+
+
+async def adopt_shape(db: AsyncSession, shape: FarmShape, project_id: int, code: str = "The component") -> None:
+    """A shape without a product becomes this product's, with the geometries in its 3MFs; another's: 409."""
+    if shape.project_id == project_id:
+        return
+    if shape.project_id is not None:
+        raise HTTPException(409, f"{code} is printed as a piece of another product")
+    product = await db.get(FarmProduct, project_id)
+    objects = (await _objects(db, {project_id: product})).get(project_id, {}) if product else {}
+    fps, unmeasured = _geometry(objects.get(shape.id, []))
+    shape.project_id, shape.fingerprints, shape.object_names = project_id, fps, unmeasured or None
 
 
 async def isolate(db: AsyncSession) -> dict:

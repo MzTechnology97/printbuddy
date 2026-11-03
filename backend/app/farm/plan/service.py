@@ -21,17 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan.models import FarmPrinterSpool
-from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.products.folders import component_files, excluded_files, may_print
+from backend.app.farm.products.folders import component_files, may_print
 from backend.app.farm.products.models import (
     FarmComponent,
     FarmProduct,
     FarmProductPart,
     FarmShape,
-    component_shapes,
-    component_yield,
 )
+from backend.app.farm.products.shapes import candidate_plates, plate_yield, product_shapes
 from backend.app.models.printer import Printer
 from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
@@ -198,17 +196,6 @@ def printer_fit(printer: dict, materials: list[str], color_hex: str | None, tole
     }
 
 
-async def _confirmed_plates(db: AsyncSession, shape_ids: set[int], codes: set[str]) -> list[FarmPlate]:
-    if not shape_ids and not codes:
-        return []
-    query = select(FarmPlate).where(
-        FarmPlate.status == "confirmed",
-        FarmPlate.yields.any(FarmPlateYield.shape_id.in_(shape_ids) | FarmPlateYield.component_code.in_(codes)),
-        FarmPlate.library_file_id.notin_(await excluded_files(db)),
-    )
-    return list((await db.execute(query)).scalars())
-
-
 async def _disabled_only(db: AsyncSession) -> set[str]:
     """Codes of the components that only disabled products use."""
     rows = await db.execute(
@@ -244,11 +231,9 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         .scalars()
         .all()
     }
-    plates = await _confirmed_plates(
-        db,
-        {s for c in ours.values() for s in component_shapes(c)},
-        {c.code for c in ours.values() if not component_shapes(c)},
-    )
+    files = await component_files(db)
+    plates = await candidate_plates(db, list(ours.values()), files)
+    own = await product_shapes(db, {c.project_id for c in ours.values() if c.project_id is not None})
     paths = dict(
         (
             await db.execute(
@@ -276,7 +261,6 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
             if entry not in used_in.setdefault(target, []):
                 used_in[target].append(entry)
     resolver = await PrinterModelResolver.load(db)
-    files = await component_files(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
     printers = await with_spools_set_by_hand(db, printer_snapshot(active))
     queued = queued or {}
@@ -288,7 +272,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         color_hex = config["colors"].get((comp.color or "").lower()) if comp and comp.color else None
         options = []
         for plate in plates:
-            pieces = component_yield(comp, plate.yields) if comp else 0
+            pieces = plate_yield(comp, plate, own) if comp else 0
             if not pieces or not may_print(files, comp.id, plate.library_file_id):  # another product's 3MF
                 continue
             model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""

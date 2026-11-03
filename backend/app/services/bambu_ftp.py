@@ -28,6 +28,16 @@ class FileNotOnPrinterError(Exception):
     """
 
 
+class PrinterFTPBusyError(Exception):
+    """Raised when the printer answers the FTP connection with a plain-text 421 (too many sessions).
+
+    Seen on P2S: its FTP server keeps stale sessions from this host until it is power-cycled,
+    so retrying cannot recover. The message is shown to the user as the job's error.
+    """
+
+    MESSAGE = "La stampante rifiuta nuove connessioni FTP (troppe sessioni aperte): spegnila e riaccendila"
+
+
 class ImplicitFTP_TLS(FTP_TLS):
     """FTP_TLS subclass for implicit FTPS (port 990) with model-specific SSL handling.
 
@@ -122,6 +132,8 @@ class BambuFTPClient:
         self.printer_model = printer_model
         self.force_prot_c = force_prot_c
         self._ftp: ImplicitFTP_TLS | None = None
+        # Set by connect() when the printer refused us with a plain-text 421 (see PrinterFTPBusyError).
+        self.busy = False
 
     def _is_a1_model(self) -> bool:
         """Check if this is an A1 series printer."""
@@ -197,11 +209,26 @@ class BambuFTPClient:
         except ssl.SSLError as e:
             logger.warning("FTP SSL error connecting to %s: %s", self.ip_address, e)
             self._ftp = None
+            # A plain-text reply where the TLS handshake was expected: read it to tell why.
+            if "WRONG_VERSION_NUMBER" in str(e) and self._plain_greeting().startswith("421"):
+                self.busy = True
+                logger.warning(
+                    "FTP %s refuses new connections (421 too many connections): power-cycle the printer",
+                    self.ip_address,
+                )
             return False
         except (OSError, ftplib.Error) as e:
             logger.warning("FTP connection failed to %s: %s (type: %s)", self.ip_address, e, type(e).__name__)
             self._ftp = None
             return False
+
+    def _plain_greeting(self) -> str:
+        """The server's first line read without TLS, or "" if none arrives."""
+        try:
+            with socket.create_connection((self.ip_address, self.FTP_PORT), timeout=5) as sock:
+                return sock.recv(200).decode("ascii", "replace")
+        except OSError:
+            return ""
 
     def disconnect(self):
         """Disconnect from the FTP server."""
@@ -988,6 +1015,8 @@ async def upload_file_async(
             finally:
                 client.disconnect()
         logger.warning("FTP connection failed to %s", ip_address)
+        if client.busy:
+            raise PrinterFTPBusyError(PrinterFTPBusyError.MESSAGE)
         return False
 
     try:

@@ -48,7 +48,8 @@ from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.service import _latest_slices
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
-from backend.app.farm.products.models import FarmComponent, component_yield
+from backend.app.farm.products.models import FarmComponent
+from backend.app.farm.products.shapes import ProductShapes, plate_yield, product_shapes
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
@@ -67,8 +68,8 @@ QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gc
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
 
-def _pieces(plate: FarmPlate, comp: FarmComponent) -> int:
-    return component_yield(comp, plate.yields)
+def _pieces(plate: FarmPlate, comp: FarmComponent, own: dict[int, ProductShapes]) -> int:
+    return plate_yield(comp, plate, own)
 
 
 async def sliced_file(db: AsyncSession, plate: FarmPlate) -> LibraryFile | None:
@@ -106,6 +107,19 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
     await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=lib_file.filename, run=run)
 
 
+async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:
+    """The plate's sliced output in the component's colour (``farm.slicing``); None until sliced."""
+    from backend.app.farm.slicing import variant_slice
+
+    return await variant_slice(db, plate, color)
+
+
+async def ask_variant(db: AsyncSession, plate: FarmPlate, color: str | None) -> None:
+    from backend.app.farm.slicing import ask_variant_slicing
+
+    await ask_variant_slicing(db, plate, color)
+
+
 def _plate_model(resolver: PrinterModelResolver, plate: FarmPlate) -> str:
     return (resolver.resolve(plate.printer_model).target_model or plate.printer_model or "").lower()
 
@@ -139,6 +153,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
     resolver = await PrinterModelResolver.load(db)
     excluded = await excluded_files(db)
     files = await component_files(db)
+    own = await product_shapes(db)
     jobs = []
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
@@ -147,7 +162,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
         plates = []
         for plate_id in dict.fromkeys(req["plate_ids"]):
             plate = await db.get(FarmPlate, plate_id)
-            if plate is None or plate.status != "confirmed" or not _pieces(plate, comp):
+            if plate is None or not _pieces(plate, comp, own):
                 raise HTTPException(422, f"Plate {plate_id} is not a confirmed plate of {comp.code}")
             if plate.library_file_id in excluded:
                 raise HTTPException(422, f"Plate {plate_id} is in a 3MF excluded from its products")
@@ -168,22 +183,23 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             component_code=comp.code,
             color=comp.color,
             plate_ids=[p.id for p in plates],
-            expected_pieces=_pieces(plates[0], comp),
+            expected_pieces=_pieces(plates[0], comp, own),
             printer_id=printer_id,
             queue_options=_queue_options(req, printer_id, plates),
         )
         db.add(job)
         jobs.append(job)
         for plate in plates:
-            if await sliced_file(db, plate) is None:
-                await ask_slicing(db, plate)
+            if await variant_file(db, plate, comp.color) is None:
+                await ask_variant(db, plate, comp.color)
     await db.commit()
     return jobs
 
 
-async def plate_filaments(db: AsyncSession, plate: FarmPlate) -> list[dict] | None:
-    """The filament slots of the plate's sliced output (what AMS/CFS slots are chosen for); None until sliced."""
-    sliced = await sliced_file(db, plate)
+async def plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None) -> list[dict] | None:
+    """The filament slots of the plate's sliced output in that colour (what AMS/CFS slots are chosen for);
+    None until sliced."""
+    sliced = await variant_file(db, plate, color)
     if sliced is None:
         return None
     path = await _local_path(db, sliced)
@@ -327,6 +343,7 @@ async def dispatch_once(db: AsyncSession) -> int:
     snapshot = await plan.with_spools_set_by_hand(db, plan.printer_snapshot(list(printers_by_id.values())))
     excluded = await excluded_files(db)
     files = await component_files(db)
+    own = await product_shapes(db)
     busy = set(
         (
             await db.execute(
@@ -359,13 +376,13 @@ async def dispatch_once(db: AsyncSession) -> int:
                 break
             for plate_id in job.plate_ids:
                 plate = await db.get(FarmPlate, plate_id)
-                if plate is None or plate.status != "confirmed" or plate.library_file_id in excluded:
+                if plate is None or plate.library_file_id in excluded or not _pieces(plate, comp, own):
                     continue
                 if not may_print(files, comp.id, plate.library_file_id):  # queued before the 3MF left
                     continue
-                sliced = await sliced_file(db, plate)
+                sliced = await variant_file(db, plate, job.color)  # the slice in the component's colour
                 if sliced is None:
-                    await ask_slicing(db, plate)
+                    await ask_variant(db, plate, job.color)
                     slicing = True
                     reasons.append(f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced")
                     continue
@@ -440,7 +457,7 @@ async def dispatch_once(db: AsyncSession) -> int:
                     db.add(item)
                     await db.flush()
                     job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
-                    job.plate_id, job.pieces = plate.id, _pieces(plate, comp)
+                    job.plate_id, job.pieces = plate.id, _pieces(plate, comp, own)
                     job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
                     busy.add(printer["id"])
                     created += 1

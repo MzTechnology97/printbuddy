@@ -5,8 +5,10 @@ A new slice of a plate replaces the previous output: same library row, same file
 the printer gets it under the same name, replacing the old copy in its cache or storage. Plates
 then take time and grams from the new output.
 
-Only plates that already had an output are re-sliced. If the project is saved again while its
-re-slice runs, the job slices the newest version once more before finishing (the last save wins).
+Only plates that already had an output are re-sliced, and only those still in the project: a
+version saved with fewer plates leaves the outputs of the vanished ones alone. If the project is
+saved again while its re-slice runs, the job slices the newest version once more before finishing
+(the last save wins).
 """
 
 from __future__ import annotations
@@ -26,22 +28,23 @@ logger = logging.getLogger(__name__)
 _running: set[int] = set()  # project ids with a re-slice job in progress
 
 
-async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, list[int | None]]:
-    """Plates that already have a project-settings output, by project id."""
+async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, list[tuple[int | None, str | None]]]:
+    """``(plate, colour variant)`` pairs that already have a project-settings output, by project id."""
     from backend.app.farm.slicing import plate_key
 
-    found: dict[int, dict[int, int | None]] = {}
+    found: dict[int, dict[tuple[int, str | None], tuple[int | None, str | None]]] = {}
     rows = await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced"))
     for out in rows.scalars():
         meta = out.file_metadata or {}
         pid = meta.get("sliced_from_library_file_id")
         if meta.get("used_embedded_settings") and pid in project_ids and "extracted_from_library_file_id" not in meta:
-            plate = meta.get("sliced_plate")
-            found.setdefault(pid, {})[plate_key(plate)] = plate
+            plate, colour = meta.get("sliced_plate"), meta.get("sliced_color")
+            found.setdefault(pid, {})[(plate_key(plate), colour)] = (plate, colour)
     return {pid: list(plates.values()) for pid, plates in found.items()}
 
 
-async def _reslice(db: AsyncSession, project_id: int, plates: list[int | None], job_id: int) -> dict:
+async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple[int | None, str | None]], job_id: int) -> dict:
+    from backend.app.farm.plates.models import FarmPlate
     from backend.app.farm.plates.service import PlateReadError, refresh_plates
     from backend.app.farm.slicing import slice_embedded
     from backend.app.services.slice_dispatch import http_exception_to_job_error
@@ -53,12 +56,30 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[int | None], 
         if lib_file is None or state is None:
             return {"resliced": results}
         version = state.sha256
-        for plate in plates:
+        try:
+            await refresh_plates(db, lib_file, state)  # the plates of this version
+        except PlateReadError as exc:
+            logger.info("Auto re-slice: plates of %s not read: %s", lib_file.filename, exc)
+        current = set(
+            (await db.execute(select(FarmPlate.plate_index).where(FarmPlate.library_file_id == project_id))).scalars()
+        )
+        for plate, colour in plates:
+            if current and (plate or 1) not in current:
+                logger.info("Auto re-slice of %s: plate %s is no longer in the project", lib_file.filename, plate)
+                continue
             try:
-                response = await slice_embedded(db, lib_file=lib_file, state=state, plate=plate, job_id=job_id)
+                response = await slice_embedded(
+                    db, lib_file=lib_file, state=state, plate=plate, job_id=job_id, colour=colour
+                )
                 results.append(response.model_dump())
             except HTTPException as exc:
-                logger.warning("Auto re-slice of %s plate %s failed: %s", lib_file.filename, plate, exc.detail)
+                logger.warning(
+                    "Auto re-slice of %s plate %s%s failed: %s",
+                    lib_file.filename,
+                    plate,
+                    f" ({colour})" if colour else "",
+                    exc.detail,
+                )
                 error = exc
         await db.refresh(state)  # saved again while slicing? then slice the newest version too
         if state.sha256 == version:

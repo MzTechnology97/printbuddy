@@ -43,17 +43,21 @@ function Loaded({ printerId }: { printerId: number }) {
 }
 
 /** Upstream's slot mapping for this plate on this printer; reports the AMS mapping when slots were chosen by hand. */
-export function PrinterSlots({ printerId, plateId, plateLabel, colorHex, mappings, onMappings, onAmsMapping }: {
+export function PrinterSlots({ printerId, plateId, plateLabel, color, colorHex, mappings, onMappings, onAmsMapping }: {
   printerId: number;
   plateId: number;
-  colorHex: string | null; // the component's colour, which the automatic proposal looks for
+  color: string | null; // the component's colour: its slice of the plate
+  colorHex: string | null; // which the automatic proposal looks for
   plateLabel: string;
   mappings: Record<number, number>;
   onMappings: (m: Record<number, number>) => void;
   onAmsMapping: (m: number[] | undefined) => void;
 }) {
   const { t } = useTranslation();
-  const reqs = useQuery({ queryKey: ['farm', 'plate-filaments', plateId], queryFn: () => farmApi.getPlateFilaments(plateId) });
+  const reqs = useQuery({
+    queryKey: ['farm', 'plate-filaments', plateId, color],
+    queryFn: () => farmApi.getPlateFilaments(plateId, color),
+  });
   const status = useQuery({ queryKey: ['printer-status', printerId], queryFn: () => api.getPrinterStatus(printerId) });
   const assignments = useQuery({ queryKey: ['spool-assignments', printerId], queryFn: () => api.getAssignments(printerId) });
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });

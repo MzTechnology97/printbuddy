@@ -62,17 +62,17 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
     ]
     slicing_asked = []
 
-    async def fake_sliced(db, plate):
+    async def fake_sliced(db, plate, color):
         return sliced if plate.printer_model == "A1" else None
 
-    async def fake_ask(db, plate):
-        slicing_asked.append(plate.printer_model)
+    async def fake_ask(db, plate, color):
+        slicing_asked.append((plate.printer_model, color))
 
     async def fake_local(db, lib_file):
         return sliced_path
 
-    monkeypatch.setattr(service, "sliced_file", fake_sliced)
-    monkeypatch.setattr(service, "ask_slicing", fake_ask)
+    monkeypatch.setattr(service, "variant_file", fake_sliced)
+    monkeypatch.setattr(service, "ask_variant", fake_ask)
     monkeypatch.setattr(service, "_local_path", fake_local)
     monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 1, "type": "PLA"}])
     monkeypatch.setattr(plan, "printer_snapshot", lambda printers: snapshot)
@@ -104,7 +104,7 @@ async def accoda(client, code, plate_ids):
 async def test_job_waits_then_goes_to_the_free_printer_with_the_colour(async_client, db_session, farm):
     job = await accoda(async_client, farm["code"], farm["plates"])
     assert (job["state"], job["pieces"]) == ("waiting", 15)
-    assert farm["slicing"] == ["P1S"]  # the plate without a sliced file is sliced right away
+    assert farm["slicing"] == [("P1S", "Nero")]  # sliced right away, in the component's colour
     assert await service.queued_pieces(db_session) == {farm["code"]: 15}
 
     assert await service.dispatch_once(db_session) == 1

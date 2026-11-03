@@ -44,6 +44,7 @@ class TestShapesAndComponents:
             "shape": "Tartufo sopra",
             "color": "Nero",
             "retired": False,
+            "project_id": None,
             "recipe": None,
         }
         # One active component per shape and colour; another colour is a new component.
@@ -104,15 +105,11 @@ class TestShapesAndComponents:
         single = await post(async_client, "/components", {"name": "Contenitore"})
         double = await post(async_client, "/components", {"name": "Contenitore (2)"})
         cap = await post(async_client, "/components", {"name": "Tappo"})
-        bodies = [
-            {"name": "Da 1", "parts": [{"component_code": single["code"]}, {"component_code": cap["code"], "quantity": 2}]},
-            {"name": "Da 2", "parts": [
-                {"component_code": double["code"], "quantity": 2}, {"component_code": cap["code"], "quantity": 4}]},
-            {"name": "Misto", "parts": [
-                {"component_code": single["code"]}, {"component_code": double["code"], "quantity": 3}]},
-        ]
-        pids = [(await post(async_client, "/products", body))["project_id"] for body in bodies]
-        [file_id] = await product_files(db_session, pids)
+        body = {"name": "Misto", "parts": [
+            {"component_code": single["code"]}, {"component_code": double["code"], "quantity": 3},
+            {"component_code": cap["code"], "quantity": 2}]}
+        pid = (await post(async_client, "/products", body))["project_id"]
+        [file_id] = await product_files(db_session, [pid])
         plate = FarmPlate(
             library_file_id=file_id, plate_index=1, printer_model="A1", materials=["PLA"], status="confirmed"
         )
@@ -122,12 +119,15 @@ class TestShapesAndComponents:
 
         r = await async_client.post(f"{API}/components/{double['code']}/merge", json={"into": single["code"]})
         # products: those now using the kept code
-        assert r.json() == {"merged": double["code"], "into": single["code"], "products": 3}
-        products = {p["name"]: p for p in (await async_client.get(f"{API}/products")).json()["products"]}
-        lines = {name: [(x["component_code"], x["quantity"]) for x in p["parts"]] for name, p in products.items()}
-        assert lines["Da 2"] == [(single["code"], 2), (cap["code"], 4)]
-        assert lines["Misto"] == [(single["code"], 4)]
-        assert [(x["plate"], x["yield"]) for x in products["Da 2"]["parts"][0]["plates"]] == [(1, 8)]
+        assert r.json() == {"merged": double["code"], "into": single["code"], "products": 1}
+        [misto] = (await async_client.get(f"{API}/products")).json()["products"]
+        assert [(x["component_code"], x["quantity"]) for x in misto["parts"]] == [(single["code"], 4), (cap["code"], 2)]
+        assert [(x["plate"], x["yield"]) for x in misto["parts"][0]["plates"]] == [(1, 8)]
+        # Two products' components are never merged.
+        other = await post(async_client, "/components", {"name": "Altro"})
+        await post(async_client, "/products", {"name": "Altro", "parts": [{"component_code": other["code"]}]})
+        r = await async_client.post(f"{API}/components/{other['code']}/merge", json={"into": single["code"]})
+        assert r.status_code == 409
         listed = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
         assert listed[double["code"]] is True
 
@@ -163,30 +163,29 @@ class TestPlatesByShape:
             for color in ("Nero", "Bianco"):
                 c = await post(async_client, "/components", {"shape_id": shape["id"], "color": color})
                 codes[shape["name"], color] = c["code"]
-        pids = []
-        for color in ("Nero", "Bianco"):
-            product = await post(
-                async_client,
-                "/products",
-                {
-                    "name": f"Set di 2 {color}",
-                    "parts": [
-                        {"component_code": codes["Tartufo sopra", color], "quantity": 2},
-                        {"component_code": codes["Tartufo sotto", color], "quantity": 2},
-                    ],
-                },
-            )
-            pids.append(product["project_id"])
-        [f] = await product_files(db_session, pids)
+        # Sold in black, and in white as a colour variant: the white components become its own too.
+        product = await post(
+            async_client,
+            "/products",
+            {
+                "name": "Set di 2",
+                "parts": [
+                    {"component_code": codes["Tartufo sopra", "Nero"], "quantity": 2},
+                    {"component_code": codes["Tartufo sotto", "Nero"], "quantity": 2},
+                ],
+                "variants": [{"skus": ["SET-W"], "color": "Bianco"}],
+            },
+        )
+        [f] = await product_files(db_session, [product["project_id"]])
         await confirmed_plate(db_session, 1, [("sopra", 15, top["id"]), ("sotto", 15, bottom["id"])], file_id=f)
         await confirmed_plate(db_session, 2, [("sopra", 2, top["id"]), ("sotto (1)", 2, bottom["id"])], file_id=f)
 
-        products = (await async_client.get(f"{API}/products")).json()["products"]
-        assert len(products) == 2
-        for p in products:
-            for part in p["parts"]:
-                assert part["quantity"] == 2
-                assert [(x["plate"], x["yield"]) for x in part["plates"]] == [(1, 15), (2, 2)]
+        [p] = (await async_client.get(f"{API}/products")).json()["products"]
+        for part in [*p["parts"], *p["variants"][0]["parts"]]:
+            assert part["quantity"] == 2
+            assert [(x["plate"], x["yield"]) for x in part["plates"]] == [(1, 15), (2, 2)]
+        listed = {c["code"]: c["project_id"] for c in (await async_client.get(f"{API}/components")).json()}
+        assert set(listed.values()) == {product["project_id"]}
 
 
 class TestVariants:
@@ -197,7 +196,6 @@ class TestVariants:
         label = await post(async_client, "/components", {"name": "Etichetta"})  # no shape: same in every colour
         top_brown = await post(async_client, "/components", {"shape_id": top["id"], "color": "Marrone"})
         bottom_brown = await post(async_client, "/components", {"shape_id": bottom["id"], "color": "Marrone"})
-        await confirmed_plate(db_session, 1, [("sopra", 15, top["id"])])
 
         body = {
             "name": "Tartufo finto",
@@ -210,6 +208,8 @@ class TestVariants:
             ],
         }
         project_id = (await post(async_client, "/products", body))["project_id"]
+        [file_id] = await product_files(db_session, [project_id])
+        await confirmed_plate(db_session, 1, [("sopra", 15, top["id"])], file_id=file_id)
 
         product = (await async_client.get(f"{API}/products")).json()["products"][0]
         lines = lambda parts: [(p["component_code"], p["quantity"]) for p in parts]  # noqa: E731

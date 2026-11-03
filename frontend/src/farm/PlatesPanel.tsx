@@ -1,14 +1,14 @@
-// Printfarm (fork): confirm the plates proposed from the NAS 3MF files, linking each object to a shape.
+// Printfarm (fork): the plates of the NAS 3MF files. Their pieces are linked on each product's sheet:
+// the same 3MF can serve several products, each reading it with its own shapes.
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { CheckCircle2, ChevronDown, ChevronRight, FileBox, Loader2, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileBox, Loader2, Search } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { ModelViewerModal } from '../components/ModelViewerModal';
-import { useToast } from '../contexts/ToastContext';
-import { farmApi, type FarmLibraryFileState, type FarmPlateDetail, type FarmShape } from './api';
+import { farmApi, type FarmLibraryFileState, type FarmPlateDetail } from './api';
 import './i18n';
 
 const INPUT =
@@ -16,9 +16,6 @@ const INPUT =
 const PAGE = 40;
 // Same rule as the NAS analysis: old, test, archived, sliced and copied files are not production files.
 const NOT_PRODUCTION = /(^|[\\/ _-])(old|test\w*|archiviat\w*|gcode|copia)([\\/ _.-]|$)/i;
-const NEW_SHAPE = '__new__';
-
-type Show = 'todo' | 'confirmed' | 'all';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 
@@ -60,51 +57,8 @@ export function PlateThumb({ fileId, plateIndex, fileName, className = 'w-full s
   );
 }
 
-function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
-  plate: FarmPlateDetail;
-  fileName: string;
-  shapes: FarmShape[];
-  onShapeCreated: () => void;
-}) {
+function PlateCard({ plate, fileName }: { plate: FarmPlateDetail; fileName: string }) {
   const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const [choice, setChoice] = useState<Record<string, string>>(() =>
-    Object.fromEntries(plate.yields.map((y) => [y.object_name, String(y.shape_id ?? y.suggested_shape_id ?? '')])),
-  );
-  const confirm = useMutation({
-    mutationFn: () =>
-      farmApi.confirmPlate(
-        plate.id,
-        plate.yields.map((y) => ({
-          object_name: y.object_name,
-          quantity: y.quantity,
-          shape_id: choice[y.object_name] ? Number(choice[y.object_name]) : null,
-        })),
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['farm'] });
-      showToast(t('farm.plates.confirmed', { index: plate.plate_index }), 'success');
-    },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-
-  const pick = async (object: string, value: string) => {
-    if (value !== NEW_SHAPE) {
-      setChoice((prev) => ({ ...prev, [object]: value }));
-      return;
-    }
-    const name = window.prompt(t('farm.products.newShape'), object.replace(/\.(stl|3mf)$/i, ''));
-    if (!name?.trim()) return;
-    try {
-      const shape = await farmApi.createShape(name.trim());
-      onShapeCreated();
-      setChoice((prev) => ({ ...prev, [object]: String(shape.id) }));
-    } catch (e) {
-      showToast((e as Error).message, 'error');
-    }
-  };
-
   const facts = [
     plate.target_model || plate.printer_model,
     (plate.materials || []).join('+'),
@@ -117,66 +71,28 @@ function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
     <li className="bg-bambu-dark rounded-lg p-3 flex flex-col sm:flex-row gap-3">
       <PlateThumb fileId={plate.library_file_id} plateIndex={plate.plate_index} fileName={fileName} />
       <div className="flex-1 min-w-0 space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-white">
           {t('farm.plates.plate', { index: plate.plate_index })}
           {plate.name && <span className="text-bambu-gray"> · {plate.name}</span>}
           <span className="text-xs text-bambu-gray"> · {facts.join(' · ')}</span>
         </p>
-        {plate.status === 'confirmed' ? (
-          <span className="text-xs text-bambu-green flex items-center gap-1">
-            <CheckCircle2 className="w-3.5 h-3.5" /> {t('farm.plates.isConfirmed')}
-          </span>
-        ) : (
-          <span className="text-xs text-amber-400">{t('farm.plates.toConfirm')}</span>
-        )}
-      </div>
-      {plate.warning && <p className="text-xs text-amber-400">{plate.warning}</p>}
-      <ul className="space-y-1">
-        {plate.yields.map((y) => {
-          const value = choice[y.object_name] ?? '';
-          const suggested = !y.shape_id && !!y.suggested_shape_id && value === String(y.suggested_shape_id);
-          return (
-            <li key={y.object_name} className="flex flex-wrap items-center gap-2 text-sm">
+        {plate.warning && <p className="text-xs text-amber-400">{plate.warning}</p>}
+        <ul className="space-y-1">
+          {plate.yields.map((y) => (
+            <li key={y.object_name} className="flex items-center gap-2 text-sm">
               <span className="text-white w-10 text-right shrink-0">{y.quantity}×</span>
               <span className="text-bambu-gray break-all min-w-0 flex-1">{y.object_name}</span>
-              <select
-                aria-label={`${t('farm.products.shape')} ${y.object_name}`}
-                className={`${INPUT} py-1 w-full sm:w-64 ${suggested ? 'border-bambu-green/60' : ''}`}
-                value={value}
-                onChange={(e) => pick(y.object_name, e.target.value)}
-              >
-                <option value="">{t('farm.plates.notAPart')}</option>
-                {shapes.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-                <option value={NEW_SHAPE}>{t('farm.plates.newShapeOption')}</option>
-              </select>
-              {suggested && <span className="text-xs text-bambu-green">{t('farm.plates.suggested')}</span>}
             </li>
-          );
-        })}
-      </ul>
-      <div className="flex justify-end">
-        <Button size="sm" variant={plate.status === 'confirmed' ? 'secondary' : 'primary'}
-          disabled={confirm.isPending} onClick={() => confirm.mutate()}>
-          {confirm.isPending ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            t(plate.status === 'confirmed' ? 'farm.plates.saveAgain' : 'farm.plates.confirm')
-          )}
-        </Button>
-      </div>
+          ))}
+        </ul>
       </div>
     </li>
   );
 }
 
 /** ``aside``: plates of the file shown last, folded (e.g. only pieces that are not part of a product). */
-export function FilePlates({ file, shapes, onShapeCreated, aside = [] }: {
+export function FilePlates({ file, aside = [] }: {
   file: Pick<FarmLibraryFileState, 'library_file_id' | 'path'>;
-  shapes: FarmShape[];
-  onShapeCreated: () => void;
   aside?: number[];
 }) {
   const { t } = useTranslation();
@@ -188,8 +104,7 @@ export function FilePlates({ file, shapes, onShapeCreated, aside = [] }: {
   if (plates.error) return <p className="text-sm text-red-400 p-3">{(plates.error as Error).message}</p>;
   if (!plates.data?.length) return <p className="text-sm text-bambu-gray p-3">{t('farm.plates.none')}</p>;
   const card = (p: FarmPlateDetail) => (
-    <PlateCard key={`${p.id}-${p.status}`} plate={p} fileName={file.path.split(/[\\/]/).pop() || file.path}
-      shapes={shapes} onShapeCreated={onShapeCreated} />
+    <PlateCard key={p.id} plate={p} fileName={file.path.split(/[\\/]/).pop() || file.path} />
   );
   const later = plates.data.filter((p) => aside.includes(p.id));
   return (
@@ -211,17 +126,14 @@ export function FilePlates({ file, shapes, onShapeCreated, aside = [] }: {
 
 export function PlatesPanel() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [params] = useSearchParams();
   const [query, setQuery] = useState(params.get('q') || ''); // ?q= from a product's page
-  const [show, setShow] = useState<Show>('todo');
   const [allFiles, setAllFiles] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
   const [limit, setLimit] = useState(PAGE);
 
   const files = useQuery({ queryKey: ['farm', 'library-files'], queryFn: farmApi.getFarmFiles });
   const summary = useQuery({ queryKey: ['farm', 'plates-summary'], queryFn: farmApi.getPlatesSummary });
-  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
   const counts = useMemo(() => new Map((summary.data || []).map((s) => [s.library_file_id, s])), [summary.data]);
 
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -229,14 +141,9 @@ export function PlatesPanel() {
     if (f.library_file_id == null || !f.path.toLowerCase().endsWith('.3mf')) return false;
     if (!allFiles && (!['orcaslicer', 'bambu_studio'].includes(f.slicer || '') || NOT_PRODUCTION.test(f.path)))
       return false;
-    const c = counts.get(f.library_file_id);
-    if (show === 'todo' && c && c.proposed === 0) return false; // files never opened are still to do
-    if (show === 'confirmed' && !c?.confirmed) return false;
     const text = f.path.toLowerCase();
     return words.every((w) => text.includes(w));
   });
-  const confirmedTotal = (summary.data || []).reduce((n, s) => n + s.confirmed, 0);
-  const onShapeCreated = () => queryClient.invalidateQueries({ queryKey: ['farm', 'shapes'] });
 
   return (
     <div className="space-y-4">
@@ -248,19 +155,13 @@ export function PlatesPanel() {
             className={`${INPUT} w-full pl-8`} value={query}
             onChange={(e) => { setQuery(e.target.value); setLimit(PAGE); }} />
         </div>
-        <select aria-label={t('farm.components.filter')} className={INPUT} value={show}
-          onChange={(e) => { setShow(e.target.value as Show); setLimit(PAGE); }}>
-          <option value="todo">{t('farm.plates.showTodo')}</option>
-          <option value="confirmed">{t('farm.plates.showConfirmed')}</option>
-          <option value="all">{t('farm.components.all')}</option>
-        </select>
         <label className="flex items-center gap-2 text-sm text-bambu-gray">
           <input type="checkbox" checked={allFiles} onChange={(e) => setAllFiles(e.target.checked)} />
           {t('farm.plates.allFiles')}
         </label>
       </div>
       <p className="text-xs text-bambu-gray">
-        {t('farm.plates.summary', { files: shown.length, confirmed: confirmedTotal })}
+        {t('farm.plates.files', { count: shown.length })}
       </p>
 
       {files.isLoading ? (
@@ -290,10 +191,10 @@ export function PlatesPanel() {
                   <span className="text-xs text-bambu-gray shrink-0 text-right">
                     {f.printer_model}
                     <br />
-                    {c ? t('farm.plates.counts', { todo: c.proposed, done: c.confirmed }) : t('farm.plates.notOpened')}
+                    {c ? t('farm.plates.plateCount', { count: c.proposed + c.confirmed }) : t('farm.plates.notOpened')}
                   </span>
                 </button>
-                {isOpen && <FilePlates file={f} shapes={shapes.data || []} onShapeCreated={onShapeCreated} />}
+                {isOpen && <FilePlates file={f} />}
               </li>
             );
           })}
