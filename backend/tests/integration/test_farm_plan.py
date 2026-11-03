@@ -155,6 +155,7 @@ async def test_disabled_products_leave_what_to_print(async_client, farm):
 @pytest.mark.asyncio
 async def test_seller_hub_down_uses_last_answer(async_client, farm, monkeypatch):
     first = (await async_client.get(f"{API}/plan")).json()
+    monkeypatch.setattr(service, "CACHE_SECONDS", 0)  # the copy is old: Seller Hub is asked again
 
     async def down(url):
         raise httpx.ConnectError("refused")
@@ -164,6 +165,23 @@ async def test_seller_hub_down_uses_last_answer(async_client, farm, monkeypatch)
     assert "Seller Hub did not answer" in body["error"]
     assert body["fetched_at"] == first["fetched_at"]
     assert [c["code"] for c in body["components"]] == [c["code"] for c in first["components"]]
+
+
+@pytest.mark.asyncio
+async def test_seller_hub_is_asked_once_a_minute(async_client, farm, monkeypatch):
+    first = (await async_client.get(f"{API}/plan")).json()
+    calls = []
+
+    async def counted(url):
+        calls.append(url)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(service, "_get_print_plan", counted)
+    again = (await async_client.get(f"{API}/plan")).json()
+    assert (calls, again["error"], again["fetched_at"]) == ([], None, first["fetched_at"])  # the fresh copy
+    await async_client.put(f"{API}/plan/settings", json={"url": "http://hub2.test:8000"})
+    assert "Seller Hub did not answer" in (await async_client.get(f"{API}/plan")).json()["error"]
+    assert calls == ["http://hub2.test:8000"]  # another Seller Hub: not its copy
 
 
 @pytest.mark.asyncio
