@@ -2082,14 +2082,28 @@ class NotificationService:
         # A Telegram bot that takes commands (telegram_bot) confirms the clear plate from the message.
         # The button carries when this printer's check was raised: one from an earlier finish is refused.
         buttons = None
+        image_data = None
         if event_type == "farm_plate_to_clear" and printer_id is not None:
+            from backend.app.main import _capture_snapshot_for_notification
+            from backend.app.models.printer import Printer
             from backend.app.services.printer_manager import printer_manager
 
             raised = printer_manager.plate_clear_raised_at(printer_id)
             if raised is not None:
                 buttons = [[("✅ Piatto libero", f"clear:{printer_id}:{int(raised)}")]]
+            # The plate as it is now; without an answering camera the message goes out without it.
+            image_data = await _capture_snapshot_for_notification(printer_id, await db.get(Printer, printer_id), logger)
         delivered = await self._send_to_providers(
-            providers, title, message, db, event_type, printer_id, printer_name, variables=variables, buttons=buttons
+            providers,
+            title,
+            message,
+            db,
+            event_type,
+            printer_id,
+            printer_name,
+            image_data=image_data,
+            variables=variables,
+            buttons=buttons,
         )
         return delivered > 0
 

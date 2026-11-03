@@ -276,11 +276,18 @@ async def test_plate_to_clear_notification_carries_when_the_check_was_raised(pri
             patch.object(service, "_get_providers_for_event", AsyncMock(return_value=[MagicMock()])),
             patch.object(service, "_build_message_from_template", AsyncMock(return_value=("T", "B"))),
             patch.object(service, "_send_to_providers", AsyncMock(return_value=1)) as send,
+            patch("backend.app.main._capture_snapshot_for_notification", AsyncMock(return_value=b"plate")),
         ):
             await service.on_farm_event("farm_plate_to_clear", {}, AsyncMock(), printer_id=printer.id)
+            # No camera answering: the message still goes out, without the photo.
+            with patch("backend.app.main._capture_snapshot_for_notification", AsyncMock(return_value=None)):
+                await service.on_farm_event("farm_plate_to_clear", {}, AsyncMock(), printer_id=printer.id)
     finally:
         printer_manager.set_awaiting_plate_clear(printer.id, False)
-    assert send.call_args.kwargs["buttons"] == [[("✅ Piatto libero", f"clear:{printer.id}:{raised}")]]
+    first, second = send.call_args_list
+    assert first.kwargs["buttons"] == [[("✅ Piatto libero", f"clear:{printer.id}:{raised}")]]
+    assert first.kwargs["image_data"] == b"plate"
+    assert second.kwargs["image_data"] is None
 
 
 async def test_queue_and_start_next_item(bot, db_session, printer_factory):

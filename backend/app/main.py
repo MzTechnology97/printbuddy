@@ -2445,11 +2445,20 @@ async def on_ams_change(printer_id: int, ams_data: list):
         logging.getLogger(__name__).error("Spoolman AMS sync failed for printer %s: %s", printer_id, e)
 
 
+# A camera that does not answer by then leaves the notification without a photo instead of holding it.
+_NOTIFICATION_SNAPSHOT_TIMEOUT = 5
+
+
+def _is_bambu_printer(printer) -> bool:
+    return (getattr(printer, "provider", None) or "bambu").lower() == "bambu"
+
+
 async def _capture_snapshot_for_notification(printer_id: int, printer, logger) -> bytes | None:
     """Capture a camera snapshot for notification image attachment.
 
     Returns JPEG bytes (max 2.5MB) or None if capture fails or is unavailable.
-    Uses: external camera > buffered frame > fresh capture.
+    Uses: external camera > provider camera (e.g. the Moonraker webcam) > buffered frame > fresh capture;
+    the last two are the Bambu camera, never tried on other printers.
     """
     if not printer:
         return None
@@ -2501,6 +2510,7 @@ async def _capture_snapshot_for_notification(printer_id: int, printer, logger) -
                 frame_data = await capture_frame(
                     effective_camera.url,
                     effective_camera.camera_type or "mjpeg",
+                    timeout=_NOTIFICATION_SNAPSHOT_TIMEOUT,
                     snapshot_url=effective_camera.snapshot_url,
                 )
             if frame_data and len(frame_data) <= 2_500_000:
@@ -2518,6 +2528,9 @@ async def _capture_snapshot_for_notification(printer_id: int, printer, logger) -
                     printer_id,
                 )
                 return None
+
+        if not _is_bambu_printer(printer):
+            return None
 
         # Try buffered frame from active stream
         from backend.app.api.routes.camera import _active_chamber_streams, _active_streams, get_buffered_frame
@@ -4918,6 +4931,7 @@ async def on_print_complete(printer_id: int, data: dict):
                                         frame_data = await capture_frame(
                                             effective_camera.url,
                                             effective_camera.camera_type or "mjpeg",
+                                            timeout=_NOTIFICATION_SNAPSHOT_TIMEOUT,
                                             snapshot_url=effective_camera.snapshot_url,
                                         )
                                 if frame_data:
@@ -4928,7 +4942,7 @@ async def on_print_complete(printer_id: int, data: dict):
                                     photo_path = photos_dir / photo_filename
                                     await asyncio.to_thread(photo_path.write_bytes, frame_data)
                                     logger.info("[PHOTO-BG] Saved external camera frame: %s", photo_filename)
-                            else:
+                            elif _is_bambu_printer(printer):
                                 # Check if camera stream is active - use buffered frame to avoid freeze
                                 # Check both RTSP streams (_active_streams) and chamber image streams (_active_chamber_streams)
                                 active_for_printer = [k for k in _active_streams if k.startswith(f"{printer_id}-")]
