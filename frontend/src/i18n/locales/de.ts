@@ -1828,6 +1828,7 @@ export default {
     staggeredStartDescription: 'Standard-Gruppengröße und -Intervall beim Staffeln von Mehrdrucker-Batchstarts. Pro Batch im Druck-Dialog überschreibbar.',
     plateClear: 'Druckplatte-Bestätigung',
     requirePlateClear: 'Druckplatte-Bestätigung erforderlich',
+    requirePlateClearAlways: 'Immer aktiv in dieser Druckfarm: Ein Druck aus der Warteschlange startet auf einem Drucker mit abgeschlossenem Auftrag erst, wenn jemand bestätigt, dass die Druckplatte frei ist.',
     requirePlateClearDescription: 'Wenn aktiviert, wartet der Scheduler auf eine Druckplatten-Bestätigung pro Drucker, bevor geplante Drucke auf Druckern mit abgeschlossenen Aufträgen gestartet werden. Wenn dies deaktiviert ist, werden auch das Druckplatten-Status-Badge und die Schaltfläche "Druckplatte als freigegeben markieren" auf den Druckerkarten ausgeblendet.',
     gcodeInjection: 'G-Code-Injektion',
     gcodeInjectionDescription: 'Konfigurieren Sie benutzerdefinierten G-code, der am Anfang und/oder Ende von Drucken für Auto-Print-Systeme wie Farmloop, SwapMod, AutoClear und Printflow 3D eingefügt wird. Snippets werden pro Druckermodell konfiguriert und angewendet, wenn "G-code einfügen" bei einem Warteschlangen-Element aktiviert ist.',

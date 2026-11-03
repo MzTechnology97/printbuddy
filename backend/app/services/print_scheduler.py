@@ -185,8 +185,9 @@ class PrintScheduler:
                 )
             items = list(result.scalars().all())
 
-            # Read plate-clear setting once per queue check
-            require_plate_clear = await self._get_bool_setting(db, "require_plate_clear", default=True)
+            # fork (printfarm): the next queued print always waits for the plate-clear confirmation, whatever the
+            # setting says: a print started on a full plate ruins both (an X2D did so with the setting off).
+            require_plate_clear = True
 
             if not items:
                 # No pending items — still check auto-drying on idle printers

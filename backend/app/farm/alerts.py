@@ -36,8 +36,6 @@ def _label(job: FarmPrintJob) -> str:
 
 
 async def plates_to_clear(db: AsyncSession) -> None:
-    if not await scheduler._get_bool_setting(db, "require_plate_clear", default=True):
-        return  # no plate-clear gate: nothing waits for it
     printers = (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all()
     held = [
         p

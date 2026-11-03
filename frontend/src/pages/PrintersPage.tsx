@@ -9316,7 +9316,7 @@ export function PrintersPage() {
         onOpenEmbeddedCamera={(id, name) => setEmbeddedCameraPrinters(prev => new Map(prev).set(id, { id, name }))}
         checkPrinterFirmware={settings?.check_printer_firmware !== false}
         dryingPresets={effectiveDryingPresets}
-        requirePlateClear={settings?.require_plate_clear === true}
+        requirePlateClear /* fork (printfarm): always on, see print_scheduler.check_queue */
         pandaBreathState={getAssignedPandaBreathState(printer.id, settings?.panda_breath_printer_assignments, pandaBreathStatus)}
         obicoSettings={obicoSettings}
         allPrinterIds={allPrinterIds}

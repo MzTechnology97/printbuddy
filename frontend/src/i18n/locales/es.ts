@@ -1830,6 +1830,7 @@ export default {
     staggeredStartDescription: 'Tamaño de grupo e intervalo predeterminados al escalonar los inicios de lotes en varias impresoras. Se pueden anular por lote en la ventana de impresión.',
     plateClear: 'Confirmación de cama despejada',
     requirePlateClear: 'Requerir confirmación de cama despejada',
+    requirePlateClearAlways: 'Siempre activado en esta granja de impresión: una impresión en cola nunca empieza en una impresora que terminó un trabajo hasta que alguien confirma que la cama está despejada.',
     requirePlateClearDescription: 'Cuando está activado, el planificador espera la confirmación de cama despejada por impresora antes de iniciar impresiones en cola en impresoras con trabajos finalizados. Desactivar esto también oculta la insignia de estado de la cama y el botón "Marcar cama como despejada" en las tarjetas de impresora.',
     gcodeInjection: 'Inyección de G-code',
     gcodeInjectionDescription: 'Configure G-code personalizado para inyectar al inicio o al final de las impresiones para sistemas de impresión automática como Farmloop, SwapMod, AutoClear y Printflow 3D. Los fragmentos se configuran por modelo de impresora y se aplican cuando se activa "Inyectar G-code" en un elemento de la cola.',

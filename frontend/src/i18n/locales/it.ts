@@ -1828,6 +1828,7 @@ export default {
     staggeredStartDescription: 'Dimensione gruppo e intervallo predefiniti per scaglionare avvii di batch multi-stampante. Sovrascrivibili per batch nella finestra di stampa.',
     plateClear: 'Conferma piatto libero',
     requirePlateClear: 'Richiedi conferma piatto libero',
+    requirePlateClearAlways: 'Sempre attiva in questa print farm: una stampa in coda non parte mai su una stampante che ha finito finché qualcuno non conferma che il piatto è libero.',
     requirePlateClearDescription: 'Quando questa opzione è abilitata, lo scheduler attende una conferma per stampante che il piatto sia libero prima di avviare le stampe in coda su stampanti con lavori completati. Disabilitandola vengono nascosti anche il badge di stato del piatto e il pulsante "Segna il piatto come liberato" sulle schede stampante.',
     gcodeInjection: 'Iniezione G-code',
     gcodeInjectionDescription: 'Configura G-code personalizzato da iniettare all\'inizio e/o alla fine delle stampe per sistemi di stampa automatica come Farmloop, SwapMod, AutoClear e Printflow 3D. Gli snippet sono configurati per modello di stampante e applicati quando "Inietta G-code" è abilitato su un elemento della coda.',
