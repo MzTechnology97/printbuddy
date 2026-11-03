@@ -347,26 +347,28 @@ async def scan_archives(db: AsyncSession) -> int:
         )
         .order_by(PrintArchive.completed_at)
     )
-    done, jobs = 0, []
-    for archive in rows.scalars().all():
-        source = f"archive:{archive.id}"
-        if await _seen(db, source):
+    archives = [
+        (a.id, a.printer_id, a.filename, a.print_name, a.completed_at, a.content_hash, a.extra_data or {})
+        for a in rows.scalars().all()
+    ]
+    done = 0
+    for archive_id, printer_id, filename, print_name, completed_at, content_hash, extra in archives:
+        source = f"archive:{archive_id}"
+        try:  # one archive at a time: one that always fails never holds back the others
+            if await _seen(db, source):
+                continue
+            gcode = (extra.get("_print_data") or {}).get("gcode_file")
+            names = [filename, print_name, extra.get("original_subtask"), gcode]
+            used, sure = service.used_color(extra), service.used_color(extra, sure=True)
+            jobs = await _record(
+                db, source, printer_id, print_name or filename, completed_at, names, content_hash, used, sure
+            )
+            await _commit(db, jobs)
+        except Exception:
+            await db.rollback()
+            logger.exception("Archive %s outside the queue not recorded: tried again at the next scan", archive_id)
             continue
-        extra = archive.extra_data or {}
-        names = [
-            archive.filename,
-            archive.print_name,
-            extra.get("original_subtask"),
-            (extra.get("_print_data") or {}).get("gcode_file"),
-        ]
-        name = archive.print_name or archive.filename
-        used, sure = service.used_color(extra), service.used_color(extra, sure=True)
-        jobs += await _record(
-            db, source, archive.printer_id, name, archive.completed_at, names, archive.content_hash, used, sure
-        )
         done += 1
-    if done:
-        await _commit(db, jobs)
     return done
 
 
@@ -393,8 +395,12 @@ def _next_cursor(jobs: list[dict], cursor: float) -> float:
 
 async def _archived(db: AsyncSession, printer_id: int, name: str, start: datetime, end: datetime) -> bool:
     """Printbuddy archived this Moonraker job itself: an archive of the same file on the printer, made or
-    started during the job (also after a restart mid-print) or ended with it."""
-    during = (start - SAME_PRINT, end + SAME_PRINT)
+    started during the job (also after a restart mid-print), or ended with it.
+
+    Made or started up to the job's end, not after: the next print of the same file, archived right
+    after, is another print.
+    """
+    during = (start - SAME_PRINT, end)
     rows = await db.execute(
         select(PrintArchive.filename, PrintArchive.print_name).where(
             PrintArchive.printer_id == printer_id,
@@ -419,39 +425,54 @@ async def scan_klipper_history(db: AsyncSession) -> int:
     from backend.app.services.printer_providers.factory import MOONRAKER_PROVIDERS
 
     since = (await _since(db)).replace(tzinfo=timezone.utc).timestamp()
-    done, jobs = 0, []
-    for printer in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all():
-        if (printer.provider or "").strip().lower() not in MOONRAKER_PROVIDERS:
+    printers = (await db.execute(select(Printer.id, Printer.provider).where(Printer.is_active.is_(True)))).all()
+    done = 0
+    for printer_id, provider in printers:
+        if (provider or "").strip().lower() not in MOONRAKER_PROVIDERS:
             continue
-        client = printer_manager.get_client(printer.id)
+        client = printer_manager.get_client(printer_id)
         if client is None or not hasattr(client, "_get"):
             continue
-        key = HISTORY_KEY.format(printer.id)
+        key = HISTORY_KEY.format(printer_id)
         cursor = float(await get_setting(db, key) or since)
+        await db.commit()  # no transaction open while a slow or offline printer is asked
         try:
             history, complete = await asyncio.to_thread(_moonraker_history, client, cursor)
         except Exception as exc:  # noqa: BLE001 - printer offline: asked again at the next scan
-            logger.info("Printer %s: Moonraker history not available: %s", printer.id, exc)
+            logger.info("Printer %s: Moonraker history not available: %s", printer_id, exc)
             continue
         if not complete:
-            logger.warning("Printer %s: %d Moonraker jobs read, more at the next scan", printer.id, len(history))
-        await set_setting(db, key, str(_next_cursor(history, cursor)))
+            logger.warning("Printer %s: %d Moonraker jobs read, more at the next scan", printer_id, len(history))
+        failed: list[float] = []
         for job in history:
             if job.get("status") != "completed" or not job.get("job_id") or not job.get("end_time"):
                 continue
-            source = f"klipper:{printer.id}:{job['job_id']}"
-            if await _seen(db, source):
-                continue
-            name = str(job.get("filename") or "")
-            started, ended = _utc(job.get("start_time") or job["end_time"]), _utc(job["end_time"])
-            if await _archived(db, printer.id, name, started, ended):
-                continue  # Printbuddy saw it: its archive counts
-            jobs += await _record(db, source, printer.id, name, ended, [name], None)
-            done += 1
+            try:  # one job at a time: one that always fails never holds back the others
+                if await _klipper_job(db, printer_id, job):
+                    done += 1
+            except Exception:
+                await db.rollback()
+                logger.exception("Printer %s: Moonraker job %s not recorded", printer_id, job.get("job_id"))
+                failed.append(job.get("start_time") or cursor)
+        # The cursor stops at a job that failed, so it is read again at the next scan.
+        await set_setting(db, key, str(min([_next_cursor(history, cursor)] + [max(cursor, f) for f in failed])))
+        await db.commit()
         if history:
-            logger.info("Printer %s: %d Moonraker jobs read", printer.id, len(history))
-    await _commit(db, jobs)  # the cursors too
+            logger.info("Printer %s: %d Moonraker jobs read", printer_id, len(history))
     return done
+
+
+async def _klipper_job(db: AsyncSession, printer_id: int, job: dict) -> bool:
+    """Record one finished Moonraker job, unless Printbuddy already has it; True when recorded."""
+    source = f"klipper:{printer_id}:{job['job_id']}"
+    if await _seen(db, source):
+        return False
+    name = str(job.get("filename") or "")
+    started, ended = _utc(job.get("start_time") or job["end_time"]), _utc(job["end_time"])
+    if await _archived(db, printer_id, name, started, ended):
+        return False  # Printbuddy saw it: its archive counts
+    await _commit(db, await _record(db, source, printer_id, name, ended, [name], None))
+    return True
 
 
 async def assign(db: AsyncSession, job: FarmPrintJob, parts: list[dict], not_production: bool) -> list[FarmPrintJob]:
