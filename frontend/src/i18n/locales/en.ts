@@ -4835,6 +4835,8 @@ export default {
     farmComponentUrgentDescription: 'An urgent component has no free printer with its material loaded',
     farmBatchToAssign: 'Batch to assign',
     farmBatchToAssignDescription: 'A batch is waiting to be assigned',
+    telegramConflict: 'This bot is also read by another program (for example a Klipper plugin): commands don\'t reach Printbuddy. Use a dedicated bot.',
+    telegramConflictShort: 'Bot read by another program',
     // Queue events
     jobAdded: 'Job Added',
     jobAddedDescription: 'Job added to queue',

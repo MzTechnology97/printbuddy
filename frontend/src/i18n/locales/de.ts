@@ -4823,6 +4823,8 @@ export default {
     farmComponentUrgentDescription: 'Kein freier Drucker hat das Material eines dringenden Bauteils geladen',
     farmBatchToAssign: 'Charge zuzuweisen',
     farmBatchToAssignDescription: 'Eine Charge wartet auf Zuweisung',
+    telegramConflict: 'Dieser Bot wird auch von einem anderen Programm gelesen (zum Beispiel einem Klipper-Plugin): Befehle erreichen Printbuddy nicht. Verwende einen eigenen Bot.',
+    telegramConflictShort: 'Bot von anderem Programm gelesen',
     // Queue events
     jobAdded: 'Auftrag hinzugefügt',
     jobAddedDescription: 'Auftrag zur Warteschlange hinzugefügt',

@@ -4824,6 +4824,8 @@ export default {
     farmComponentUrgentDescription: '緊急部品の材料を装填した空きプリンターがありません',
     farmBatchToAssign: '割り当て待ちのバッチ',
     farmBatchToAssignDescription: 'バッチが割り当てを待っています',
+    telegramConflict: 'このボットは別のプログラム（Klipperのプラグインなど）にも読み取られています。コマンドはPrintbuddyに届きません。専用のボットを使ってください。',
+    telegramConflictShort: '別のプログラムが使用中のボット',
     // Queue events
     jobAdded: 'ジョブ追加',
     jobAddedDescription: 'キューにジョブが追加されました',

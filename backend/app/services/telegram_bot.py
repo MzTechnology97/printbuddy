@@ -35,6 +35,10 @@ POLL_SECONDS = 30  # getUpdates long-poll timeout
 RELOAD_SECONDS = 60  # how often the providers' settings are read again
 CONFIRM_SECONDS = 10 * 60  # a confirmation button older than this is refused
 CONFLICT_RETRY_SECONDS = 5 * 60  # another poller on the bot (409): try again after this
+# This many 409s in the window: another program reads the bot (a Klipper Telegram plugin...), shown on the provider.
+# Telegram answers 409 to whichever poller gets cut off, so a success in between doesn't mean the other one left.
+CONFLICTS_TO_WARN = 3
+CONFLICT_WINDOW_SECONDS = 30 * 60
 MAX_TEXT = 4000  # Telegram's limit is 4096 characters
 
 COMMANDS = [
@@ -204,6 +208,7 @@ class TelegramBot:
         self._pollers: dict[str, _Poller] = {}  # bot token -> its poller
         self._stopped: set[str] = set()  # tokens Telegram refused (401/403/404): not polled again
         self._pending: dict[str, _Pending] = {}  # confirmation id -> the action it confirms
+        self._conflicts: dict[str, list[float]] = {}  # bot token -> when getUpdates got a 409
         self._task: asyncio.Task | None = None
 
     # ---------------------------------------------------------------- pollers
@@ -270,6 +275,17 @@ class TelegramBot:
                     poller.label,
                 )
 
+    def shared_with_another_program(self, config: dict) -> bool:
+        """The provider's bot keeps getting 409: another program reads its updates, commands don't arrive here."""
+        token = str(config.get("bot_token") or "").strip()
+        since = time.time() - CONFLICT_WINDOW_SECONDS
+        recent = [t for t in self._conflicts.get(token, []) if t >= since]
+        if recent:
+            self._conflicts[token] = recent
+        else:
+            self._conflicts.pop(token, None)
+        return commands_enabled(config) and len(recent) >= CONFLICTS_TO_WARN
+
     def _ended(self, token: str, poller: _Poller) -> None:
         """A poller that ended on its own (not dropped) is forgotten: the next reconcile starts a new one."""
         if self._pollers.get(token) is poller:
@@ -314,6 +330,13 @@ class TelegramBot:
                 updates = await poller.client.call("getUpdates", **params) or []
                 delay = 5
             except TelegramConflict:
+                self._conflicts.setdefault(token, []).append(time.time())
+                if self.shared_with_another_program({"bot_token": token, "commands_enabled": True}):
+                    logger.warning(
+                        "Telegram bot %s: another program reads this bot (a Klipper Telegram plugin?): commands "
+                        "don't reach Printbuddy. Give Printbuddy a bot of its own.",
+                        poller.label,
+                    )
                 logger.warning(
                     "Telegram bot %s: another poller or a webhook is active on this bot (409); retrying in %ss",
                     poller.label,
