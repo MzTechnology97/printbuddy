@@ -352,6 +352,17 @@ async def test_a_product_with_left_and_right_parts_becomes_one_set(async_client)
     assert recipe == [(shapes[0], 1), (shapes[1], 1)]
     status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
     assert status[comps[1]] is False  # still used by "Solo DX"
+    # Two of a piece per unit: its stock counts pieces, not sets, so the set gets a new code.
+    cap = (await async_client.post(f"{API}/shapes", json={"name": "Tappo"})).json()["id"]
+    caps = (await async_client.post(f"{API}/components", json={"shape_id": cap, "color": "Nero"})).json()["code"]
+    r = await async_client.post(
+        f"{API}/products", json={"name": "Due tappi", "parts": [{"component_code": caps, "quantity": 2}]}
+    )
+    two = r.json()["project_id"]
+    await async_client.put(f"{API}/products/{two}/kind", json={"kind": "set"})
+    view = (await async_client.get(f"{API}/products/{two}/view")).json()
+    assert view["parts"][0]["code"] != caps
+    assert [(r["shape_id"], r["quantity"]) for r in view["parts"][0]["recipe"]] == [(cap, 2)]
     # A component Seller Hub knows can't be given a single shape back by mistake.
     r = await async_client.patch(f"{API}/components/{comps[0]}", json={"shape_id": shapes[0]})
     assert r.status_code == 422

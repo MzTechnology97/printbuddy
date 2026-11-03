@@ -75,9 +75,11 @@ async def _used_elsewhere(db: AsyncSession, component_id: int, project_id: int) 
 async def _make_set(db: AsyncSession, product: FarmProduct, project: Project) -> FarmComponent | None:
     """Turn the product's parts into one set component; None when it has no parts yet.
 
-    The first part only this product uses keeps its code (Seller Hub's stock stays on it); the
-    shapes of every part go into its recipe with their quantities; the other parts leave the
-    product, and components no other product uses are retired.
+    The first part only this product uses, once per unit, keeps its code: Seller Hub's stock of it
+    already counts sets (a whole product, or one of a left/right pair). Otherwise the set gets a
+    new code, since stock of a piece used several times per unit would not be sets. The shapes of
+    every part go into the recipe with their quantities; the other parts leave the product, and
+    components no other product uses are retired.
     """
     parts = await _parts(db, product.project_id)
     if not parts:
@@ -88,7 +90,7 @@ async def _make_set(db: AsyncSession, product: FarmProduct, project: Project) ->
     for part, comp in parts:
         for shape_id in products.component_shapes(comp):
             recipe[shape_id] = recipe.get(shape_id, 0) + part.quantity
-    own = [(p, c) for p, c in parts if not await _used_elsewhere(db, c.id, product.project_id)]
+    own = [(p, c) for p, c in parts if p.quantity == 1 and not await _used_elsewhere(db, c.id, product.project_id)]
     if own:
         keep_part, keep = own[0]
     else:
