@@ -370,11 +370,16 @@ function ProductStatus({ view }: { view: FarmProductView }) {
   const choose = (k: 'set' | 'kit') => {
     if (k === view.kind) return;
     if (k === 'set' && view.parts.length > 1 && !window.confirm(t('farm.project.kindConfirm'))) return;
+    const theSet = view.parts.find((p) => p.recipe?.length);
+    if (k === 'kit' && theSet && !window.confirm(t('farm.project.kitConfirm', { code: theSet.code }))) return;
     kind.mutate(k);
   };
   const open = pieces.data?.pieces.filter((p) => p.quantity == null).length ?? 0;
   const todo = [
     !view.kind && t('farm.project.todoKind'),
+    view.kind === 'set' &&
+      view.parts.some((p) => (p.recipe?.length ?? 0) > 1 && p.plates.length === 0) &&
+      t('farm.project.setNoPlate'),
     open > 0 && t('farm.project.todoPieces', { count: open }),
     ...view.parts.filter((p) => p.plates.length === 0).map((p) => t('farm.project.todoPlates', { code: p.code })),
   ].filter(Boolean) as string[];

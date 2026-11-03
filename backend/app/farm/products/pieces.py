@@ -161,6 +161,48 @@ async def _make_set(db: AsyncSession, product: FarmProduct, project: Project) ->
     return keep
 
 
+async def _split_set(db: AsyncSession, project_id: int) -> None:
+    """A set becomes a kit: one part per piece of its recipe, × its quantity, in the set's colour.
+
+    Each piece takes the active component of its shape in that colour, or a new one. The set's own
+    code is retired when no other product uses it: its stock counted sets, not pieces, so it is not
+    handed to one of them. A set with no pieces yet just stops being one.
+    """
+    shapes = await products._shape_names(db)
+    for part, comp in await _parts(db, project_id):
+        if comp.recipe is None:
+            continue
+        if not comp.recipe:
+            comp.recipe = None
+            continue
+        for i, entry in enumerate(comp.recipe):
+            piece = await db.scalar(
+                select(FarmComponent).where(
+                    FarmComponent.shape_id == entry["shape_id"],
+                    func.lower(func.coalesce(FarmComponent.color, "")) == (comp.color or "").lower(),
+                    FarmComponent.retired_at.is_(None),
+                )
+            )
+            if piece is None:
+                name = " – ".join(x for x in (shapes.get(entry["shape_id"]), comp.color) if x)
+                piece = FarmComponent(
+                    code=await products._next_code(db), name=name, shape_id=entry["shape_id"], color=comp.color
+                )
+                db.add(piece)
+                await db.flush()
+            db.add(
+                FarmProductPart(
+                    project_id=project_id,
+                    component_id=piece.id,
+                    quantity=entry["quantity"],
+                    sort_order=part.sort_order + i,
+                )
+            )
+        await db.delete(part)
+        if not await _used_elsewhere(db, comp.id, project_id):
+            comp.retired_at = comp.retired_at or products._now()
+
+
 class KindIn(BaseModel):
     kind: Literal["set", "kit"]
 
@@ -171,16 +213,8 @@ async def set_kind(project_id: int, data: KindIn, db: AsyncSession = Depends(get
     product = await _product(db, project_id)
     if data.kind == "set":
         await _make_set(db, product, await db.get(Project, project_id))
-    elif any(c.recipe and len(c.recipe) > 1 for _, c in await _parts(db, project_id)):
-        raise HTTPException(409, "This set has several pieces: make each one a part before calling it a kit")
     else:
-        for part, comp in await _parts(db, project_id):
-            if comp.recipe:  # a set of one piece: back to that shape x its quantity
-                shape_id, quantity = comp.recipe[0]["shape_id"], comp.recipe[0]["quantity"]
-                await products._check_shape(db, await products._shape_names(db), shape_id, comp.color, comp.code)
-                comp.shape_id, comp.recipe, part.quantity = shape_id, None, quantity
-            elif comp.recipe == []:
-                comp.recipe = None
+        await _split_set(db, project_id)
     product.kind = data.kind
     product.updated_at = products._now()
     await db.commit()

@@ -15,6 +15,13 @@ from backend.app.utils.printer_models import PRINTER_MODEL_MAP, normalize_printe
 # SSDP codes Printbuddy may store in Printer.model that upstream's PRINTER_MODEL_ID_MAP lacks.
 # shortcut: upstream PR candidate (add "N7": "P2S" there), drop this once merged.
 _EXTRA_MODEL_CODES = {"N7": "P2S"}
+# Brands slicers put before a Klipper printer's model ("Creality K1", "Sovol SV08"); farm printers are often
+# named without it ("K1", "SV08").
+_BRANDS = ("bambu lab", "creality", "sovol", "elegoo", "anycubic", "qidi", "prusa", "voron", "flashforge")
+
+
+def _without_brand(key: str) -> str:
+    return next((key[len(b) + 1 :] for b in _BRANDS if key.startswith(b + " ")), key)
 
 
 def canonical_model(model: str | None) -> str | None:
@@ -44,6 +51,8 @@ class PrinterModelResolver:
             key = canonical_model(model)
             if key:
                 self.by_canonical.setdefault(key, model)
+        for key, model in list(self.by_canonical.items()):
+            self.by_canonical.setdefault(_without_brand(key), model)
 
     @classmethod
     async def load(cls, db: AsyncSession) -> PrinterModelResolver:
@@ -57,8 +66,10 @@ class PrinterModelResolver:
         manual = self.manual.get(source_model.strip().casefold())
         if manual:
             return Resolution(manual, "manual")
-        # Same model after normalisation: every Bambu, and Klipper printers named like the profile.
-        target = self.by_canonical.get(canonical_model(source_model) or "")
+        # Same model after normalisation: every Bambu, and Klipper printers named like the profile,
+        # with or without the brand ("Creality K1" is the farm's "K1").
+        key = canonical_model(source_model) or ""
+        target = self.by_canonical.get(key) or self.by_canonical.get(_without_brand(key))
         return Resolution(target, "auto") if target else Resolution(None, "unmapped")
 
     def known_names(self) -> list[str]:

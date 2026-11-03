@@ -89,6 +89,22 @@ def test_parse_plates_without_model_settings(tmp_path):
     assert parse_plates(path) == ([], None)
 
 
+def test_klipper_models_resolve_with_or_without_the_brand():
+    """Slicers write "Creality K1" / "Sovol SV08"; the farm's printers are "K1" / "SV08"."""
+    resolver = PrinterModelResolver({}, ["K1", "SV08", "Creality K2 Pro", "Sovol Zero", "P2S"])
+    models = ("Creality K1", "Sovol SV08", "Creality K2 Pro", "SOVOL ZERO", "Bambu Lab P2S", "Creality K1 Max")
+    got = {m: resolver.resolve(m).target_model for m in (*models, "A1 Mini")}
+    assert got == {
+        "Creality K1": "K1",
+        "Sovol SV08": "SV08",
+        "Creality K2 Pro": "Creality K2 Pro",
+        "SOVOL ZERO": "Sovol Zero",
+        "Bambu Lab P2S": "P2S",
+        "Creality K1 Max": None,  # another printer
+        "A1 Mini": None,  # none in the farm
+    }
+
+
 def test_models_in_path_prefers_longest_name():
     names = PrinterModelResolver({}, ["A1", "A1 Mini", "P1S", "Sovol Zero"]).known_names()
     assert models_in_path("Box/A1 mini/A1 Mini-PLA-box.3mf", names) == {"a1 mini"}
