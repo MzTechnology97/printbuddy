@@ -23,6 +23,7 @@ from backend.app.models.smart_plug import SmartPlug
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.services.bambu_ftp import (
+    PrinterFTPBusyError,
     cache_3mf_download,
     delete_file_async,
     get_ftp_retry_settings,
@@ -2014,6 +2015,7 @@ class PrintScheduler:
                         max_retries=ftp_retry_count,
                         retry_delay=ftp_retry_delay,
                         operation_name=operation_name,
+                        non_retry_exceptions=(PrinterFTPBusyError,),
                     )
                 )
             return bool(
@@ -2217,6 +2219,7 @@ class PrintScheduler:
         except Exception as e:
             logger.debug("Queue item %s: Delete failed (may not exist): %s", item.id, e)
 
+        upload_error: Exception | None = None
         try:
             uploaded = await self._upload_file_for_provider(
                 printer_id=item.printer_id,
@@ -2235,6 +2238,7 @@ class PrintScheduler:
             )
         except Exception as e:
             uploaded = False
+            upload_error = e
             logger.error("Queue item %s: upload error: %s (type: %s)", item.id, e, type(e).__name__)
 
         # Clean up injected temp file after upload attempt
@@ -2243,7 +2247,9 @@ class PrintScheduler:
 
         if not uploaded:
             error_msg = (
-                "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
+                str(upload_error)
+                if isinstance(upload_error, PrinterFTPBusyError)
+                else "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
                 "See server logs for detailed diagnostics."
             )
             item.status = "failed"

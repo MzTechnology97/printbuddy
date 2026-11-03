@@ -21,6 +21,7 @@ import pytest
 from backend.app.services.bambu_ftp import (
     BambuFTPClient,
     FileNotOnPrinterError,
+    PrinterFTPBusyError,
     cache_3mf_download,
     clear_3mf_cache,
     delete_file_async,
@@ -1417,3 +1418,58 @@ class TestThreeMFCache:
         assert archive_file.exists(), "archive 3mf must not be deleted by cache cleanup"
         assert library_file.exists(), "library 3mf must not be deleted by cache cleanup"
         assert not temp_file.exists(), "temp file should still be cleaned up"
+
+
+# ---------------------------------------------------------------------------
+# TestPrinterBusy
+# ---------------------------------------------------------------------------
+class TestPrinterBusy:
+    """A printer out of FTP sessions answers 421 in clear text before the TLS handshake (seen on P2S)."""
+
+    @pytest.fixture
+    def busy_server(self, monkeypatch):
+        import socket
+        import threading
+
+        listener = socket.create_server(("127.0.0.1", 0))
+        accepted = []
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = listener.accept()
+                except OSError:
+                    return
+                accepted.append(conn)
+                conn.sendall(b"421 There are too many connections from your internet address.\r\n")
+                conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        monkeypatch.setattr(BambuFTPClient, "FTP_PORT", listener.getsockname()[1])
+        yield accepted
+        listener.close()
+
+    def test_connect_marks_busy(self, busy_server):
+        client = BambuFTPClient("127.0.0.1", "12345678", timeout=5, printer_model="P2S")
+        assert client.connect() is False
+        assert client.busy is True
+
+    @pytest.mark.asyncio
+    async def test_upload_raises_once_without_retries(self, busy_server, tmp_path):
+        local = tmp_path / "busy.3mf"
+        local.write_bytes(b"x")
+        with pytest.raises(PrinterFTPBusyError, match="spegnila e riaccendila"):
+            await with_ftp_retry(
+                upload_file_async,
+                "127.0.0.1",
+                "12345678",
+                local,
+                "/busy.3mf",
+                socket_timeout=5,
+                printer_model="P2S",
+                max_retries=3,
+                retry_delay=0,
+                non_retry_exceptions=(PrinterFTPBusyError,),
+            )
+        # One TLS attempt plus one plain probe: no retries.
+        assert len(busy_server) == 2
