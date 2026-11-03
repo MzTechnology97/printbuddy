@@ -44,7 +44,16 @@ interface AddNotificationModalProps {
   onClose: () => void;
 }
 
-const PROVIDER_VALUES: ProviderType[] = ['email', 'telegram', 'discord', 'ntfy', 'pushover', 'callmebot', 'webhook', 'homeassistant', 'notify'];
+// Same rule as the bot (services/telegram_bot.py allowed_users): a private chat's id is its user's,
+// a group chat (negative id) authorises nobody by itself.
+const ids = (raw: string | undefined) => (raw ?? '').split(/[,\s]+/).filter(Boolean);
+function telegramHasNoUsers(config: Record<string, string>): boolean {
+  if (ids(config.allowed_user_ids).length) return false;
+  const chats = ids(config.allowed_chat_ids).length ? ids(config.allowed_chat_ids) : ids(config.chat_id);
+  return chats.length > 0 && chats.every((chat) => chat.startsWith('-'));
+}
+
+const PROVIDER_VALUES: ProviderType[] =['email', 'telegram', 'discord', 'ntfy', 'pushover', 'callmebot', 'webhook', 'homeassistant', 'notify'];
 
 export function AddNotificationModal({ provider, onClose }: AddNotificationModalProps) {
   const { t } = useTranslation();
@@ -527,6 +536,12 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
               </div>
                 );
               })}
+            {providerType === 'telegram' && config.commands_enabled === 'true' && telegramHasNoUsers(config) && (
+              <p role="alert" className="text-xs text-amber-300">
+                Only group chats are allowed and no user is listed: the bot will ignore every command. Add the
+                users in Allowed user IDs.
+              </p>
+            )}
           </div>
 
           {/* Test Button */}

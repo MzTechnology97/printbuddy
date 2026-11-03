@@ -133,6 +133,21 @@ describe('AddNotificationModal — ntfy Priority (#990)', () => {
     expect(screen.queryByText(/ntfy priority/i)).not.toBeInTheDocument();
   });
 
+  it('warns when Telegram commands are on but only group chats are allowed', async () => {
+    const telegram = (config: Record<string, string>) =>
+      buildProvider({ provider_type: 'telegram', config: { bot_token: 'x', commands_enabled: 'true', ...config } });
+    const warning = /the bot will ignore every command/i;
+
+    const { unmount } = render(<AddNotificationModal provider={telegram({ chat_id: '-1001234' })} onClose={() => undefined} />);
+    await screen.findByDisplayValue('My ntfy');
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+    unmount();
+
+    render(<AddNotificationModal provider={telegram({ chat_id: '-1001234', allowed_user_ids: '42' })} onClose={() => undefined} />);
+    await screen.findByDisplayValue('My ntfy');
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+  });
+
   it('renders and saves Telegram forum topic thread ID', async () => {
     let captured: unknown = null;
     server.use(
