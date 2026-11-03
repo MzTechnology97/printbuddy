@@ -167,6 +167,28 @@ async def file_products(db: AsyncSession) -> dict[int, set[int]]:
     return out
 
 
+async def component_files(db: AsyncSession) -> dict[int, set[int]]:
+    """The 3MF files each component (by id) may print from: those of the products it is part of.
+
+    Another product's 3MF holding the same shape is never used. shortcut: a component in no
+    product is not in the map and keeps every file, until the move to per-product components.
+    """
+    from backend.app.farm.products.models import FarmProductPart
+
+    files = await file_products(db)
+    owners: dict[int, set[int]] = {}
+    for component_id, project_id in (
+        await db.execute(select(FarmProductPart.component_id, FarmProductPart.project_id))
+    ).all():
+        owners.setdefault(component_id, set()).add(project_id)
+    return {cid: {f for f, users in files.items() if users & pids} for cid, pids in owners.items()}
+
+
+def may_print(files: dict[int, set[int]], component_id: int, library_file_id: int) -> bool:
+    """A plate of this 3MF counts for the component (see :func:`component_files`)."""
+    return component_id not in files or library_file_id in files[component_id]
+
+
 async def excluded_files(db: AsyncSession) -> set[int]:
     """Library file ids no product uses: every product whose linked folders hold the file excludes it."""
     from backend.app.farm.models import FarmLibraryFile

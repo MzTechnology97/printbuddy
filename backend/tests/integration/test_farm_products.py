@@ -12,8 +12,10 @@ from sqlalchemy import select
 from backend.app.core.auth import generate_api_key
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.products import routes as product_routes
+from backend.app.farm.products.folders import FarmFolderLink
 from backend.app.farm.products.models import FarmProduct, FarmProductPart
 from backend.app.models.api_key import APIKey
+from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.project import Project
 
@@ -30,6 +32,20 @@ async def product(client: AsyncClient, **body) -> int:
     r = await client.post(f"{API}/products", json=body)
     assert r.status_code == 200, r.text
     return r.json()["project_id"]
+
+
+async def product_files(db, project_ids: list[int], count: int = 1) -> list[int]:
+    """3MF files in one folder linked to these products: a product's plates come from its own 3MFs."""
+    folder = LibraryFolder(name="Prodotto")
+    db.add(folder)
+    await db.flush()
+    files = [
+        LibraryFile(folder_id=folder.id, filename=f"p{i}.3mf", file_path=f"/x/p{i}.3mf", file_type="3mf", file_size=1)
+        for i in range(count)
+    ]
+    db.add_all([*files, *(FarmFolderLink(folder_id=folder.id, project_id=pid) for pid in project_ids)])
+    await db.commit()
+    return [f.id for f in files]
 
 
 async def products(client: AsyncClient) -> list[dict]:
@@ -95,16 +111,19 @@ class TestProducts:
     @pytest.mark.asyncio
     async def test_parts_list_confirmed_plates(self, async_client, db_session):
         base, hook = await component(async_client, "Base X"), await component(async_client, "Gancio")
-        await product(async_client, name="X", parts=[{"component_code": base}, {"component_code": hook, "quantity": 2}])
+        pid = await product(
+            async_client, name="X", parts=[{"component_code": base}, {"component_code": hook, "quantity": 2}]
+        )
+        f1, f2 = await product_files(db_session, [pid], 2)
         # A mixed plate (4 bases + 6 hooks) and a plate still to confirm.
         mixed = FarmPlate(
-            library_file_id=42, plate_index=1, printer_model="P1S", materials=["PETG"], status="confirmed"
+            library_file_id=f1, plate_index=1, printer_model="P1S", materials=["PETG"], status="confirmed"
         )
         mixed.yields = [
             FarmPlateYield(object_name="Base", quantity=4, component_code=base),
             FarmPlateYield(object_name="Hook", quantity=6, component_code=hook),
         ]
-        draft = FarmPlate(library_file_id=43, plate_index=1, printer_model="P1S", materials=["PLA"])
+        draft = FarmPlate(library_file_id=f2, plate_index=1, printer_model="P1S", materials=["PLA"])
         draft.yields = [FarmPlateYield(object_name="Hook", quantity=9, component_code=hook)]
         db_session.add_all([mixed, draft])
         await db_session.commit()
@@ -112,9 +131,36 @@ class TestProducts:
         [p] = await products(async_client)
         plates = {part["component_code"]: part["plates"] for part in p["parts"]}
         assert plates[base] == [
-            {"library_file_id": 42, "plate": 1, "printer_model": "P1S", "material": "PETG", "yield": 4}
+            {"library_file_id": f1, "plate": 1, "printer_model": "P1S", "material": "PETG", "yield": 4}
         ]
         assert [x["yield"] for x in plates[hook]] == [6]
+
+    @pytest.mark.asyncio
+    async def test_a_component_prints_only_from_its_products_3mfs(self, async_client, db_session):
+        """Audi hooks and Land Rover gutters on one shape by mistake: neither takes the other's plates."""
+        shape = (await async_client.post(f"{API}/shapes", json={"name": "Assemblaggio"})).json()["id"]
+        codes, plates = {}, {}
+        for name in ("Audi", "Grondaie"):
+            r = await async_client.post(f"{API}/components", json={"shape_id": shape, "color": name})
+            codes[name] = r.json()["code"]
+            pid = await product(async_client, name=name, parts=[{"component_code": codes[name]}])
+            [file_id] = await product_files(db_session, [pid])
+            plate = FarmPlate(library_file_id=file_id, plate_index=1, printer_model="A1", materials=["PLA"])
+            plate.status = "confirmed"
+            plate.yields = [FarmPlateYield(object_name="Assemblaggio", quantity=2, shape_id=shape)]
+            db_session.add(plate)
+            await db_session.commit()
+            plates[name] = (pid, file_id, plate.id)
+
+        for name, p in {p["name"]: p for p in await products(async_client)}.items():
+            assert [x["library_file_id"] for x in p["parts"][0]["plates"]] == [plates[name][1]]
+            view = (await async_client.get(f"{API}/products/{plates[name][0]}/view")).json()
+            assert [x["library_file_id"] for x in view["parts"][0]["plates"]] == [plates[name][1]]
+        r = await async_client.post(
+            f"{API}/jobs", json={"jobs": [{"component_code": codes["Grondaie"], "plate_ids": [plates["Audi"][2]]}]}
+        )
+        assert r.status_code == 422
+        assert "another product" in r.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_component_shared_by_two_products(self, async_client):

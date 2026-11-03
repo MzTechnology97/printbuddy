@@ -24,7 +24,7 @@ from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.geometry import object_fingerprints, object_meshes, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
-from backend.app.farm.products.folders import excluded_files
+from backend.app.farm.products.folders import component_files, excluded_files, may_print
 from backend.app.farm.products.models import FarmComponent, FarmShape, component_shapes, component_yield
 from backend.app.models.library import LibraryFile, LibraryFolder
 
@@ -349,7 +349,8 @@ async def _confirmed_plates_by(db: AsyncSession, attr: str, wanted: set) -> dict
 async def plates_for(db: AsyncSession, components: list[FarmComponent]) -> dict[int, list[dict]]:
     """Confirmed plates of each component (by id), in the shape of :func:`_confirmed_plates_by`.
 
-    A plate of a shape serves every colour of it; a set's plate yields its complete sets.
+    A plate of a shape serves every colour of it; a set's plate yields its complete sets. Only
+    the 3MFs of the component's products count.
     """
     result: dict[int, list[dict]] = {c.id: [] for c in components}
     shapes = {s for c in components for s in component_shapes(c)}
@@ -368,9 +369,12 @@ async def plates_for(db: AsyncSession, components: list[FarmComponent]) -> dict[
         )
     ).scalars()
     resolver = await PrinterModelResolver.load(db)
+    files = await component_files(db)
     for plate in plates:
         model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
         for c in components:
+            if not may_print(files, c.id, plate.library_file_id):
+                continue
             if n := component_yield(c, plate.yields):
                 result[c.id].append(
                     {

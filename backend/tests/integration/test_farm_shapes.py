@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from backend.app.core.database import Base
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.service import object_key, suggest_shapes
+from backend.tests.integration.test_farm_products import product_files
 
 API = "/api/v1/farm"
 
@@ -70,8 +71,9 @@ class TestShapesAndComponents:
     async def test_component_made_before_shapes_takes_a_shape_and_keeps_its_code(self, async_client, db_session):
         case = await post(async_client, "/shapes", {"name": "Case 18650"})
         old = await post(async_client, "/components", {"name": "Contenitore doppio 18650"})
-        await post(async_client, "/products", {"name": "Contenitore", "parts": [{"component_code": old["code"]}]})
-        await confirmed_plate(db_session, 1, [("Case.stl", 8, case["id"])])
+        body = {"name": "Contenitore", "parts": [{"component_code": old["code"]}]}
+        [file_id] = await product_files(db_session, [(await post(async_client, "/products", body))["project_id"]])
+        await confirmed_plate(db_session, 1, [("Case.stl", 8, case["id"])], file_id=file_id)
 
         r = await async_client.patch(f"{API}/components/{old['code']}", json={"shape_id": case["id"]})
         assert r.status_code == 200, r.text
@@ -102,13 +104,18 @@ class TestShapesAndComponents:
         single = await post(async_client, "/components", {"name": "Contenitore"})
         double = await post(async_client, "/components", {"name": "Contenitore (2)"})
         cap = await post(async_client, "/components", {"name": "Tappo"})
-        await post(async_client, "/products", {"name": "Da 1", "parts": [
-            {"component_code": single["code"]}, {"component_code": cap["code"], "quantity": 2}]})
-        await post(async_client, "/products", {"name": "Da 2", "parts": [
-            {"component_code": double["code"], "quantity": 2}, {"component_code": cap["code"], "quantity": 4}]})
-        await post(async_client, "/products", {"name": "Misto", "parts": [
-            {"component_code": single["code"]}, {"component_code": double["code"], "quantity": 3}]})
-        plate = FarmPlate(library_file_id=7, plate_index=1, printer_model="A1", materials=["PLA"], status="confirmed")
+        bodies = [
+            {"name": "Da 1", "parts": [{"component_code": single["code"]}, {"component_code": cap["code"], "quantity": 2}]},
+            {"name": "Da 2", "parts": [
+                {"component_code": double["code"], "quantity": 2}, {"component_code": cap["code"], "quantity": 4}]},
+            {"name": "Misto", "parts": [
+                {"component_code": single["code"]}, {"component_code": double["code"], "quantity": 3}]},
+        ]
+        pids = [(await post(async_client, "/products", body))["project_id"] for body in bodies]
+        [file_id] = await product_files(db_session, pids)
+        plate = FarmPlate(
+            library_file_id=file_id, plate_index=1, printer_model="A1", materials=["PLA"], status="confirmed"
+        )
         plate.yields = [FarmPlateYield(object_name="Case", quantity=8, component_code=double["code"])]
         db_session.add(plate)
         await db_session.commit()
@@ -156,8 +163,9 @@ class TestPlatesByShape:
             for color in ("Nero", "Bianco"):
                 c = await post(async_client, "/components", {"shape_id": shape["id"], "color": color})
                 codes[shape["name"], color] = c["code"]
+        pids = []
         for color in ("Nero", "Bianco"):
-            await post(
+            product = await post(
                 async_client,
                 "/products",
                 {
@@ -168,8 +176,10 @@ class TestPlatesByShape:
                     ],
                 },
             )
-        await confirmed_plate(db_session, 1, [("sopra", 15, top["id"]), ("sotto", 15, bottom["id"])])
-        await confirmed_plate(db_session, 2, [("sopra", 2, top["id"]), ("sotto (1)", 2, bottom["id"])])
+            pids.append(product["project_id"])
+        [f] = await product_files(db_session, pids)
+        await confirmed_plate(db_session, 1, [("sopra", 15, top["id"]), ("sotto", 15, bottom["id"])], file_id=f)
+        await confirmed_plate(db_session, 2, [("sopra", 2, top["id"]), ("sotto (1)", 2, bottom["id"])], file_id=f)
 
         products = (await async_client.get(f"{API}/products")).json()["products"]
         assert len(products) == 2
