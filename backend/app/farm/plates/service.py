@@ -427,14 +427,52 @@ def fits_shape(fp: list[float] | None, measured: list[list[float]] | None) -> bo
     return not fp or not measured or any(same_piece(fp, m) for m in measured)
 
 
-async def suggest_shapes(db: AsyncSession, names: list[str]) -> dict[str, int]:
+async def name_scopes(db: AsyncSession) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+    """Shapes a name may propose for each product, and the products of each 3MF project.
+
+    A product's shapes are those of the pieces in its 3MF projects and of its components (a shape
+    named by hand counts once a component of the product has it). Names are reused across
+    products ("Corpo1"), so a name only proposes shapes of the product the object belongs to.
+    """
+    from backend.app.farm.products.folders import file_products
+    from backend.app.farm.products.models import FarmProductPart
+
+    files = await file_products(db)
+    scopes: dict[int, set[int]] = {}
+    rows = await db.execute(
+        select(FarmPlate.library_file_id, FarmPlateYield.shape_id)
+        .join(FarmPlate, FarmPlate.id == FarmPlateYield.plate_id)
+        .where(FarmPlateYield.shape_id.isnot(None), FarmPlate.library_file_id.in_(files))
+        .distinct()
+    )
+    for file_id, shape_id in rows.all():
+        for project_id in files[file_id]:
+            scopes.setdefault(project_id, set()).add(shape_id)
+    parts = await db.execute(
+        select(FarmProductPart.project_id, FarmComponent).join(
+            FarmComponent, FarmComponent.id == FarmProductPart.component_id
+        )
+    )
+    for project_id, comp in parts.all():
+        scopes.setdefault(project_id, set()).update(component_shapes(comp))
+    return scopes, files
+
+
+def scope_of(files: list[int], scopes: dict[int, set[int]], products: dict[int, set[int]]) -> set[int]:
+    """Shapes the products of these files may propose by name; none when no product holds them."""
+    return {s for f in files for pid in products.get(f, ()) for s in scopes.get(pid, ())}
+
+
+async def suggest_shapes(db: AsyncSession, names: list[str], scope: set[int] | None = None) -> dict[str, int]:
     """Shape to propose for each object name, from names already confirmed elsewhere and shape names.
 
     Same name after :func:`object_key`, or one name's words contained in the other's
     ("trurffle sopra k2" ⊇ "trurffle sopra"), sharing at least two words and not
     differing by a number ("portiera grande 2" is not "portiera grande"). Ambiguous
-    names get no proposal.
+    names get no proposal. ``scope``: only these shapes may be proposed.
     """
+    if scope is not None and not scope:
+        return {}
     known: dict[str, set[int]] = {}
     confirmed = await db.execute(
         select(FarmPlateYield.object_name, FarmPlateYield.shape_id)
@@ -445,6 +483,8 @@ async def suggest_shapes(db: AsyncSession, names: list[str]) -> dict[str, int]:
         known.setdefault(object_key(obj), set()).add(shape_id)
     for shape in (await db.execute(select(FarmShape))).scalars():
         known.setdefault(object_key(shape.name), set()).add(shape.id)
+    if scope is not None:
+        known = {key: ids & scope for key, ids in known.items() if ids & scope}
 
     proposals: dict[str, int] = {}
     for name in names:

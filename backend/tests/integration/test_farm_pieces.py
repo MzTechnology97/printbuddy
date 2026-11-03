@@ -452,22 +452,57 @@ async def test_a_name_proposes_a_shape_only_when_the_geometry_agrees(async_clien
     """"Corpo1" is every CAD's default name: a key holder must not be offered the Sodastream base's shape."""
     nas = tmp_path / "nas"
     make_mesh_project(nas / "Soda" / "base.3mf", {1: [("Corpo1", box(10, 20, 5), None)]})
-    make_mesh_project(nas / "Bmw" / "key.3mf", {1: [("Corpo1.stl", box(30, 30, 2), None)] * 2})
-    make_mesh_project(nas / "Caps" / "tappo.3mf", {1: [("Tappo", tetra(), None)]})
+    make_mesh_project(nas / "Soda" / "key.3mf", {1: [("Corpo1.stl", box(30, 30, 2), None)] * 2})
     folder = await add_external(async_client, nas)
     await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
     await scan(async_client, folder)
     files = {
         Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
     }
+    soda = (await async_client.get(f"/api/v1/library/files/{files['base.3mf']}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Soda"})).json()["project_id"]
+    await async_client.put(f"{API}/products/{pid}/folders/{soda}", json={"linked": True})
     base = (await async_client.post(f"{API}/shapes", json={"name": "Base jet"})).json()["id"]
-    tappo = (await async_client.post(f"{API}/shapes", json={"name": "Tappo"})).json()["id"]  # by hand, unmeasured
     pieces = {p["names"][0]: p for p in (await async_client.get(f"{API}/pieces")).json()}
     r = await async_client.put(f"{API}/pieces", json={"yield_ids": pieces["Corpo1"]["yield_ids"], "shape_id": base})
     assert r.status_code == 200
 
     pieces = {p["names"][0]: p for p in (await async_client.get(f"{API}/pieces")).json()}
     assert pieces["Corpo1.stl"]["suggested_shape_id"] is None  # same name once cleaned, other geometry
-    assert pieces["Tappo"]["suggested_shape_id"] == tappo  # nothing measured to compare: the name decides
     [plate] = (await async_client.get(f"{API}/library/files/{files['key.3mf']}/plates")).json()
+    assert [y["suggested_shape_id"] for y in plate["yields"]] == [None]
+
+
+async def test_a_name_proposes_only_shapes_of_the_same_product(async_client, tmp_path):
+    """Two products each with their own "Corpo1": neither is offered the other's shape, geometry or not."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Bmw" / "bmw.3mf", {1: [("Corpo1", box(30, 30, 2), None)]})
+    make_mesh_project(nas / "Shelly" / "shelly.3mf", {1: [("Corpo1", tetra(), None)]})
+    make_mesh_project(nas / "Loose" / "loose.3mf", {1: [("Corpo1", box(5, 5, 5), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
+    }
+    ids = {}
+    for name, file in (("Bmw", "bmw.3mf"), ("Shelly", "shelly.3mf")):
+        fid = (await async_client.get(f"/api/v1/library/files/{files[file]}")).json()["folder_id"]
+        ids[name] = (await async_client.post(f"{API}/products", json={"name": name})).json()["project_id"]
+        await async_client.put(f"{API}/products/{ids[name]}/folders/{fid}", json={"linked": True})
+    # A shape named by hand, never measured, on a BMW component: geometry can't tell it apart.
+    corpo = (await async_client.post(f"{API}/shapes", json={"name": "Corpo1"})).json()["id"]
+    code = (await async_client.post(f"{API}/components", json={"shape_id": corpo, "color": "Nero"})).json()["code"]
+    await async_client.put(f"{API}/products/{ids['Bmw']}/parts/{code}", json={"quantity": 1})
+
+    async def proposed(pid):
+        return [
+            p["suggested_shape_id"] for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+        ]
+
+    assert await proposed(ids["Bmw"]) == [corpo]  # its own component's shape
+    assert await proposed(ids["Shelly"]) == [None]  # not the BMW's, same name or not
+    by_file = {p["files"][0]: p["suggested_shape_id"] for p in (await async_client.get(f"{API}/pieces")).json()}
+    assert by_file == {"bmw.3mf": corpo, "shelly.3mf": None, "loose.3mf": None}  # loose: in no product
+    [plate] = (await async_client.get(f"{API}/library/files/{files['shelly.3mf']}/plates")).json()
     assert [y["suggested_shape_id"] for y in plate["yields"]] == [None]

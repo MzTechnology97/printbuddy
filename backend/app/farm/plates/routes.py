@@ -22,7 +22,9 @@ from backend.app.farm.plates.service import (
     fits_shape,
     folder_hint_warning,
     link_by_geometry,
+    name_scopes,
     refresh_plates,
+    scope_of,
     shape_geometries,
     suggest_shapes,
 )
@@ -62,14 +64,20 @@ class PrinterModelMapIn(BaseModel):
 
 async def _proposals(db: AsyncSession, plates: list[FarmPlate]) -> dict[int, int]:
     """Shape proposed for each object still without one (by yield id): by its name, if its geometry agrees."""
-    open_ = [y for p in plates for y in p.yields if y.shape_id is None]
-    by_name = await suggest_shapes(db, sorted({y.object_name for y in open_}))
-    measured = await shape_geometries(db, set(by_name.values()))
-    return {
-        y.id: shape_id
-        for y in open_
-        if (shape_id := by_name.get(y.object_name)) and fits_shape(y.fingerprint, measured.get(shape_id))
-    }
+    scopes, products = await name_scopes(db)
+    out: dict[int, int] = {}
+    for plate in plates:  # each file proposes only shapes of its own products
+        open_ = [y for y in plate.yields if y.shape_id is None]
+        if not open_:
+            continue
+        scope = scope_of([plate.library_file_id], scopes, products)
+        by_name = await suggest_shapes(db, sorted({y.object_name for y in open_}), scope)
+        measured = await shape_geometries(db, set(by_name.values()))
+        for y in open_:
+            shape_id = by_name.get(y.object_name)
+            if shape_id and fits_shape(y.fingerprint, measured.get(shape_id)):
+                out[y.id] = shape_id
+    return out
 
 
 def _plate_dict(
@@ -212,13 +220,14 @@ async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
     )
     excluded = await excluded_files(db)
     rows = [r for r in rows if r[0].fingerprint and r[1] in files and r[1] not in excluded]
-    pieces, fingerprints = [], []
+    pieces, fingerprints, piece_files = [], [], []
     for members in group([r[0].fingerprint for r in rows]):
         items = [rows[i] for i in members]
         names = Counter(y.object_name for y, _, _ in items)
         shapes = Counter(y.shape_id for y, _, _ in items if y.shape_id is not None)
         y0, file_id, plate_index = items[0]
         fingerprints.append(y0.fingerprint)
+        piece_files.append(sorted({f for _, f, _ in items}))
         pieces.append(
             {
                 "yield_ids": [y.id for y, _, _ in items],
@@ -236,11 +245,11 @@ async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
                 "sample": {"library_file_id": file_id, "plate_index": plate_index},
             }
         )
-    open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
-    proposals = await suggest_shapes(db, open_names)
-    measured = await shape_geometries(db, set(proposals.values()))
-    for p, fp in zip(pieces, fingerprints, strict=True):
-        if p["shape_id"] is None:
+    scopes, products = await name_scopes(db)
+    for p, fp, file_ids in zip(pieces, fingerprints, piece_files, strict=True):
+        if p["shape_id"] is None:  # by name, among the shapes of the products its files belong to
+            proposals = await suggest_shapes(db, p["names"], scope_of(file_ids, scopes, products))
+            measured = await shape_geometries(db, set(proposals.values()))
             shape_id = next((proposals[n] for n in p["names"] if n in proposals), None)
             p["suggested_shape_id"] = shape_id if shape_id and fits_shape(fp, measured.get(shape_id)) else None
     pieces.sort(key=lambda p: (p["unlinked"] == 0, -p["plates"]))

@@ -237,7 +237,10 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
             }
         )
     open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
-    proposals = await suggest_shapes(db, open_names)
+    # By name only among this product's shapes: its 3MF pieces' and its components' ("Corpo1" is everywhere).
+    scope = {y.shape_id for y, _, _ in rows if y.shape_id is not None}
+    scope |= {s for _, c in parts for s in products.component_shapes(c)}
+    proposals = await suggest_shapes(db, open_names, scope)
     measured = await shape_geometries(db, set(proposals.values()))
     by_yield = {y.id: y.fingerprint for y, _, _ in rows}
     for p in pieces:
