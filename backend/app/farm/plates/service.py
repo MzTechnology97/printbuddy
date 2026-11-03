@@ -403,6 +403,30 @@ def object_key(name: str) -> str:
     return " ".join(re.sub(r"[_\-]+", " ", key).split())
 
 
+async def shape_geometries(db: AsyncSession, shape_ids: set[int]) -> dict[int, list[list[float]]]:
+    """Measured fingerprints of the objects already linked to each shape."""
+    out: dict[int, list[list[float]]] = {}
+    if shape_ids:
+        rows = await db.execute(
+            select(FarmPlateYield.shape_id, FarmPlateYield.fingerprint).where(
+                FarmPlateYield.shape_id.in_(shape_ids), FarmPlateYield.fingerprint.isnot(None)
+            )
+        )
+        for shape_id, fp in rows.all():
+            if fp:
+                out.setdefault(shape_id, []).append(fp)
+    return out
+
+
+def fits_shape(fp: list[float] | None, measured: list[list[float]] | None) -> bool:
+    """A name-based proposal holds only if the geometry agrees with the shape's measured objects.
+
+    Generic CAD names ("Corpo1", "Body1", "Assemblaggio") are shared by unrelated objects; a shape
+    with no measured object yet (named by hand) can't be checked, so the name decides.
+    """
+    return not fp or not measured or any(same_piece(fp, m) for m in measured)
+
+
 async def suggest_shapes(db: AsyncSession, names: list[str]) -> dict[str, int]:
     """Shape to propose for each object name, from names already confirmed elsewhere and shape names.
 

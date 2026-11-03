@@ -19,9 +19,11 @@ from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_
 from backend.app.farm.plates.service import (
     PlateReadError,
     confirm,
+    fits_shape,
     folder_hint_warning,
     link_by_geometry,
     refresh_plates,
+    shape_geometries,
     suggest_shapes,
 )
 from backend.app.farm.products.folders import excluded_files
@@ -58,16 +60,23 @@ class PrinterModelMapIn(BaseModel):
     target_model: str = Field(min_length=1, max_length=50)
 
 
-async def _proposals(db: AsyncSession, plates: list[FarmPlate]) -> dict[str, int]:
-    """Shape proposed for the object names still without one."""
-    return await suggest_shapes(db, sorted({y.object_name for p in plates for y in p.yields if y.shape_id is None}))
+async def _proposals(db: AsyncSession, plates: list[FarmPlate]) -> dict[int, int]:
+    """Shape proposed for each object still without one (by yield id): by its name, if its geometry agrees."""
+    open_ = [y for p in plates for y in p.yields if y.shape_id is None]
+    by_name = await suggest_shapes(db, sorted({y.object_name for y in open_}))
+    measured = await shape_geometries(db, set(by_name.values()))
+    return {
+        y.id: shape_id
+        for y in open_
+        if (shape_id := by_name.get(y.object_name)) and fits_shape(y.fingerprint, measured.get(shape_id))
+    }
 
 
 def _plate_dict(
     plate: FarmPlate,
     resolver: PrinterModelResolver,
     warning: str | None = None,
-    proposals: dict[str, int] | None = None,
+    proposals: dict[int, int] | None = None,
 ) -> dict:
     target = resolver.resolve(plate.printer_model)
     return {
@@ -90,7 +99,7 @@ def _plate_dict(
                 "object_name": y.object_name,
                 "quantity": y.quantity,
                 "shape_id": y.shape_id,
-                "suggested_shape_id": None if y.shape_id else (proposals or {}).get(y.object_name),
+                "suggested_shape_id": None if y.shape_id else (proposals or {}).get(y.id),
                 "component_code": y.component_code,
             }
             for y in plate.yields
@@ -203,12 +212,13 @@ async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
     )
     excluded = await excluded_files(db)
     rows = [r for r in rows if r[0].fingerprint and r[1] in files and r[1] not in excluded]
-    pieces = []
+    pieces, fingerprints = [], []
     for members in group([r[0].fingerprint for r in rows]):
         items = [rows[i] for i in members]
         names = Counter(y.object_name for y, _, _ in items)
         shapes = Counter(y.shape_id for y, _, _ in items if y.shape_id is not None)
         y0, file_id, plate_index = items[0]
+        fingerprints.append(y0.fingerprint)
         pieces.append(
             {
                 "yield_ids": [y.id for y, _, _ in items],
@@ -228,9 +238,11 @@ async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
         )
     open_names = sorted({n for p in pieces if p["shape_id"] is None for n in p["names"]})
     proposals = await suggest_shapes(db, open_names)
-    for p in pieces:
+    measured = await shape_geometries(db, set(proposals.values()))
+    for p, fp in zip(pieces, fingerprints, strict=True):
         if p["shape_id"] is None:
-            p["suggested_shape_id"] = next((proposals[n] for n in p["names"] if n in proposals), None)
+            shape_id = next((proposals[n] for n in p["names"] if n in proposals), None)
+            p["suggested_shape_id"] = shape_id if shape_id and fits_shape(fp, measured.get(shape_id)) else None
     pieces.sort(key=lambda p: (p["unlinked"] == 0, -p["plates"]))
     return pieces
 
