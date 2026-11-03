@@ -2237,6 +2237,7 @@ export interface NotificationProvider {
   last_success: string | null;
   last_error: string | null;
   last_error_at: string | null;
+  commands_conflict?: boolean; // Telegram: another program reads the bot, commands don't arrive
   // Timestamps
   created_at: string;
   updated_at: string;

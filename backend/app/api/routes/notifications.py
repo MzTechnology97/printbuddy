@@ -33,13 +33,18 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 def _provider_to_dict(provider: NotificationProvider) -> dict:
     """Convert a NotificationProvider model to a response dictionary."""
+    from backend.app.services.telegram_bot import telegram_bot
+
     printer_ids = [printer.id for printer in getattr(provider, "printers", [])]
+    config = json.loads(provider.config) if isinstance(provider.config, str) else provider.config
     return {
         "id": provider.id,
         "name": provider.name,
         "provider_type": provider.provider_type,
         "enabled": provider.enabled,
-        "config": json.loads(provider.config) if isinstance(provider.config, str) else provider.config,
+        "config": config,
+        # Telegram: another program keeps reading this bot, so its commands don't reach Printbuddy
+        "commands_conflict": provider.provider_type == "telegram" and telegram_bot.shared_with_another_program(config),
         # Print lifecycle events
         "on_print_start": provider.on_print_start,
         "on_print_complete": provider.on_print_complete,

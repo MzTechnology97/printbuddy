@@ -97,6 +97,11 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
               ) && (
                 <span className="text-xs text-status-error" title={provider.last_error}>{t('notifications.error')}</span>
               )}
+              {provider.commands_conflict && (
+                <span role="status" className="text-xs text-status-error" title={t('notifications.telegramConflict')}>
+                  {t('notifications.telegramConflictShort')}
+                </span>
+              )}
               <Toggle
                 checked={provider.enabled}
                 onChange={(checked) => updateMutation.mutate({ enabled: checked })}

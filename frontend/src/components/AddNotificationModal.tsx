@@ -542,6 +542,9 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
                 users in Allowed user IDs.
               </p>
             )}
+            {providerType === 'telegram' && provider?.commands_conflict && (
+              <p role="alert" className="text-xs text-red-400">{t('notifications.telegramConflict')}</p>
+            )}
           </div>
 
           {/* Test Button */}

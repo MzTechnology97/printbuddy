@@ -468,3 +468,39 @@ async def test_another_user_tapping_a_confirmation_leaves_it_to_who_asked(bot, p
         assert (await bot.on_button(CHAT, f"ok:{key}", "777")).text == "Questa conferma è di un altro utente."
         assert (await bot.on_button(CHAT, f"ok:{key}", CHAT)).text == "Pausa inviata."
     client.pause_print.assert_called_once()
+
+
+async def test_repeated_409s_mark_the_bot_as_shared_with_another_program(bot, db_session, fast_sleep, caplog):
+    conflict = tb.TelegramConflict("getUpdates", 409, "Conflict: terminated by other getUpdates request")
+    fake = FakeTelegram([[], conflict, conflict, conflict])
+    config = {"bot_token": TOKEN, "commands_enabled": "true"}
+    with caplog.at_level(logging.WARNING, logger=tb.__name__):
+        await _run_poller(bot, db_session, fake)
+        await _until(lambda: len(fake.polls()) >= 5)  # three 409s, then it waits again
+    await bot.stop()
+    assert bot.shared_with_another_program(config)
+    assert "another program reads this bot" in caplog.text and TOKEN not in caplog.text
+
+
+def test_the_shared_bot_warning_needs_three_recent_409s_with_commands_on():
+    bot = tb.TelegramBot(client_factory=lambda token: FakeTelegram())
+    config = {"bot_token": TOKEN, "commands_enabled": "true"}
+    now = time.time()
+    bot._conflicts[TOKEN] = [now - 10, now - 5]
+    assert not bot.shared_with_another_program(config)  # two are not enough
+    bot._conflicts[TOKEN].append(now)
+    assert bot.shared_with_another_program(config)
+    assert not bot.shared_with_another_program({**config, "commands_enabled": "false"})
+    bot._conflicts[TOKEN] = [now - tb.CONFLICT_WINDOW_SECONDS - 60] * 3  # the other program is gone
+    assert not bot.shared_with_another_program(config) and TOKEN not in bot._conflicts
+
+
+async def test_the_provider_api_reports_a_shared_bot(async_client, db_session):
+    await _provider(db_session, "Shared", bot_token=TOKEN, chat_id=CHAT, commands_enabled="true")
+    await _provider(db_session, "Alone", bot_token="other:token", chat_id=CHAT, commands_enabled="true")
+    tb.telegram_bot._conflicts[TOKEN] = [time.time()] * 3
+    try:
+        providers = (await async_client.get("/api/v1/notifications/")).json()
+    finally:
+        tb.telegram_bot._conflicts.pop(TOKEN, None)
+    assert {p["name"]: p["commands_conflict"] for p in providers} == {"Shared": True, "Alone": False}

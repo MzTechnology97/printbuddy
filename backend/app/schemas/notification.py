@@ -201,6 +201,7 @@ class NotificationProviderResponse(NotificationProviderBase):
     last_success: datetime | None = None
     last_error: str | None = None
     last_error_at: datetime | None = None
+    commands_conflict: bool = False  # Telegram: another program reads the bot (repeated 409s)
     created_at: datetime
     updated_at: datetime
 

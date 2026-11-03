@@ -4811,6 +4811,8 @@ export default {
     farmComponentUrgentDescription: '沒有已裝載該緊急零件材料的空閒印表機',
     farmBatchToAssign: '待分配批次',
     farmBatchToAssignDescription: '有批次等待分配',
+    telegramConflict: '此機器人也被另一個程式讀取（例如 Klipper 外掛）：指令無法到達 Printbuddy。請使用專用機器人。',
+    telegramConflictShort: '機器人被其他程式讀取',
     // Queue events
     jobAdded: '任務已新增',
     jobAddedDescription: '任務已新增到佇列',

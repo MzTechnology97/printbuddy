@@ -4812,6 +4812,8 @@ export default {
     farmComponentUrgentDescription: 'Un componente urgente non ha una stampante libera con il materiale caricato',
     farmBatchToAssign: 'Lotto da assegnare',
     farmBatchToAssignDescription: 'Un lotto aspetta di essere assegnato',
+    telegramConflict: 'Questo bot è letto anche da un altro programma (per esempio un plugin di Klipper): i comandi non arrivano a Printbuddy. Usa un bot dedicato.',
+    telegramConflictShort: 'Bot letto da un altro programma',
     // Queue events
     jobAdded: 'Lavoro aggiunto',
     jobAddedDescription: 'Lavoro aggiunto alla coda',
