@@ -6,9 +6,10 @@ packed. Stored on the product (``FarmProduct.assemblies``), by component code, s
 only ever holds the product's own parts; parts in no group are packed directly.
 
 Each group has a key stable within the product ("A1"), a name, how many go in one unit sold
-(``per_unit``) and its parts with their quantity per group. A part is in one group at most.
-Quantity per group × per_unit should be the part's quantity in the product: the sheet warns
-when it is not (the bill of materials stays the product's parts).
+(``per_unit``) and its parts with their quantity per group. The bill of materials stays the
+product's parts: groups only say which of those pieces are closed into groups. For each part,
+per_unit × quantity summed over its groups must not exceed its quantity in the product (the
+rest are packed directly); the sheet warns when it does.
 """
 
 from __future__ import annotations
@@ -36,19 +37,25 @@ def assemblies_of(product: FarmProduct, quantities: dict[str, int]) -> list[dict
     """
     if product.kind == "set":
         return []
-    out = []
+    groups = []
     for a in product.assemblies or []:
         parts = [p for p in a["parts"] if p["component_code"] in quantities]
-        if not parts:
-            continue
+        if parts:
+            groups.append((a, parts))
+    in_groups: dict[str, int] = {}
+    for a, parts in groups:
+        for p in parts:
+            in_groups[p["component_code"]] = in_groups.get(p["component_code"], 0) + p["quantity"] * a["per_unit"]
+    out = []
+    for a, parts in groups:
         warnings = [
             {
                 "component_code": p["component_code"],
-                "expected": p["quantity"] * a["per_unit"],
+                "expected": in_groups[p["component_code"]],
                 "quantity": quantities[p["component_code"]],
             }
             for p in parts
-            if p["quantity"] * a["per_unit"] != quantities[p["component_code"]]
+            if in_groups[p["component_code"]] > quantities[p["component_code"]]  # more in groups than in the product
         ]
         out.append(
             {"key": a["key"], "name": a["name"], "per_unit": a["per_unit"], "parts": parts, "warnings": warnings}
@@ -93,7 +100,7 @@ class AssembliesIn(BaseModel):
 
 @router.put("/products/{project_id}/assemblies", dependencies=[products._update])
 async def set_assemblies(project_id: int, data: AssembliesIn, db: AsyncSession = Depends(get_db)) -> dict:
-    """Replace the product's groups to assemble. Only its own parts, each in one group at most."""
+    """Replace the product's groups to assemble. Only its own parts."""
     from backend.app.farm.products.pieces import _parts
 
     product = await db.get(FarmProduct, project_id)
@@ -107,18 +114,17 @@ async def set_assemblies(project_id: int, data: AssembliesIn, db: AsyncSession =
         raise HTTPException(422, "Two groups with the same key")
     numbers = [int(k[1:]) for k in kept] + [int(a["key"][1:]) for a in product.assemblies or []]
     next_number = max(numbers, default=0) + 1
-    seen: set[str] = set()
     groups = []
     for a in data.assemblies:
         name = products._clean(a.name, 200)
         if not name:
             raise HTTPException(422, "Name the group")
-        for p in a.parts:
-            if p.component_code not in quantities:
-                raise HTTPException(422, f"{p.component_code} is not a part of this product")
-            if p.component_code in seen:
-                raise HTTPException(422, f"{p.component_code} is already in another group")
-            seen.add(p.component_code)
+        codes = [p.component_code for p in a.parts]
+        for code in codes:
+            if code not in quantities:
+                raise HTTPException(422, f"{code} is not a part of this product")
+        if len(set(codes)) != len(codes):
+            raise HTTPException(422, "A part listed twice in one group: set its pieces per group instead")
         key = a.key if a.key in kept else None
         if key is None:
             key, next_number = f"A{next_number}", next_number + 1

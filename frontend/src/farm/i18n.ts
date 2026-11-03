@@ -80,7 +80,7 @@ const en = {
   },
   assemblies: {
     title: 'Groups to assemble',
-    intro: 'Parts assembled together before the finished product, e.g. the two halves of a handle. Seller Hub counts how many groups the stock allows; parts in no group are packed directly.',
+    intro: 'Parts assembled together before the finished product, e.g. the two halves of a handle. Seller Hub counts how many groups the stock allows; pieces not closed into a group are packed directly.',
     perUnit: '×{{count}} per unit',
     add: 'New group',
     name: 'Group name',
@@ -90,7 +90,7 @@ const en = {
     cancel: 'Cancel',
     remove: 'Delete group',
     removeConfirm: 'Delete the group "{{name}}"? Its parts stay in the product.',
-    warning: '{{component_code}}: {{expected}} in the groups, {{quantity}} in the product',
+    warning: '{{component_code}}: {{expected}} in the groups, only {{quantity}} in the product',
   },
   productPieces: {
     title: 'Pieces of the product',
@@ -418,7 +418,7 @@ const it: typeof en = {
   },
   assemblies: {
     title: 'Gruppi da assemblare',
-    intro: 'Parti che si assemblano tra loro prima del prodotto finito, per esempio le due metà di una maniglia. Seller Hub conta quanti gruppi permette la giacenza; le parti senza gruppo si confezionano direttamente.',
+    intro: 'Parti che si assemblano tra loro prima del prodotto finito, per esempio le due metà di una maniglia. Seller Hub conta quanti gruppi permette la giacenza; i pezzi che non entrano in un gruppo si confezionano direttamente.',
     perUnit: '×{{count}} per unità',
     add: 'Nuovo gruppo',
     name: 'Nome del gruppo',
@@ -428,7 +428,7 @@ const it: typeof en = {
     cancel: 'Annulla',
     remove: 'Elimina gruppo',
     removeConfirm: 'Eliminare il gruppo "{{name}}"? Le sue parti restano nel prodotto.',
-    warning: '{{component_code}}: {{expected}} nei gruppi, {{quantity}} nel prodotto',
+    warning: '{{component_code}}: {{expected}} nei gruppi, solo {{quantity}} nel prodotto',
   },
   productPieces: {
     title: 'Pezzi del prodotto',
