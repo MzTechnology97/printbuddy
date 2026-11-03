@@ -82,6 +82,22 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
   );
 }
 
+/** Requested components no active printer can print: no ready plate, or plates only for models nobody has. */
+export function NotPrintable({ components }: { components: FarmPlanComponent[] }) {
+  const { t } = useTranslation();
+  const missing = components.filter((c) => (c.to_print ?? 0) > 0 && !c.plates.some((p) => p.printers.length > 0));
+  if (!missing.length) return null;
+  return (
+    <div role="alert" className="text-sm text-amber-400 bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 space-y-1">
+      <p className="flex items-center gap-2 font-semibold">
+        <AlertTriangle className="w-4 h-4 shrink-0" /> {t('farm.plan.notPrintable', { count: missing.length })}
+      </p>
+      <p className="break-words">{missing.map((c) => `${c.code} ${c.name}`).join(' · ')}</p>
+      <Link to="/farm/products?tab=plates" className="text-bambu-green hover:underline">{t('farm.plan.toPlates')}</Link>
+    </div>
+  );
+}
+
 /** The cover of a product using the component (its variant, so in its colour) and the proposed plate's preview. */
 function ComponentPictures({ c }: { c: FarmPlanComponent }) {
   const { t } = useTranslation();
@@ -597,6 +613,7 @@ export function PrintPlanPage() {
         <p className="text-bambu-gray">{t('farm.plan.nothing')}</p>
       ) : (
         <>
+          <NotPrintable components={rows} />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-bambu-gray">
               {t('farm.plan.summary', { count: rows.length, pieces: rows.reduce((n, r) => n + r.missing, 0) })}
