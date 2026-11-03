@@ -189,7 +189,9 @@ function ProductForm({
               <select aria-label={t('farm.products.pickComponent')} className={INPUT} value={p.code}
                 onChange={(e) => setPart(i, { code: e.target.value })}>
                 <option value="">{t('farm.products.pickComponent')}</option>
-                {components.filter((c) => !c.retired || c.code === p.code).map((c) => (
+                {components
+                  .filter((c) => c.code === p.code || (!c.retired && (c.project_id == null || c.project_id === d.id)))
+                  .map((c) => (
                   <option key={c.code} value={c.code}>{c.code} · {c.name}</option>
                 ))}
               </select>
@@ -211,7 +213,7 @@ function ProductForm({
             <select aria-label={t('farm.products.shape')} className={`${INPUT} md:w-56`} value={newComponent.shapeId}
               onChange={(e) => setNewComponent({ ...newComponent, shapeId: e.target.value })}>
               <option value="">{t('farm.products.noShape')}</option>
-              {shapes.map((s) => (
+              {shapes.filter((s) => s.project_id == null || s.project_id === d.id).map((s) => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
@@ -288,7 +290,7 @@ export function ProductsPage() {
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
-  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
+  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: () => farmApi.getShapes() });
   const stats = new Map((overview.data || []).map((o) => [o.project_id, o]));
   const todo = (p: FarmProduct) =>
     !p.disabled && (!p.kind || p.parts.length === 0 || p.parts.some((x) => x.plates.length === 0));

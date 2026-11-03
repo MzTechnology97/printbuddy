@@ -42,6 +42,7 @@ export interface FarmVariant {
 export interface FarmComponent {
   code: string;
   name: string;
+  project_id?: number | null; // its product: components are never shared
   shape_id: number | null;
   shape: string | null;
   color: string | null;
@@ -204,6 +205,7 @@ export interface FarmPlanSettings {
 export interface FarmShape {
   id: number;
   name: string;
+  project_id?: number | null; // the product it is a piece of
 }
 
 /** One distinct piece across all plates (same geometry, any object name). */
@@ -321,7 +323,8 @@ export const farmApi = {
       method: 'POST',
       body: JSON.stringify({ into }),
     }),
-  getShapes: () => farmRequest<FarmShape[]>('/shapes'),
+  getShapes: (projectId?: number) =>
+    farmRequest<FarmShape[]>(projectId != null ? `/shapes?project_id=${projectId}` : '/shapes'),
   getPlan: () =>
     farmRequest<{ fetched_at: string | null; error: string | null; tolerance: number; components: FarmPlanComponent[] }>(
       '/plan',
