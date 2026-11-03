@@ -528,3 +528,41 @@ async def test_a_name_proposes_only_shapes_of_the_same_product(async_client, tmp
     assert by_file == {"bmw.3mf": corpo, "shelly.3mf": None, "loose.3mf": None}  # loose: in no product
     [plate] = (await async_client.get(f"{API}/library/files/{files['shelly.3mf']}/plates")).json()
     assert [y["suggested_shape_id"] for y in plate["yields"]] == [None]
+
+
+async def test_pieces_not_part_of_the_product_step_aside(async_client, tmp_path):
+    """An old handle on another plate of the same 3MF: one click puts it aside, with the plate it fills."""
+    nas = tmp_path / "nas"
+    make_mesh_project(
+        nas / "Lupo" / "lupo.3mf",
+        {1: [("Handle", box(10, 20, 5), None)] * 2, 2: [("Klamka Lewa", tetra(), None)] * 3},
+    )
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    file_id = (await async_client.get(f"{API}/library/files")).json()[0]["library_file_id"]
+    lupo = (await async_client.get(f"/api/v1/library/files/{file_id}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Lupo"})).json()["project_id"]
+    await async_client.put(f"{API}/products/{pid}/folders/{lupo}", json={"linked": True})
+    old = next(
+        p
+        for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+        if p["names"] == ["Klamka Lewa"]
+    )
+
+    # "Not part of it": no shape, no component, just remembered for this product.
+    r = await async_client.put(f"{API}/products/{pid}/pieces", json={"yield_ids": old["yield_ids"], "quantity": 0})
+    assert r.json()["shape_id"] is None
+    pieces = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    assert [(p["names"][0], p["quantity"], p["not_part"]) for p in pieces] == [
+        ("Handle", None, False),
+        ("Klamka Lewa", 0, True),  # aside, last
+    ]
+    [f] = (await async_client.get(f"{API}/products/{pid}/view")).json()["files"]
+    assert (f["proposed"], len(f["unrelated_plates"])) == (1, 1)  # plate 2 makes nothing for this product
+
+    await async_client.put(f"{API}/products/{pid}/pieces/restore", json={"yield_ids": old["yield_ids"]})
+    pieces = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    assert [(p["quantity"], p["not_part"]) for p in pieces] == [(None, False), (None, False)]
+    [f] = (await async_client.get(f"{API}/products/{pid}/view")).json()["files"]
+    assert (f["proposed"], f["unrelated_plates"]) == (2, [])

@@ -233,6 +233,7 @@ function ProductPlates({ view }: { view: FarmProductView }) {
                 </button>
                 {isOpen && (
                   <FilePlates file={{ library_file_id: f.library_file_id, path: f.path }} shapes={shapes.data || []}
+                    aside={f.unrelated_plates}
                     onShapeCreated={() => queryClient.invalidateQueries({ queryKey: ['farm', 'shapes'] })} />
                 )}
               </li>

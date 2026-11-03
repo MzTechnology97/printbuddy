@@ -37,7 +37,7 @@ from backend.app.core.auth import (
 from backend.app.core.database import get_db
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plan import service as plan
-from backend.app.farm.plates.geometry import group
+from backend.app.farm.plates.geometry import group, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.render import render_png
@@ -50,7 +50,7 @@ from backend.app.farm.plates.service import (
 )
 from backend.app.farm.products import routes as products
 from backend.app.farm.products.folders import excluded_by, project_folders
-from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
+from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape, not_part
 from backend.app.models.library import LibraryFile
 from backend.app.models.project import Project
 
@@ -232,7 +232,9 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
                 "shape": shapes.get(shape_id) if shape_id else None,
                 "mixed": len(shape_counts) > 1,
                 "suggested_shape_id": None,
-                "quantity": per_set.get(shape_id) if product.kind == "set" else part.quantity if part else None,
+                "quantity": (per_set.get(shape_id) if product.kind == "set" else part.quantity if part else None)
+                or (0 if not_part(product, items[0][0].fingerprint) else None),
+                "not_part": not_part(product, items[0][0].fingerprint),
                 "component": comp_dict(comp),
             }
         )
@@ -248,7 +250,7 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
             shape_id = next((proposals[n] for n in p["names"] if n in proposals), None)
             fp = by_yield.get(p["image_yield_id"])
             p["suggested_shape_id"] = shape_id if shape_id and fits_shape(fp, measured.get(shape_id)) else None
-    pieces.sort(key=lambda p: (p["quantity"] is not None, -p["plates"]))  # still to decide first
+    pieces.sort(key=lambda p: (p["not_part"], p["quantity"] is not None, -p["plates"]))  # to decide first
     return {
         "kind": product.kind,
         "set": comp_dict(set_comp),
@@ -494,6 +496,29 @@ async def set_part(project_id: int, code: str, data: PartQuantityIn, db: AsyncSe
     return {"project_id": project_id, "component_code": comp.code, "quantity": data.quantity}
 
 
+def _mark_not_part(product: FarmProduct, yields: list[FarmPlateYield], is_not_part: bool) -> None:
+    """Remember (or forget) that the piece of these objects is not part of the product."""
+    fp = next((y.fingerprint for y in yields if y.fingerprint), None)
+    if not fp:
+        return
+    rest = [f for f in product.not_part or [] if not same_piece(fp, f)]
+    product.not_part = [*rest, fp] if is_not_part else rest
+
+
+class PieceRestoreIn(BaseModel):
+    yield_ids: list[int] = Field(min_length=1, max_length=5000)
+
+
+@router.put("/products/{project_id}/pieces/restore", dependencies=[products._update])
+async def restore_product_piece(project_id: int, data: PieceRestoreIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """A piece marked as not part of the product goes back to "to decide"."""
+    product = await _product(db, project_id)
+    yields = list((await db.execute(select(FarmPlateYield).where(FarmPlateYield.id.in_(data.yield_ids)))).scalars())
+    _mark_not_part(product, yields, False)
+    await db.commit()
+    return {"project_id": project_id, "not_part": len(product.not_part or [])}
+
+
 class ProductPieceIn(BaseModel):
     yield_ids: list[int] = Field(min_length=1, max_length=5000)
     quantity: int = Field(ge=0, le=products.QTY_MAX)  # per product sold; 0: not part of it
@@ -510,6 +535,7 @@ async def set_product_piece(project_id: int, data: ProductPieceIn, db: AsyncSess
     yields = list((await db.execute(select(FarmPlateYield).where(FarmPlateYield.id.in_(data.yield_ids)))).scalars())
     if not yields:
         raise HTTPException(422, "Unknown piece")
+    _mark_not_part(product, yields, data.quantity == 0)
     shapes = await products._shape_names(db)
 
     shape_id = data.shape_id
@@ -520,6 +546,7 @@ async def set_product_piece(project_id: int, data: ProductPieceIn, db: AsyncSess
         shape_id = current[0][0] if current else None
     if shape_id is None:
         if data.quantity == 0:
+            await db.commit()  # only remembered as not part of the product
             return {"shape_id": None, "component_code": None, "quantity": 0, "plates_confirmed": 0}
         name = products._clean(data.shape_name or "", 200)
         if not name:

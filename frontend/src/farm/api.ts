@@ -124,6 +124,7 @@ export interface FarmProductView {
     confirmed: number;
     opened: boolean;
     excluded: boolean;
+    unrelated_plates?: number[]; // plates with only pieces that are not part of the product
   }[];
 }
 
@@ -236,6 +237,7 @@ export interface FarmProductPiece {
   mixed: boolean;
   suggested_shape_id: number | null;
   quantity: number | null;
+  not_part?: boolean; // marked "not part of the product": set aside
   component: { code: string; name: string; color: string | null; color_hex: string | null } | null;
 }
 
@@ -371,6 +373,11 @@ export const farmApi = {
     farmRequest<{ project_id: number; kind: FarmProductKind }>(`/products/${projectId}/kind`, {
       method: 'PUT',
       body: JSON.stringify({ kind }),
+    }),
+  restoreProductPiece: (projectId: number, yieldIds: number[]) =>
+    farmRequest<{ project_id: number; not_part: number }>(`/products/${projectId}/pieces/restore`, {
+      method: 'PUT',
+      body: JSON.stringify({ yield_ids: yieldIds }),
     }),
   setProductPiece: (projectId: number, data: FarmProductPieceInput) =>
     farmRequest<{ shape_id: number | null; component_code: string | null; quantity: number; plates_confirmed: number }>(
