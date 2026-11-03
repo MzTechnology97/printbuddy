@@ -4798,6 +4798,18 @@ export default {
     stockReorderAlertDescription: 'SKU 已達到補貨點',
     stockBreakAlert: '斷貨警報',
     stockBreakAlertDescription: '庫存將在補貨到達前耗盡',
+    // Print farm events
+    farmAlerts: '列印農場',
+    farmSlicingFailed: '農場切片失敗',
+    farmSlicingFailedDescription: '背景切片或自動重新切片失敗',
+    farmFileCorrupt: '農場檔案損壞',
+    farmFileCorruptDescription: '農場或 NAS 資料夾中的列印檔案已損壞',
+    farmPlateToClear: '待清理列印板',
+    farmPlateToClearDescription: '印表機已完成，農場工作正在等待清理列印板',
+    farmComponentUrgent: '緊急零件受阻',
+    farmComponentUrgentDescription: '沒有已裝載該緊急零件材料的空閒印表機',
+    farmBatchToAssign: '待分配批次',
+    farmBatchToAssignDescription: '有批次等待分配',
     // Queue events
     jobAdded: '任務已新增',
     jobAddedDescription: '任務已新增到佇列',

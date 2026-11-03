@@ -2609,6 +2609,17 @@ async def run_migrations(conn):
             conn, "ALTER TABLE notification_providers ADD COLUMN on_stock_break_alert BOOLEAN DEFAULT false"
         )
 
+    # Migration: Add print-farm event columns to notification_providers (backend/app/farm/notify.py).
+    for column in (
+        "on_farm_slicing_failed",
+        "on_farm_file_corrupt",
+        "on_farm_plate_to_clear",
+        "on_farm_component_urgent",
+        "on_farm_batch_to_assign",
+    ):
+        default = "0" if is_sqlite() else "false"
+        await _safe_execute(conn, f"ALTER TABLE notification_providers ADD COLUMN {column} BOOLEAN DEFAULT {default}")
+
     # Migration: Heal orphan auth-related rows left behind by user-delete
     # on SQLite. user_oidc_links, user_totp, user_otp_codes (introduced in
     # PR #933) and long_lived_tokens (PR #1108) all declare ON DELETE

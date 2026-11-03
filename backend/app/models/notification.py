@@ -100,6 +100,13 @@ class NotificationProvider(Base):
     on_stock_reorder_alert = Column(Boolean, default=False)  # SKU hits reorder point
     on_stock_break_alert = Column(Boolean, default=False)  # Stock will run out before replenishment
 
+    # Event triggers - Print farm (backend/app/farm/notify.py)
+    on_farm_slicing_failed = Column(Boolean, default=False)  # Background slicing (or auto re-slice) failed
+    on_farm_file_corrupt = Column(Boolean, default=False)  # A watched/NAS print file is not a valid archive
+    on_farm_plate_to_clear = Column(Boolean, default=False)  # Farm work waits for a plate to be cleared
+    on_farm_component_urgent = Column(Boolean, default=False)  # Urgent component, no free printer loaded for it
+    on_farm_batch_to_assign = Column(Boolean, default=False)  # A batch waits to be assigned (Products)
+
     # Event triggers - Print queue
     on_queue_job_added = Column(Boolean, default=False)  # Job added to queue
     on_queue_job_assigned = Column(Boolean, default=False)  # Model-based job assigned to printer

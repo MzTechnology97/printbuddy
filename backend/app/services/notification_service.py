@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import smtplib
+import time
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -21,6 +22,25 @@ from backend.app.services.notify_live_activity_service import notify_live_activi
 
 logger = logging.getLogger(__name__)
 
+# Seconds before each new try after a network error (timeout, refused connection); the tries run in the
+# background, so the event that sent the notification doesn't wait for them.
+RETRY_DELAYS = (5, 20)
+
+
+class NotificationNetworkError(Exception):
+    """The provider could not be reached (timeout, connection error): worth another try."""
+
+
+def _endpoint(exc: httpx.TransportError) -> str:
+    """Host (and Telegram method) of the failed request; never its path, which carries tokens."""
+    try:
+        url = exc.request.url
+    except RuntimeError:  # raised without a request
+        return "unknown host"
+    if url.host == "api.telegram.org":
+        return f"{url.host}/{url.path.rsplit('/', 1)[-1]}"
+    return url.host
+
 
 class NotificationService:
     """Service for sending notifications through various providers."""
@@ -30,6 +50,7 @@ class NotificationService:
         self._template_cache: dict[str, NotificationTemplate] = {}
         self._digest_scheduler_task: asyncio.Task | None = None
         self._last_digest_check: str = ""  # "HH:MM" to avoid duplicate checks
+        self._retry_tasks: set[asyncio.Task] = set()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -188,7 +209,7 @@ class NotificationService:
                 return False, f"Unknown provider type: {provider_type}"
         except Exception as e:
             logger.exception("Error sending test notification via %s", provider_type)
-            return False, str(e)
+            return False, str(e) or type(e).__name__  # a timeout's message is empty
 
     async def _send_callmebot(self, config: dict, message: str) -> tuple[bool, str]:
         """Send notification via CallMeBot (WhatsApp)."""
@@ -690,8 +711,13 @@ class NotificationService:
         image_data: bytes | None = None,
         event_type: str | None = None,
         variables: dict | None = None,
+        raise_network: bool = False,
     ) -> tuple[bool, str]:
-        """Send notification to a specific provider."""
+        """Send notification to a specific provider.
+
+        A network error (timeout, connection) comes back as a failure saying what failed, where
+        and after how long; with ``raise_network`` it raises ``NotificationNetworkError`` instead.
+        """
         # Check quiet hours
         if self._is_in_quiet_hours(provider):
             logger.info("Skipping notification to %s - quiet hours active", provider.name)
@@ -699,6 +725,7 @@ class NotificationService:
 
         config = json.loads(provider.config) if isinstance(provider.config, str) else provider.config
 
+        started = time.monotonic()
         try:
             if provider.provider_type == "callmebot":
                 return await self._send_callmebot(config, f"{title}\n{message}")
@@ -722,9 +749,81 @@ class NotificationService:
                 return await self._send_notify(config, title, message, event_type=event_type)
             else:
                 return False, f"Unknown provider type: {provider.provider_type}"
+        except httpx.TransportError as e:
+            # str() of a timeout is empty: name it, and where and when it happened (not the URL: tokens).
+            error = f"{type(e).__name__} from {_endpoint(e)} after {time.monotonic() - started:.1f}s"
+            if raise_network:
+                raise NotificationNetworkError(error) from e
+            logger.warning("Error sending notification via %s: %s", provider.name, error)
+            return False, error
         except Exception as e:
             logger.exception("Error sending notification via %s", provider.provider_type)
-            return False, str(e)
+            return False, str(e) or type(e).__name__
+
+    def _retry_later(self, provider_id: int, title: str, message: str, **send: Any) -> None:
+        task = asyncio.create_task(self._retry(provider_id, title, message, **send))
+        self._retry_tasks.add(task)  # keep a reference until it ends
+        task.add_done_callback(self._retry_tasks.discard)
+
+    async def _retry(
+        self,
+        provider_id: int,
+        title: str,
+        message: str,
+        event_type: str,
+        printer_id: int | None,
+        printer_name: str | None,
+        image_data: bytes | None,
+        variables: dict | None,
+    ) -> None:
+        """Send again after a network error, waiting longer before each try; the outcome is logged."""
+        from backend.app.core.database import async_session
+
+        attempts = len(RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(RETRY_DELAYS, start=2):
+            await asyncio.sleep(delay)
+            async with async_session() as db:
+                provider = await db.get(NotificationProvider, provider_id)
+                if provider is None or not provider.enabled:
+                    return
+                try:
+                    success, error = await self._send_to_provider(
+                        provider,
+                        title,
+                        message,
+                        db,
+                        image_data=image_data,
+                        event_type=event_type,
+                        variables=variables,
+                        raise_network=True,
+                    )
+                except NotificationNetworkError as e:
+                    success, error = False, f"{e} (attempt {attempt}/{attempts})"
+                    if attempt < attempts:
+                        logger.warning(
+                            "Notification via %s failed: %s; retrying in %ss",
+                            provider.name,
+                            error,
+                            RETRY_DELAYS[attempt - 1],
+                        )
+                        continue
+                await self._update_provider_status(db, provider.id, success, None if success else error)
+                await self._log_notification(
+                    db=db,
+                    provider_id=provider.id,
+                    event_type=event_type,
+                    title=title,
+                    message=message,
+                    success=success,
+                    error_message=None if success else error,
+                    printer_id=printer_id,
+                    printer_name=printer_name,
+                )
+                if success:
+                    logger.info("Sent notification via %s (attempt %s/%s)", provider.name, attempt, attempts)
+                else:
+                    logger.error("Failed to send notification via %s: %s", provider.name, error)
+                return
 
     async def _update_provider_status(
         self, db: AsyncSession, provider_id: int, success: bool, error: str | None = None
@@ -814,9 +913,29 @@ class NotificationService:
         for provider in providers:
             try:
                 # Always send notification immediately
-                success, error = await self._send_to_provider(
-                    provider, title, message, db, image_data=image_data, event_type=event_type, variables=variables
-                )
+                try:
+                    success, error = await self._send_to_provider(
+                        provider,
+                        title,
+                        message,
+                        db,
+                        image_data=image_data,
+                        event_type=event_type,
+                        variables=variables,
+                        raise_network=True,
+                    )
+                except NotificationNetworkError as e:
+                    success, error = False, f"{e} (attempt 1/{len(RETRY_DELAYS) + 1}); retrying in {RETRY_DELAYS[0]}s"
+                    self._retry_later(
+                        provider.id,
+                        title,
+                        message,
+                        event_type=event_type,
+                        printer_id=printer_id,
+                        printer_name=printer_name,
+                        image_data=image_data,
+                        variables=variables,
+                    )
 
                 # Also queue for digest if enabled (digest is a summary, not a queue)
                 if provider.daily_digest_enabled and provider.daily_digest_time:
@@ -1901,6 +2020,25 @@ class NotificationService:
 
         title, message = await self._build_message_from_template(db, "stock_break_alert", variables)
         await self._send_to_providers(providers, title, message, db, "stock_break_alert", variables=variables)
+
+    # ==================== Farm events ====================
+
+    async def on_farm_event(
+        self,
+        event_type: str,
+        variables: dict[str, Any],
+        db: AsyncSession,
+        printer_id: int | None = None,
+        printer_name: str | None = None,
+    ):
+        """A farm event (``farm.notify``): to the providers with ``on_<event_type>`` set, with its template."""
+        providers = await self._get_providers_for_event(db, f"on_{event_type}", printer_id)
+        if not providers:
+            return
+        title, message = await self._build_message_from_template(db, event_type, dict(variables))
+        await self._send_to_providers(
+            providers, title, message, db, event_type, printer_id, printer_name, variables=variables
+        )
 
     async def _queue_for_digest(
         self,

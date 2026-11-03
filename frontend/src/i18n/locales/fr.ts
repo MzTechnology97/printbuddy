@@ -4800,6 +4800,18 @@ export default {
     stockReorderAlertDescription: 'Le SKU a atteint son point de réapprovisionnement',
     stockBreakAlert: 'Alerte de rupture de stock',
     stockBreakAlertDescription: 'Le stock sera épuisé avant l\'arrivée du réapprovisionnement',
+    // Print farm events
+    farmAlerts: 'Ferme d\'impression',
+    farmSlicingFailed: 'Échec du slicing (ferme)',
+    farmSlicingFailedDescription: 'Le slicing en arrière-plan ou le re-slicing automatique a échoué',
+    farmFileCorrupt: 'Fichier de la ferme endommagé',
+    farmFileCorruptDescription: 'Un fichier d\'impression du dossier de la ferme ou du NAS est endommagé',
+    farmPlateToClear: 'Plateau à libérer',
+    farmPlateToClearDescription: 'Une imprimante a terminé et le travail de la ferme attend son plateau',
+    farmComponentUrgent: 'Composant urgent bloqué',
+    farmComponentUrgentDescription: 'Aucune imprimante libre n\'a le matériau d\'un composant urgent chargé',
+    farmBatchToAssign: 'Lot à attribuer',
+    farmBatchToAssignDescription: 'Un lot attend d\'être attribué',
     // Queue events
     jobAdded: 'Tâche ajoutée',
     jobAddedDescription: 'Tâche ajoutée à la file d\'attente',

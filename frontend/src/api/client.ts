@@ -2208,6 +2208,12 @@ export interface NotificationProvider {
   // Inventory stock alerts
   on_stock_reorder_alert: boolean;
   on_stock_break_alert: boolean;
+  // Print farm events
+  on_farm_slicing_failed: boolean;
+  on_farm_file_corrupt: boolean;
+  on_farm_plate_to_clear: boolean;
+  on_farm_component_urgent: boolean;
+  on_farm_batch_to_assign: boolean;
   // Print queue events
   on_queue_job_added: boolean;
   on_queue_job_assigned: boolean;
@@ -2268,6 +2274,12 @@ export interface NotificationProviderCreate {
   // Inventory stock alerts
   on_stock_reorder_alert?: boolean;
   on_stock_break_alert?: boolean;
+  // Print farm events
+  on_farm_slicing_failed?: boolean;
+  on_farm_file_corrupt?: boolean;
+  on_farm_plate_to_clear?: boolean;
+  on_farm_component_urgent?: boolean;
+  on_farm_batch_to_assign?: boolean;
   // Print queue events
   on_queue_job_added?: boolean;
   on_queue_job_assigned?: boolean;
@@ -2321,6 +2333,12 @@ export interface NotificationProviderUpdate {
   // Inventory stock alerts
   on_stock_reorder_alert?: boolean;
   on_stock_break_alert?: boolean;
+  // Print farm events
+  on_farm_slicing_failed?: boolean;
+  on_farm_file_corrupt?: boolean;
+  on_farm_plate_to_clear?: boolean;
+  on_farm_component_urgent?: boolean;
+  on_farm_batch_to_assign?: boolean;
   // Print queue events
   on_queue_job_added?: boolean;
   on_queue_job_assigned?: boolean;

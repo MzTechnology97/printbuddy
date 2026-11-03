@@ -4798,6 +4798,18 @@ export default {
     stockReorderAlertDescription: 'SKU 已达到补货点',
     stockBreakAlert: '断货警报',
     stockBreakAlertDescription: '库存将在补货到达前耗尽',
+    // Print farm events
+    farmAlerts: '打印农场',
+    farmSlicingFailed: '农场切片失败',
+    farmSlicingFailedDescription: '后台切片或自动重新切片失败',
+    farmFileCorrupt: '农场文件损坏',
+    farmFileCorruptDescription: '农场或 NAS 文件夹中的打印文件已损坏',
+    farmPlateToClear: '待清理打印板',
+    farmPlateToClearDescription: '打印机已完成，农场任务正在等待清理打印板',
+    farmComponentUrgent: '紧急部件受阻',
+    farmComponentUrgentDescription: '没有已装载该紧急部件材料的空闲打印机',
+    farmBatchToAssign: '待分配批次',
+    farmBatchToAssignDescription: '有批次等待分配',
     // Queue events
     jobAdded: '任务已添加',
     jobAddedDescription: '任务已添加到队列',

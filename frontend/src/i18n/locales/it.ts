@@ -4799,6 +4799,18 @@ export default {
     stockReorderAlertDescription: 'Il SKU ha raggiunto il punto di riordino',
     stockBreakAlert: 'Avviso di esaurimento scorte',
     stockBreakAlertDescription: 'Le scorte si esauriranno prima dell\'arrivo del rifornimento',
+    // Print farm events
+    farmAlerts: 'Print farm',
+    farmSlicingFailed: 'Errore di slicing',
+    farmSlicingFailedDescription: 'Lo slicing in background o il re-slice automatico non è riuscito',
+    farmFileCorrupt: 'File non integro',
+    farmFileCorruptDescription: 'Un file di stampa nella cartella della farm o del NAS è danneggiato',
+    farmPlateToClear: 'Piatto da liberare',
+    farmPlateToClearDescription: 'Una stampante ha finito e il lavoro della farm aspetta il suo piatto',
+    farmComponentUrgent: 'Componente urgente bloccato',
+    farmComponentUrgentDescription: 'Un componente urgente non ha una stampante libera con il materiale caricato',
+    farmBatchToAssign: 'Lotto da assegnare',
+    farmBatchToAssignDescription: 'Un lotto aspetta di essere assegnato',
     // Queue events
     jobAdded: 'Lavoro aggiunto',
     jobAddedDescription: 'Lavoro aggiunto alla coda',

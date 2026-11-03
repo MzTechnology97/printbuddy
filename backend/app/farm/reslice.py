@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import database
+from backend.app.farm import notify
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.models.library import LibraryFile
 
@@ -72,7 +73,9 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple[int | N
                     db, lib_file=lib_file, state=state, plate=plate, job_id=job_id, colour=colour
                 )
                 results.append(response.model_dump())
+                notify.slicing_done(project_id, lib_file.filename, plate, colour, notify.AUTO_RESLICE)
             except HTTPException as exc:
+                notify.slicing_done(project_id, lib_file.filename, plate, colour, notify.AUTO_RESLICE, exc)
                 logger.warning(
                     "Auto re-slice of %s plate %s%s failed: %s",
                     lib_file.filename,

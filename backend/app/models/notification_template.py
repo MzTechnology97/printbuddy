@@ -195,6 +195,37 @@ DEFAULT_TEMPLATES = [
         "title_template": "Stock Break Risk: {material}",
         "body_template": "{material} ({brand}) will run out before replenishment arrives.\nStock: {stock_g}g | Rate: {rate_g_day}g/day | Lead time: {lead_time_days}d\nOnly {days_left}d of stock remaining — order immediately.",
     },
+    # Print farm templates (backend/app/farm/notify.py)
+    {
+        "event_type": "farm_slicing_failed",
+        "name": "Farm Slicing Failed",
+        "title_template": "Slicing non riuscito: {filename}",
+        "body_template": "{source}: piatto {plate} {color}\n{reason}",
+    },
+    {
+        "event_type": "farm_file_corrupt",
+        "name": "Farm File Corrupt",
+        "title_template": "File non integro: {filename}",
+        "body_template": "{path}\n{reason}\nNon si stampa finché non viene salvato di nuovo.",
+    },
+    {
+        "event_type": "farm_plate_to_clear",
+        "name": "Farm Plate To Clear",
+        "title_template": "Piatto da liberare: {printer}",
+        "body_template": "{printer} ha finito: libera il piatto e confermalo.\nIn attesa: {waiting}",
+    },
+    {
+        "event_type": "farm_component_urgent",
+        "name": "Farm Urgent Component",
+        "title_template": "Componente {status}: {component}",
+        "body_template": "{name}: mancano {missing} pezzi.\nNessuna stampante libera con {material} {color} caricato.",
+    },
+    {
+        "event_type": "farm_batch_to_assign",
+        "name": "Farm Batch To Assign",
+        "title_template": "Lotto da assegnare: {batch}",
+        "body_template": "{detail}",
+    },
     # User email notification templates (sent to the print job owner)
     {
         "event_type": "user_print_start",

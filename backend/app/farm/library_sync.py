@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes import library as lib
 from backend.app.core import database
+from backend.app.farm import notify
 from backend.app.farm.detect import CorruptFileError, ProjectInfo, inspect_3mf
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
 from backend.app.farm.nas.access import library_path, run as access_run
@@ -169,6 +170,18 @@ def _drop_thumbnail(rel: str | None) -> None:
             abs_thumb.unlink()
     except OSError:
         pass
+
+
+def _notify_corrupt(entry: _DiskEntry, analysis: _Analysis) -> None:
+    """Scans analyse a file only when it changed: one notification per broken version."""
+    where = f"{entry.rel_dir}/{entry.filename}" if entry.rel_dir else entry.filename  # inside the share
+    notify.notify(
+        notify.FILE_CORRUPT,
+        (entry.path, analysis.sha256),
+        filename=entry.filename,
+        path=where,
+        reason=analysis.corrupt,
+    )
 
 
 def _apply_detection(state: FarmLibraryFile, entry: _DiskEntry, analysis: _Analysis) -> None:
@@ -346,6 +359,7 @@ async def _sync(
         if analysis.corrupt:
             # Keep the last good metadata; the file is flagged until it's saved again.
             counts["corrupt"] += 1
+            _notify_corrupt(entry, analysis)
             continue
         _drop_thumbnail(lib_file.thumbnail_path)
         lib_file.file_type = entry.file_type
@@ -368,6 +382,7 @@ async def _sync(
             _apply_detection(st, entry, analysis)
             corrupt_by_path[entry.path] = st
             counts["corrupt"] += 1
+            _notify_corrupt(entry, analysis)
         else:
             candidates[analysis.sha256].append((entry, analysis))
 

@@ -76,6 +76,15 @@ class NotificationProviderBase(BaseModel):
     on_queue_job_failed: bool = Field(default=True, description="Notify when job fails to start")
     on_queue_completed: bool = Field(default=False, description="Notify when all queue jobs finish")
 
+    # Event triggers - Print farm
+    on_farm_slicing_failed: bool = Field(default=False, description="Notify when a farm slice or re-slice fails")
+    on_farm_file_corrupt: bool = Field(default=False, description="Notify when a farm/NAS print file is not intact")
+    on_farm_plate_to_clear: bool = Field(default=False, description="Notify when farm work waits for a plate clear")
+    on_farm_component_urgent: bool = Field(
+        default=False, description="Notify when an urgent component has no free printer with its material loaded"
+    )
+    on_farm_batch_to_assign: bool = Field(default=False, description="Notify when a batch waits to be assigned")
+
     # Quiet hours
     quiet_hours_enabled: bool = Field(default=False, description="Enable quiet hours")
     quiet_hours_start: str | None = Field(default=None, description="Start time in HH:MM format")
@@ -163,6 +172,13 @@ class NotificationProviderUpdate(BaseModel):
     on_queue_job_skipped: bool | None = None
     on_queue_job_failed: bool | None = None
     on_queue_completed: bool | None = None
+
+    # Event triggers - Print farm
+    on_farm_slicing_failed: bool | None = None
+    on_farm_file_corrupt: bool | None = None
+    on_farm_plate_to_clear: bool | None = None
+    on_farm_component_urgent: bool | None = None
+    on_farm_batch_to_assign: bool | None = None
 
     # Quiet hours
     quiet_hours_enabled: bool | None = None

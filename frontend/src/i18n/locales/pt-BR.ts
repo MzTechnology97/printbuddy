@@ -4799,6 +4799,18 @@ export default {
     stockReorderAlertDescription: 'O SKU atingiu seu ponto de reposição',
     stockBreakAlert: 'Alerta de Ruptura de Estoque',
     stockBreakAlertDescription: 'O estoque se esgotará antes da chegada do reabastecimento',
+    // Print farm events
+    farmAlerts: 'Fazenda de impressão',
+    farmSlicingFailed: 'Falha no fatiamento (fazenda)',
+    farmSlicingFailedDescription: 'O fatiamento em segundo plano ou o refatiamento automático falhou',
+    farmFileCorrupt: 'Arquivo da fazenda danificado',
+    farmFileCorruptDescription: 'Um arquivo de impressão na pasta da fazenda ou do NAS está danificado',
+    farmPlateToClear: 'Mesa a liberar',
+    farmPlateToClearDescription: 'Uma impressora terminou e o trabalho da fazenda aguarda a mesa',
+    farmComponentUrgent: 'Componente urgente bloqueado',
+    farmComponentUrgentDescription: 'Nenhuma impressora livre tem o material de um componente urgente carregado',
+    farmBatchToAssign: 'Lote a atribuir',
+    farmBatchToAssignDescription: 'Um lote aguarda atribuição',
     // Queue events
     jobAdded: 'Trabalho Adicionado',
     jobAddedDescription: 'Trabalho adicionado à fila',

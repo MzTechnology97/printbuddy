@@ -4811,6 +4811,18 @@ export default {
     stockReorderAlertDescription: 'SKUが発注点に達しました',
     stockBreakAlert: '在庫切れアラート',
     stockBreakAlertDescription: '入荷前に在庫が枯渇する見込みです',
+    // Print farm events
+    farmAlerts: 'プリントファーム',
+    farmSlicingFailed: 'ファームのスライス失敗',
+    farmSlicingFailedDescription: 'バックグラウンドのスライスまたは自動再スライスに失敗しました',
+    farmFileCorrupt: 'ファームのファイル破損',
+    farmFileCorruptDescription: 'ファームまたはNASフォルダの印刷ファイルが破損しています',
+    farmPlateToClear: 'プレートの片付け待ち',
+    farmPlateToClearDescription: 'プリンターが完了し、ファームの作業がプレートを待っています',
+    farmComponentUrgent: '緊急部品が停滞',
+    farmComponentUrgentDescription: '緊急部品の材料を装填した空きプリンターがありません',
+    farmBatchToAssign: '割り当て待ちのバッチ',
+    farmBatchToAssignDescription: 'バッチが割り当てを待っています',
     // Queue events
     jobAdded: 'ジョブ追加',
     jobAddedDescription: 'キューにジョブが追加されました',

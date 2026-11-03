@@ -4810,6 +4810,18 @@ export default {
     stockReorderAlertDescription: 'SKU hat seinen Nachbestellungspunkt erreicht',
     stockBreakAlert: 'Bestandsunterbrechungswarnung',
     stockBreakAlertDescription: 'Der Bestand wird vor dem Eintreffen der Nachbestellung aufgebraucht sein',
+    // Print farm events
+    farmAlerts: 'Druckfarm',
+    farmSlicingFailed: 'Farm-Slicing fehlgeschlagen',
+    farmSlicingFailedDescription: 'Slicing im Hintergrund oder automatisches Re-Slicing fehlgeschlagen',
+    farmFileCorrupt: 'Farm-Datei beschädigt',
+    farmFileCorruptDescription: 'Eine Druckdatei im Farm- oder NAS-Ordner ist beschädigt',
+    farmPlateToClear: 'Druckplatte räumen',
+    farmPlateToClearDescription: 'Ein Drucker ist fertig und Farm-Aufträge warten auf seine Platte',
+    farmComponentUrgent: 'Dringendes Bauteil blockiert',
+    farmComponentUrgentDescription: 'Kein freier Drucker hat das Material eines dringenden Bauteils geladen',
+    farmBatchToAssign: 'Charge zuzuweisen',
+    farmBatchToAssignDescription: 'Eine Charge wartet auf Zuweisung',
     // Queue events
     jobAdded: 'Auftrag hinzugefügt',
     jobAddedDescription: 'Auftrag zur Warteschlange hinzugefügt',
