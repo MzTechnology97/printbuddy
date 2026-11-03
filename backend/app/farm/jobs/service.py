@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import database
 from backend.app.core.config import settings
+from backend.app.farm import notify
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan import service as plan
@@ -94,6 +95,7 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
     lib_file = await db.get(LibraryFile, plate.library_file_id)
     if lib_file is None:
         return
+    name = lib_file.filename
 
     async def run(job_id: int):
         async with database.async_session() as task_db:
@@ -101,11 +103,15 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
             state = await task_db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == key[0]))
             try:
                 response = await slice_embedded(task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id)
-            except HTTPException as exc:
-                raise http_exception_to_job_error(exc) from exc
+            except Exception as exc:
+                notify.slicing_done(key[0], name, key[1], None, notify.QUEUE_SLICE, exc)
+                if isinstance(exc, HTTPException):
+                    raise http_exception_to_job_error(exc) from exc
+                raise
+        notify.slicing_done(key[0], name, key[1], None, notify.QUEUE_SLICE)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=lib_file.filename, run=run)
+    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
 
 
 async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:
@@ -532,7 +538,7 @@ class FarmJobDispatcher:
             self._task = None
 
     async def _loop(self) -> None:
-        from backend.app.farm import printer_files
+        from backend.app.farm import alerts, printer_files
 
         last_cleanup = 0.0
         while True:
@@ -540,6 +546,7 @@ class FarmJobDispatcher:
                 await asyncio.sleep(TICK_SECONDS)
                 async with database.async_session() as db:
                     await dispatch_once(db)
+                    await alerts.check(db)  # never raises
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)

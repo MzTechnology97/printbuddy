@@ -6,6 +6,7 @@ import { api } from '../api/client';
 import type { NotificationProvider, NotificationProviderCreate, NotificationProviderUpdate, ProviderType } from '../api/client';
 import { Button } from './Button';
 import { Toggle } from './Toggle';
+import { FARM_EVENTS, type FarmEventKey } from './farmNotificationEvents';
 
 interface NotifyRecipient {
   id: string;
@@ -80,6 +81,9 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
   const [onMaintenanceDue, setOnMaintenanceDue] = useState(provider?.on_maintenance_due ?? false);
   const [onStockReorderAlert, setOnStockReorderAlert] = useState(provider?.on_stock_reorder_alert ?? false);
   const [onStockBreakAlert, setOnStockBreakAlert] = useState(provider?.on_stock_break_alert ?? false);
+  const [farmEvents, setFarmEvents] = useState<Record<FarmEventKey, boolean>>(
+    () => Object.fromEntries(FARM_EVENTS.map(([key]) => [key, provider?.[key] ?? false])) as Record<FarmEventKey, boolean>,
+  );
   const [onBedCooled, setOnBedCooled] = useState(provider?.on_bed_cooled ?? false);
   const [onFirstLayerComplete, setOnFirstLayerComplete] = useState(provider?.on_first_layer_complete ?? false);
 
@@ -257,6 +261,7 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
       on_maintenance_due: onMaintenanceDue,
       on_stock_reorder_alert: onStockReorderAlert,
       on_stock_break_alert: onStockBreakAlert,
+      ...farmEvents,
       on_bed_cooled: onBedCooled,
       on_first_layer_complete: onFirstLayerComplete,
     };
@@ -776,6 +781,25 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
               </div>
             </div>
 
+            {/* Print farm events */}
+            <div className="space-y-2 p-3 bg-bambu-dark rounded-lg">
+              <p className="text-xs text-bambu-gray uppercase tracking-wide mb-2">{t('notifications.farmAlerts')}</p>
+              <div className="grid grid-cols-1 gap-2">
+                {FARM_EVENTS.map(([key, label]) => (
+                  <div key={key} className="flex items-center justify-between">
+                    <div>
+                      <span className="text-sm text-white">{t(`notifications.${label}`)}</span>
+                      <span className="text-xs text-bambu-gray ml-1">{t(`notifications.${label}Description`)}</span>
+                    </div>
+                    <Toggle
+                      checked={farmEvents[key]}
+                      onChange={(checked) => setFarmEvents((events) => ({ ...events, [key]: checked }))}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {/* Per-event ntfy priority (#990) */}
             {providerType === 'ntfy' && (() => {
               const enabledEvents: Array<{ key: string; label: string }> = [];
@@ -793,6 +817,9 @@ export function AddNotificationModal({ provider, onClose }: AddNotificationModal
               if (onMaintenanceDue) enabledEvents.push({ key: 'on_maintenance_due', label: t('notifications.maintenance') });
               if (onStockReorderAlert) enabledEvents.push({ key: 'on_stock_reorder_alert', label: t('notifications.stockReorderAlert') });
               if (onStockBreakAlert) enabledEvents.push({ key: 'on_stock_break_alert', label: t('notifications.stockBreakAlert') });
+              for (const [key, label] of FARM_EVENTS) {
+                if (farmEvents[key]) enabledEvents.push({ key, label: t(`notifications.${label}`) });
+              }
 
               if (enabledEvents.length === 0) return null;
 

@@ -44,6 +44,12 @@ EVENT_NAMES = {
     "queue_job_skipped": "Queue Job Skipped",
     "queue_job_failed": "Queue Job Failed",
     "queue_completed": "Queue Completed",
+    # Print farm
+    "farm_slicing_failed": "Farm Slicing Failed",
+    "farm_file_corrupt": "Farm File Corrupt",
+    "farm_plate_to_clear": "Farm Plate To Clear",
+    "farm_component_urgent": "Farm Urgent Component",
+    "farm_batch_to_assign": "Farm Batch To Assign",
     # User management
     "user_created": "Welcome Email",
     "password_reset": "Password Reset",

@@ -81,6 +81,21 @@ def mfa_encryption_isolation(monkeypatch, tmp_path):
     enc_mod._key_source = None
 
 
+@pytest.fixture(autouse=True)
+def farm_notifications(monkeypatch):
+    """Farm events (backend/app/farm/notify.py) are recorded here, never sent to a provider."""
+    from backend.app.farm import notify
+
+    sent: list[tuple[str, dict]] = []
+
+    async def record(event, variables, printer_id, printer_name):
+        sent.append((event, variables))
+
+    monkeypatch.setattr(notify, "_send", record)
+    monkeypatch.setattr(notify, "_sent", {})
+    return sent
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Create an instance of the default event loop for each test session."""

@@ -73,6 +73,12 @@ def _provider_to_dict(provider: NotificationProvider) -> dict:
         "on_queue_job_skipped": provider.on_queue_job_skipped,
         "on_queue_job_failed": provider.on_queue_job_failed,
         "on_queue_completed": provider.on_queue_completed,
+        # Print farm events
+        "on_farm_slicing_failed": provider.on_farm_slicing_failed,
+        "on_farm_file_corrupt": provider.on_farm_file_corrupt,
+        "on_farm_plate_to_clear": provider.on_farm_plate_to_clear,
+        "on_farm_component_urgent": provider.on_farm_component_urgent,
+        "on_farm_batch_to_assign": provider.on_farm_batch_to_assign,
         # Quiet hours
         "quiet_hours_enabled": provider.quiet_hours_enabled,
         "quiet_hours_start": provider.quiet_hours_start,
@@ -175,6 +181,12 @@ async def create_notification_provider(
         on_queue_job_skipped=provider_data.on_queue_job_skipped,
         on_queue_job_failed=provider_data.on_queue_job_failed,
         on_queue_completed=provider_data.on_queue_completed,
+        # Print farm events
+        on_farm_slicing_failed=provider_data.on_farm_slicing_failed,
+        on_farm_file_corrupt=provider_data.on_farm_file_corrupt,
+        on_farm_plate_to_clear=provider_data.on_farm_plate_to_clear,
+        on_farm_component_urgent=provider_data.on_farm_component_urgent,
+        on_farm_batch_to_assign=provider_data.on_farm_batch_to_assign,
         # Quiet hours
         quiet_hours_enabled=provider_data.quiet_hours_enabled,
         quiet_hours_start=provider_data.quiet_hours_start,

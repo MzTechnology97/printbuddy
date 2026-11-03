@@ -4818,6 +4818,18 @@ export default {
     stockReorderAlertDescription: 'El SKU ha alcanzado su punto de reabastecimiento',
     stockBreakAlert: 'Alerta de rotura de existencias',
     stockBreakAlertDescription: 'Las existencias se agotarán antes de que llegue el reabastecimiento',
+    // Print farm events
+    farmAlerts: 'Granja de impresión',
+    farmSlicingFailed: 'Error de laminado (granja)',
+    farmSlicingFailedDescription: 'El laminado en segundo plano o el re-laminado automático falló',
+    farmFileCorrupt: 'Archivo de la granja dañado',
+    farmFileCorruptDescription: 'Un archivo de impresión de la carpeta de la granja o del NAS está dañado',
+    farmPlateToClear: 'Placa por liberar',
+    farmPlateToClearDescription: 'Una impresora terminó y el trabajo de la granja espera su placa',
+    farmComponentUrgent: 'Componente urgente bloqueado',
+    farmComponentUrgentDescription: 'Ninguna impresora libre tiene cargado el material de un componente urgente',
+    farmBatchToAssign: 'Lote por asignar',
+    farmBatchToAssignDescription: 'Un lote espera ser asignado',
     // Queue events
     jobAdded: 'Trabajo añadido',
     jobAddedDescription: 'Trabajo añadido a la cola',

@@ -9,6 +9,7 @@ import { Card, CardContent } from './Card';
 import { Button } from './Button';
 import { ConfirmModal } from './ConfirmModal';
 import { Toggle } from './Toggle';
+import { FARM_EVENTS } from './farmNotificationEvents';
 
 interface NotificationProviderCardProps {
   provider: NotificationProvider;
@@ -183,6 +184,9 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
             {provider.on_stock_break_alert && (
               <span className="px-2 py-0.5 bg-red-600/20 text-red-300 text-xs rounded">{t('notifications.stockBreakAlert')}</span>
             )}
+            {FARM_EVENTS.filter(([key]) => provider[key]).map(([key, label]) => (
+              <span key={key} className="px-2 py-0.5 bg-sky-500/20 text-sky-300 text-xs rounded">{t(`notifications.${label}`)}</span>
+            ))}
             {provider.quiet_hours_enabled && (
               <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-xs rounded flex items-center gap-1">
                 <Moon className="w-3 h-3" />
@@ -488,6 +492,24 @@ export function NotificationProviderCard({ provider, onEdit }: NotificationProvi
                     onChange={(checked) => updateMutation.mutate({ on_stock_break_alert: checked })}
                   />
                 </div>
+              </div>
+
+              {/* Print Farm Events */}
+              <div className="space-y-2">
+                <p className="text-xs text-bambu-gray uppercase tracking-wide">{t('notifications.farmAlerts')}</p>
+
+                {FARM_EVENTS.map(([key, label]) => (
+                  <div key={key} className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-white">{t(`notifications.${label}`)}</p>
+                      <p className="text-xs text-bambu-gray">{t(`notifications.${label}Description`)}</p>
+                    </div>
+                    <Toggle
+                      checked={provider[key] ?? false}
+                      onChange={(checked) => updateMutation.mutate({ [key]: checked })}
+                    />
+                  </div>
+                ))}
               </div>
 
               {/* Print Queue Events */}

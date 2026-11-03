@@ -4822,6 +4822,18 @@ export default {
     stockReorderAlertDescription: 'SKU has reached its reorder point',
     stockBreakAlert: 'Stock Break Alert',
     stockBreakAlertDescription: 'Stock will run out before replenishment arrives',
+    // Print farm events
+    farmAlerts: 'Print Farm',
+    farmSlicingFailed: 'Farm slicing failed',
+    farmSlicingFailedDescription: 'Background slicing or automatic re-slice failed',
+    farmFileCorrupt: 'Farm file not intact',
+    farmFileCorruptDescription: 'A print file in a farm or NAS folder is damaged',
+    farmPlateToClear: 'Plate to clear',
+    farmPlateToClearDescription: 'A printer finished and farm work waits for its plate',
+    farmComponentUrgent: 'Urgent component stuck',
+    farmComponentUrgentDescription: 'An urgent component has no free printer with its material loaded',
+    farmBatchToAssign: 'Batch to assign',
+    farmBatchToAssignDescription: 'A batch is waiting to be assigned',
     // Queue events
     jobAdded: 'Job Added',
     jobAddedDescription: 'Job added to queue',

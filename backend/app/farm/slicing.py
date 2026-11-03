@@ -26,7 +26,7 @@ from backend.app.api.routes import library as lib
 from backend.app.api.routes.settings import get_setting
 from backend.app.core import database
 from backend.app.core.config import settings as app_settings
-from backend.app.farm import variants
+from backend.app.farm import notify, variants
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_ORCA
 from backend.app.farm.library_sync import _drop_thumbnail
 from backend.app.farm.models import FarmLibraryFile
@@ -353,6 +353,7 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
     lib_file = await db.get(LibraryFile, plate.library_file_id)
     if lib_file is None:
         return
+    name = lib_file.filename
 
     async def run(job_id: int):
         async with database.async_session() as task_db:
@@ -362,10 +363,12 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
                 response = await slice_embedded(
                     task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id, colour=color
                 )
-            except HTTPException as exc:
-                raise http_exception_to_job_error(exc) from exc
+            except Exception as exc:
+                notify.slicing_done(key[0], name, key[1], color, notify.QUEUE_SLICE, exc)
+                if isinstance(exc, HTTPException):
+                    raise http_exception_to_job_error(exc) from exc
+                raise
+        notify.slicing_done(key[0], name, key[1], color, notify.QUEUE_SLICE)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(
-        kind="library_file", source_id=key[0], source_name=f"{lib_file.filename} ({color})", run=run
-    )
+    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)

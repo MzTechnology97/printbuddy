@@ -88,6 +88,21 @@ EVENT_VARIABLES: dict[str, list[str]] = {
     "queue_job_skipped": ["printer", "job_name", "reason", "timestamp", "app_name"],
     "queue_job_failed": ["printer", "job_name", "reason", "timestamp", "app_name"],
     "queue_completed": ["completed_count", "timestamp", "app_name"],
+    # Print farm notifications
+    "farm_slicing_failed": ["filename", "plate", "color", "source", "reason", "timestamp", "app_name"],
+    "farm_file_corrupt": ["filename", "path", "reason", "timestamp", "app_name"],
+    "farm_plate_to_clear": ["printer", "waiting", "timestamp", "app_name"],
+    "farm_component_urgent": [
+        "component",
+        "name",
+        "status",
+        "missing",
+        "material",
+        "color",
+        "timestamp",
+        "app_name",
+    ],
+    "farm_batch_to_assign": ["batch", "detail", "timestamp", "app_name"],
     # User management notifications
     "user_created": ["username", "password", "login_url", "app_name", "timestamp"],
     "password_reset": ["username", "password", "login_url", "app_name", "timestamp"],
@@ -266,6 +281,45 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
     "queue_completed": {
         "completed_count": "5",
         "timestamp": "2024-01-15 18:30",
+        "app_name": "Printbuddy",
+    },
+    # Print farm notifications
+    "farm_slicing_failed": {
+        "filename": "Benchy.3mf",
+        "plate": "2",
+        "color": "Nero",
+        "source": "Re-slice automatico",
+        "reason": "Slicer sidecar did not answer",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Printbuddy",
+    },
+    "farm_file_corrupt": {
+        "filename": "Benchy.3mf",
+        "path": "Progetti/Benchy.3mf",
+        "reason": "Not a valid 3MF archive",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Printbuddy",
+    },
+    "farm_plate_to_clear": {
+        "printer": "Bambu X1C",
+        "waiting": "Benchy_plate_1.gcode.3mf",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Printbuddy",
+    },
+    "farm_component_urgent": {
+        "component": "C0001",
+        "name": "Benchy hull",
+        "status": "urgente",
+        "missing": "12",
+        "material": "PLA",
+        "color": "Nero",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Printbuddy",
+    },
+    "farm_batch_to_assign": {
+        "batch": "Benchy x 20",
+        "detail": "20 pieces ready to assign",
+        "timestamp": "2024-01-15 14:30",
         "app_name": "Printbuddy",
     },
     # User management notifications
