@@ -90,6 +90,8 @@ export interface FarmLibraryFileState {
 
 export interface FarmProductView {
   project_id: number;
+  name: string;
+  has_cover: boolean;
   kind: FarmProductKind;
   skus: string[];
   asins: string[];

@@ -369,7 +369,9 @@ export function ProductsPage() {
                 </div>
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex items-start justify-between gap-2">
-                    <h2 className="text-white font-semibold truncate">{p.name}</h2>
+                    <h2 className="text-white font-semibold truncate">
+                      <Link to={`/farm/products/${p.project_id}`} className="hover:text-bambu-green">{p.name}</Link>
+                    </h2>
                     <Button variant="ghost" size="sm" onClick={() => setEditing(draftOf(p))}>{t('farm.products.edit')}</Button>
                   </div>
                   {(p.skus.length > 0 || p.asins.length > 0) && (
@@ -402,7 +404,7 @@ export function ProductsPage() {
                     <p className="text-xs text-bambu-gray">
                       {t('farm.products.queued', { count: s.queued })} · {t('farm.products.printing', { count: s.printing })} ·{' '}
                       {t('farm.products.printedRecent', { count: s.printed_recent })} ·{' '}
-                      <Link to={`/projects/${p.project_id}`} className="text-bambu-green hover:underline">{t('farm.products.prints')}</Link>
+                      <Link to={`/projects/${p.project_id}?view=project`} className="text-bambu-green hover:underline">{t('farm.products.prints')}</Link>
                     </p>
                   )}
                 </div>

@@ -310,6 +310,7 @@ async def test_product_printed_as_a_set(async_client, tmp_path):
         "Bottom": (1, code),
     }
     view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert (view["name"], view["has_cover"]) == ("Tartufi", False)
     assert [(p["code"], p["quantity"], sorted(x["yield"] for x in p["plates"])) for p in view["parts"]] == [
         (code, 1, [3, 4])
     ]
