@@ -225,7 +225,7 @@ function ProductPlates({ view }: { view: FarmProductView }) {
                     <span className="text-xs text-bambu-gray block">{f.folder}</span>
                   </span>
                   <span className={`text-xs shrink-0 ${todo ? 'text-amber-400' : 'text-bambu-gray'}`}>
-                    {f.opened ? t('farm.plates.counts', { todo: f.proposed, done: f.confirmed }) : t('farm.plates.notOpened')}
+                    {f.opened ? t('farm.project.plateCounts', { todo: f.proposed, done: f.confirmed }) : t('farm.plates.notOpened')}
                   </span>
                 </button>
                 {isOpen && (
