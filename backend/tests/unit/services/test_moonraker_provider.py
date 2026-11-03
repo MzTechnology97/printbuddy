@@ -1141,3 +1141,58 @@ async def test_provider_file_thumbnail_is_cached_and_404s_without_image():
         await printer_routes._provider_file_thumbnail(1, object(), "part.gcode")
     assert exc.value.status_code == 404
     printer_routes._provider_thumb_cache.clear()
+
+
+def test_moonraker_status_fills_layers_and_time_left_from_the_file_metadata(monkeypatch):
+    """A K2 print of Orca G-code: no SET_PRINT_STATS_INFO, so layers and the estimate come from the metadata."""
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Creality K2 Pro")
+    status = {
+        "print_stats": {
+            "state": "printing",
+            "filename": "Part-plate-2__1a2b3c4d.gcode",
+            "print_duration": 600.0,
+            "info": {"total_layer": None, "current_layer": None},
+        },
+        "virtual_sdcard": {"progress": 0.01},
+    }
+    monkeypatch.setattr(client, "_query_objects", lambda names: status)
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+    asked: list[str] = []
+
+    def fake_get(path, **kwargs):
+        asked.append(path)
+        return {"estimated_time": 28303, "layer_count": 107}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    assert client.request_status_update() is True
+    assert (client.state.total_layers, client.state.remaining_time) == (107, (28303 - 600) // 60)
+    client.request_status_update()
+    assert asked == ["server/files/metadata?filename=Part-plate-2__1a2b3c4d.gcode"]  # once per file
+
+    # Layers reported by the print win.
+    status["print_stats"]["info"] = {"total_layer": 50, "current_layer": 3}
+    client.request_status_update()
+    assert (client.state.layer_num, client.state.total_layers) == (3, 50)
+
+
+def test_moonraker_print_ended_by_a_klipper_disconnect_is_a_failure(monkeypatch):
+    """The K2 case: Klipper dropped at the start of a print, came back in standby; Moonraker's history says why."""
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Creality K2 Pro")
+    ended: list[dict] = []
+    client.on_print_complete = ended.append
+    history = {"jobs": [{"job_id": "0006A1", "status": "klippy_disconnect"}]}
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: history if path.startswith("server/history") else {})
+
+    def end_with(history_status):
+        history["jobs"] = [{"job_id": "0006A1", "status": history_status}] if history_status else []
+        client.state.state, client.state.progress = "IDLE", 0.0
+        client._emit_status_callbacks("RUNNING")
+        return ended[-1]["status"]
+
+    assert end_with("klippy_disconnect") == "failed"
+    assert end_with("error") == "failed"
+    assert end_with("cancelled") == "stopped"
+    assert end_with(None) == "stopped"  # no history: as before

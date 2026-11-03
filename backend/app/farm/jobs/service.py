@@ -64,6 +64,7 @@ TICK_SECONDS = 30
 CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
 RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
+EXTRACTED_VERSION = 2  # 2: with the plate's preview and layer info; older extractions are redone
 QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
@@ -222,27 +223,45 @@ async def queued_pieces(db: AsyncSession) -> dict[str, int]:
     return out
 
 
+def klipper_gcode_name(sliced_name: str, plate: int) -> str:
+    """``K2-Citroen AMI - plate 2.gcode.3mf`` -> ``K2-Citroen-AMI-plate-2.gcode`` (the printer adds its fingerprint)."""
+    base = sliced_name.removesuffix(".gcode.3mf").removesuffix(".3mf")
+    if not re.search(rf"plate[\s_-]*{plate}(?!\d)", base, re.IGNORECASE):
+        base += f" plate {plate}"
+    return f"{re.sub(r'[^A-Za-z0-9]+', '-', base).strip('-') or 'plate'}.gcode"
+
+
 async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, plate: int) -> LibraryFile | None:
     """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once.
 
     A sliced output replaced by a new slice keeps its row, so the extracted G-code is refreshed in
     its own row when the output's bytes change: Klipper queue items follow it like Bambu ones.
+    The G-code gets the plate's picture and layer info (``klipper_gcode``); the row gets the plate's
+    print time, grams and picture, which the queue shows as for a Bambu print.
     """
     from backend.app.api.routes import library as lib
+    from backend.app.api.routes.print_queue import _extract_print_time_from_3mf
+    from backend.app.farm.klipper_gcode import for_klipper
+    from backend.app.utils.threemf_tools import extract_filament_usage_from_3mf
 
-    name = f"{sliced.filename.removesuffix('.gcode.3mf').removesuffix('.3mf')}_plate{plate}.gcode"
+    name = klipper_gcode_name(sliced.filename, plate)
     gcode = None
     for candidate in (await db.execute(LibraryFile.active().where(LibraryFile.filename == name))).scalars():
         meta = candidate.file_metadata or {}
         if meta.get("extracted_from_library_file_id") == sliced.id and meta.get("plate") == plate:
-            if meta.get("extracted_from_hash") == sliced.file_hash:
+            if (
+                meta.get("extracted_from_hash") == sliced.file_hash
+                and meta.get("extracted_version") == EXTRACTED_VERSION
+            ):
                 return candidate
-            gcode = candidate  # the output was sliced again: extract into the same row
+            gcode = candidate  # sliced again, or extracted before the preview: extract into the same row
     try:
         with zipfile.ZipFile(path) as zf:
             data = zf.read(f"Metadata/plate_{plate}.gcode")
+            png = zf.read(f"Metadata/plate_{plate}.png") if f"Metadata/plate_{plate}.png" in zf.namelist() else None
     except (KeyError, OSError, zipfile.BadZipFile):
         return None
+    data = await asyncio.to_thread(for_klipper, data, png)
     out = lib.to_absolute_path(gcode.file_path) if gcode else lib.get_library_files_dir() / f"{uuid.uuid4().hex}.gcode"
     tmp = out.with_name(f".{out.name}.part")
     await asyncio.to_thread(tmp.write_bytes, data)
@@ -257,10 +276,20 @@ async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, p
         )
         db.add(gcode)
     gcode.file_size = len(data)
+    if png:
+        thumb = lib.to_absolute_path(gcode.thumbnail_path) if gcode.thumbnail_path else None
+        thumb = thumb or lib.get_library_thumbnails_dir() / f"{uuid.uuid4().hex}.png"
+        await asyncio.to_thread(thumb.write_bytes, png)
+        gcode.thumbnail_path = lib.to_relative_path(thumb)
+    grams = sum(f["used_g"] for f in await asyncio.to_thread(extract_filament_usage_from_3mf, path, plate))
     gcode.file_metadata = {
         **(sliced.file_metadata or {}),
+        "print_time_seconds": _extract_print_time_from_3mf(path, plate)
+        or (sliced.file_metadata or {}).get("print_time_seconds"),
+        "filament_used_grams": round(grams, 2) if grams else (sliced.file_metadata or {}).get("filament_used_grams"),
         "extracted_from_library_file_id": sliced.id,
         "extracted_from_hash": sliced.file_hash,
+        "extracted_version": EXTRACTED_VERSION,
         "plate": plate,
     }
     await db.flush()

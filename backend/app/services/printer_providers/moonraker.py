@@ -77,6 +77,18 @@ def _map_moonraker_state(raw_state: Any) -> str:
     }.get(state, str(raw_state or "unknown"))
 
 
+# fork: Moonraker's history status of a job that ended -> Printbuddy's print end.
+_HISTORY_END = {
+    "completed": "completed",
+    "cancelled": "stopped",
+    "error": "failed",
+    "klippy_shutdown": "failed",
+    "klippy_disconnect": "failed",
+    "server_exit": "failed",
+    "interrupted": "failed",
+}
+
+
 def _heater_temperature(values: dict[str, Any]) -> float:
     return float(values.get("temperature") or 0.0) if isinstance(values, dict) else 0.0
 
@@ -628,6 +640,7 @@ class MoonrakerPrinterClient:
         self._last_bed_temp: float | None = None
         self._current_print_started_at: float | None = None
         self.webcams: list[dict[str, Any]] = []
+        self._file_metadata: dict[str, dict[str, Any]] = {}  # fork: per printed file, read once
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -642,6 +655,23 @@ class MoonrakerPrinterClient:
         if isinstance(data, dict) and isinstance(data.get("result"), dict):
             return data["result"]
         return data if isinstance(data, dict) else {"value": data}
+
+    def _ended_job_status(self) -> str | None:
+        """How Moonraker says the last print ended (``klippy_disconnect``...): its history's newest job."""
+        try:
+            jobs = self._get("server/history/list?limit=1&order=desc").get("jobs") or []
+        except Exception:  # noqa: BLE001 - optional: the polled state decides without it
+            return None
+        return _HISTORY_END.get(jobs[0].get("status")) if jobs and isinstance(jobs[0], dict) else None
+
+    def _print_file_metadata(self, filename: str) -> dict[str, Any]:
+        """Moonraker's metadata of the file being printed (slicer estimate, layer count), read once per file."""
+        if filename not in self._file_metadata:
+            try:
+                self._file_metadata[filename] = self._get(f"server/files/metadata?filename={quote(filename)}")
+            except Exception:  # noqa: BLE001 - optional: the print's own status still applies
+                self._file_metadata[filename] = {}
+        return self._file_metadata[filename]
 
     def _query_objects(self, object_names: list[str]) -> dict[str, Any]:
         query = "printer/objects/query?" + "&".join(quote(name, safe="") for name in object_names)
@@ -1468,10 +1498,12 @@ class MoonrakerPrinterClient:
                 self._current_print_started_at = None
             if current_state == "FAILED":
                 payload["status"] = "failed"
-            elif current_state == "FINISH":
+            elif current_state == "FINISH" or (current_state == "IDLE" and self.state.progress >= 99):
                 payload["status"] = "completed"
             elif current_state == "IDLE":
-                payload["status"] = "completed" if self.state.progress >= 99 else "stopped"
+                # fork: after a Klipper crash or restart the print reads "standby", as if stopped by hand:
+                # Moonraker's history tells a failure (klippy_disconnect, error...) from a cancel.
+                payload["status"] = self._ended_job_status() or "stopped"
             else:
                 payload["status"] = "stopped"
             if self.on_print_complete:
@@ -1543,7 +1575,15 @@ class MoonrakerPrinterClient:
             self.state.remaining_time = 0
         else:
             self.state.progress = raw_progress
-            self.state.remaining_time = _remaining_minutes(print_stats, self.state.progress)
+            # fork: a G-code without SET_PRINT_STATS_INFO (Orca's K2 profile) reports no layers, and early in
+            # a print duration/progress gives no time left: the file's metadata fills both.
+            meta = self._print_file_metadata(self.state.gcode_file) if reported_file else {}
+            if not self.state.total_layers and _safe_int(meta.get("layer_count")):
+                self.state.total_layers = _safe_int(meta.get("layer_count"))
+            estimate = print_stats.get("estimated_time") or meta.get("estimated_time")
+            self.state.remaining_time = _remaining_minutes(
+                {**print_stats, "estimated_time": estimate}, self.state.progress
+            )
         self.state.temperatures = _moonraker_temperatures(status)
         speed_level = _moonraker_speed_level(status.get("gcode_move"))
         if speed_level is not None:

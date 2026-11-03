@@ -164,7 +164,7 @@ async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_
     assert await service.dispatch_once(db_session) == 1
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     gcode = await db_session.get(LibraryFile, item.library_file_id)
-    assert (gcode.filename, gcode.file_type) == ("sopra_plate2_plate2.gcode", "gcode")
+    assert (gcode.filename, gcode.file_type) == ("sopra-plate2.gcode", "gcode")  # readable, as on the printer
     # Colour not readable: queued, but it starts only when the user starts it after checking the spool.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (farm["printers"][0], True, None)
     assert "Load the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
@@ -446,3 +446,47 @@ def test_slot_mapping_reads_colours_in_any_form():
     trays = [{"type": "PETG", "color": "F75403FF", "global_tray_id": 3}]
     assert service._slot_mapping(used, trays, "f75403", 80) == [3]
     assert service._slot_mapping(used, trays, "f28c28", 80) == [3]  # within the farm's tolerance
+
+
+@pytest.mark.asyncio
+async def test_klipper_gcode_row_has_the_plate_time_grams_and_picture(db_session, tmp_path, monkeypatch):
+    """The K2 queue row showed no picture, time or grams: the extracted G-code's row carries the plate's."""
+    import io
+
+    from PIL import Image
+
+    from backend.app.api.routes import library as lib
+
+    monkeypatch.setattr(lib, "get_library_files_dir", lambda: tmp_path)
+    monkeypatch.setattr(lib, "get_library_thumbnails_dir", lambda: tmp_path)
+    png = io.BytesIO()
+    Image.new("RGBA", (64, 64), (247, 84, 3, 255)).save(png, "PNG")
+    src = tmp_path / "K2-Citroen AMI - plate 2.gcode.3mf"
+    with zipfile.ZipFile(src, "w") as zf:
+        zf.writestr("Metadata/plate_2.gcode", "; HEADER_BLOCK_END\nG28\n;LAYER_CHANGE\nG1 X1\n")
+        zf.writestr("Metadata/plate_2.png", png.getvalue())
+        zf.writestr(
+            "Metadata/slice_info.config",
+            '<config><plate><metadata key="index" value="2"/><metadata key="prediction" value="28303"/>'
+            '<filament id="1" type="PETG" color="#F75403" used_g="163.98"/></plate></config>',
+        )
+    sliced = LibraryFile(
+        filename=src.name, file_path=str(src), file_type="gcode", file_size=1, source_type="sliced", file_hash="h1"
+    )
+    db_session.add(sliced)
+    await db_session.commit()
+
+    row = await service.gcode_for_klipper(db_session, sliced, src, 2)
+    assert row.filename == "K2-Citroen-AMI-plate-2.gcode"
+    meta = row.file_metadata
+    assert (meta["print_time_seconds"], meta["filament_used_grams"], meta["extracted_version"]) == (28303, 163.98, 2)
+    assert lib.to_absolute_path(row.thumbnail_path).read_bytes() == png.getvalue()
+    text = lib.to_absolute_path(row.file_path).read_bytes()
+    assert b"; thumbnail begin 96x96" in text and b"SET_PRINT_STATS_INFO CURRENT_LAYER=1" in text
+
+    # A row extracted before the preview (version 1) is redone in place, once.
+    row.file_metadata = {**meta, "extracted_version": 1}
+    await db_session.commit()
+    again = await service.gcode_for_klipper(db_session, sliced, src, 2)
+    assert again.id == row.id and again.file_metadata["extracted_version"] == 2
+    assert await service.gcode_for_klipper(db_session, sliced, src, 2) is again
