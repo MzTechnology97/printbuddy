@@ -743,14 +743,25 @@ async def merge_component(code: str, data: MergeIn, db: AsyncSession = Depends(g
         raise HTTPException(404, "Component not found")
     if code == data.into or found[data.into].retired_at is not None:
         raise HTTPException(422, "Merge into another, active component")
-    old, new = found[code], found[data.into]
+    kept = await _merge_component(db, found[code], found[data.into])
+    await db.commit()
+    return {"merged": code, "into": data.into, "products": kept}
+
+
+async def _merge_component(db: AsyncSession, old: FarmComponent, new: FarmComponent, add: bool = True) -> int:
+    """Products and plates of ``old`` move to ``new``, ``old`` is retired.
+
+    Where a product had both, quantities add up (one piece under two codes, e.g. per pack size), or with
+    ``add=False`` the larger one stays (the same piece counted twice, e.g. two versions of its shape).
+    """
     parts = (
         await db.execute(select(FarmProductPart).where(FarmProductPart.component_id.in_([old.id, new.id])))
     ).scalars()
     kept: dict[int, FarmProductPart] = {}
     for part in sorted(parts, key=lambda p: p.component_id != new.id):  # rows already on ``into`` first
         if part.project_id in kept:
-            kept[part.project_id].quantity = min(QTY_MAX, kept[part.project_id].quantity + part.quantity)
+            q = kept[part.project_id].quantity
+            kept[part.project_id].quantity = min(QTY_MAX, q + part.quantity) if add else max(q, part.quantity)
             await db.delete(part)
         else:
             part.component_id = new.id
@@ -758,8 +769,7 @@ async def merge_component(code: str, data: MergeIn, db: AsyncSession = Depends(g
     for y in (await db.execute(select(FarmPlateYield).where(FarmPlateYield.component_code == old.code))).scalars():
         y.component_code = new.code
     old.retired_at = old.retired_at or _now()
-    await db.commit()
-    return {"merged": old.code, "into": new.code, "products": len(kept)}
+    return len(kept)
 
 
 @router.post("/shapes", dependencies=[_create])
@@ -786,6 +796,51 @@ async def rename_shape(shape_id: int, data: ShapeIn, db: AsyncSession = Depends(
     shape.name = name
     await db.commit()
     return {"id": shape.id, "name": shape.name}
+
+
+class ShapeMergeIn(BaseModel):
+    into: int
+
+
+@router.post("/shapes/{shape_id}/merge", dependencies=[_update])
+async def merge_shape(shape_id: int, data: ShapeMergeIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """One piece under two shapes (another version of the model in another 3MF): all moves to ``into``.
+
+    Its objects, its components (one in a colour ``into`` already has is merged into that one,
+    keeping Seller Hub's code) and sets' recipes. The emptied shape is deleted. Re-saved 3MFs
+    keep the link: objects with the same geometry take the shape of their twins.
+    """
+    old, new = await db.get(FarmShape, shape_id), await db.get(FarmShape, data.into)
+    if old is None or new is None:
+        raise HTTPException(404, "Shape not found")
+    if old.id == new.id:
+        raise HTTPException(422, "Merge into another shape")
+    moved = 0
+    for y in (await db.execute(select(FarmPlateYield).where(FarmPlateYield.shape_id == old.id))).scalars():
+        y.shape_id, moved = new.id, moved + 1
+    merged = []
+    for comp in (await db.execute(select(FarmComponent).where(FarmComponent.shape_id == old.id))).scalars().all():
+        twin = await db.scalar(
+            select(FarmComponent).where(
+                FarmComponent.shape_id == new.id,
+                func.lower(func.coalesce(FarmComponent.color, "")) == (comp.color or "").lower(),
+                FarmComponent.retired_at.is_(None),
+            )
+        )
+        if twin is not None and comp.retired_at is None:
+            await _merge_component(db, comp, twin, add=False)
+            merged.append(comp.code)
+        comp.shape_id = new.id
+    for comp in (await db.execute(select(FarmComponent).where(FarmComponent.recipe.isnot(None)))).scalars():
+        if any(r["shape_id"] == old.id for r in comp.recipe or []):
+            recipe: dict[int, int] = {}
+            for r in comp.recipe:
+                sid = new.id if r["shape_id"] == old.id else r["shape_id"]
+                recipe[sid] = max(recipe.get(sid, 0), r["quantity"])  # the same piece: not counted twice
+            comp.recipe = [{"shape_id": s, "quantity": q} for s, q in recipe.items()]
+    await db.delete(old)
+    await db.commit()
+    return {"merged": shape_id, "into": new.id, "objects": moved, "components_merged": merged}
 
 
 # ---------------------------------------------------------------- library folders <-> projects

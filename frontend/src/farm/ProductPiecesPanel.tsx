@@ -35,6 +35,20 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
   const qtyLabel = t(isSet ? 'farm.productPieces.perSetInput' : 'farm.productPieces.perProduct');
   const hex = piece.component?.color_hex || data.set?.color_hex || colors[color.toLowerCase()] || null;
 
+  const sameAs = useMutation({
+    mutationFn: async (into: number) => {
+      if (piece.shape_id) await farmApi.mergeShape(piece.shape_id, into);
+      else await farmApi.linkPiece(piece.yield_ids, into);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  // The product's other shapes: a version of the model in another 3MF can be told to be one of them.
+  const others = [
+    ...new Map(
+      data.pieces.filter((p) => p.shape_id && p.shape_id !== piece.shape_id).map((p) => [p.shape_id!, p.shape!]),
+    ),
+  ];
   const notPart = useMutation({
     mutationFn: () => farmApi.setProductPiece(projectId, { yield_ids: piece.yield_ids, quantity: 0 }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
@@ -81,6 +95,20 @@ function PieceRow({ projectId, piece, data, shapes, colors }: {
               value={name} placeholder={t('farm.productPieces.name')} onChange={(e) => setName(e.target.value)} />
           )}
           {piece.hand !== 0 && <span className="text-xs text-bambu-gray">· {t('farm.productPieces.mirrored')}</span>}
+          {others.length > 0 && (
+            <select aria-label={`${t('farm.productPieces.sameAs')} ${piece.shape || piece.names[0]}`} className={INPUT}
+              value="" disabled={sameAs.isPending}
+              onChange={(e) => {
+                const into = Number(e.target.value);
+                const shape = others.find(([id]) => id === into)?.[1];
+                if (into && window.confirm(t('farm.productPieces.sameAsConfirm', { piece: piece.shape || piece.names[0], shape }))) {
+                  sameAs.mutate(into);
+                }
+              }}>
+              <option value="">{t('farm.productPieces.sameAs')}</option>
+              {others.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            </select>
+          )}
           {piece.quantity == null ? (
             <span className="text-xs text-amber-400">{t('farm.productPieces.open')}</span>
           ) : (

@@ -553,6 +553,47 @@ describe('FarmProductGate', () => {
     confirm.mockRestore();
   });
 
+  it('tells a piece is the same shape as another one of the product', async () => {
+    const user = userEvent.setup();
+    const sent: unknown[] = [];
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    server.use(
+      http.get('/api/v1/farm/products/65/view', () => HttpResponse.json(view)),
+      http.get('/api/v1/farm/products/65/pieces', () =>
+        HttpResponse.json({
+          kind: 'kit',
+          set: null,
+          default_color: 'Bianco',
+          unshaped_parts: [],
+          pieces: [
+            piece({ yield_ids: [1], image_yield_id: 1, names: ['Base (1)'], shape_id: 58, shape: 'Base', quantity: 2 }),
+            piece({ yield_ids: [2], image_yield_id: 2, names: ['Cornice v15'], shape_id: 57, shape: 'Cornice', quantity: 2 }),
+            piece({ yield_ids: [3], image_yield_id: 3, names: ['Tappo nuovo'] }),
+          ],
+        }),
+      ),
+      http.post('/api/v1/farm/shapes/58/merge', async ({ request }) => {
+        sent.push(['merge', await request.json()]);
+        return HttpResponse.json({ merged: 58, into: 57, objects: 4, components_merged: [] });
+      }),
+      http.put('/api/v1/farm/pieces', async ({ request }) => {
+        sent.push(['link', await request.json()]);
+        return HttpResponse.json({ linked: 1, plates_confirmed: 0 });
+      }),
+    );
+    sheet(65);
+    await user.selectOptions(await screen.findByLabelText('Same shape as… Base'), 'Cornice');
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining('Is "Base" the same piece as "Cornice"'));
+    await user.selectOptions(screen.getByLabelText('Same shape as… Tappo nuovo'), 'Base');
+    await waitFor(() =>
+      expect(sent).toEqual([
+        ['merge', { into: 57 }],
+        ['link', { yield_ids: [3], shape_id: 58 }],
+      ]),
+    );
+    confirm.mockRestore();
+  });
+
   it('keeps the upstream panels for normal projects', async () => {
     server.use(
       http.get('/api/v1/farm/products/7/view', () => HttpResponse.json({ detail: 'Not a product' }, { status: 404 })),

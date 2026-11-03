@@ -469,7 +469,7 @@ async def test_a_set_keeps_only_the_shapes_of_its_pieces(async_client, tmp_path)
 
 
 async def test_a_name_proposes_a_shape_only_when_the_geometry_agrees(async_client, tmp_path):
-    """"Corpo1" is every CAD's default name: a key holder must not be offered the Sodastream base's shape."""
+    """Every CAD names objects "Corpo1": a key holder must not be offered the Sodastream base's shape."""
     nas = tmp_path / "nas"
     make_mesh_project(nas / "Soda" / "base.3mf", {1: [("Corpo1", box(10, 20, 5), None)]})
     make_mesh_project(nas / "Soda" / "key.3mf", {1: [("Corpo1.stl", box(30, 30, 2), None)] * 2})
@@ -591,3 +591,39 @@ async def test_a_set_printed_on_separate_plates_becomes_a_kit(async_client):
     assert parts[2]["code"] == cap["code"]  # the white cap already existed: reused
     status = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
     assert status[the_set] is True  # its stock counted sets: not handed to a piece
+
+
+async def test_two_versions_of_a_piece_merge_into_one_shape(async_client, tmp_path):
+    """The same piece modelled twice: "Base" in one 3MF, "Cornice v15" in another (0.9% apart)."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Urmet" / "x2d.3mf", {1: [("Base (1)", box(10, 20, 5), None)] * 2})
+    make_mesh_project(nas / "Urmet" / "sv08.3mf", {1: [("Cornice v15", box(10, 20, 5.05), None)] * 3})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    file_id = (await async_client.get(f"{API}/library/files")).json()[0]["library_file_id"]
+    urmet = (await async_client.get(f"/api/v1/library/files/{file_id}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Urmet"})).json()["project_id"]
+    await async_client.put(f"{API}/products/{pid}/folders/{urmet}", json={"linked": True})
+    pieces = {p["names"][0]: p for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]}
+    assert sorted(pieces) == ["Base (1)", "Cornice v15"]  # two geometries
+    codes = {}
+    for name, shape in (("Base (1)", "Base"), ("Cornice v15", "Cornice")):
+        r = await async_client.put(
+            f"{API}/products/{pid}/pieces",
+            json={"yield_ids": pieces[name]["yield_ids"], "quantity": 2, "shape_name": shape, "color": "Bianco"},
+        )
+        codes[shape] = r.json()["component_code"]
+    shapes = {s["name"]: s["id"] for s in (await async_client.get(f"{API}/shapes")).json()}
+
+    r = await async_client.post(f"{API}/shapes/{shapes['Base']}/merge", json={"into": shapes["Cornice"]})
+    assert r.json()["components_merged"] == [codes["Base"]]
+    [piece] = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]  # one row now
+    assert (piece["shape"], piece["quantity"], piece["file_count"]) == ("Cornice", 2, 2)
+    assert sorted(piece["names"]) == ["Base (1)", "Cornice v15"]
+    view = (await async_client.get(f"{API}/products/{pid}/view")).json()
+    assert [(p["code"], p["quantity"]) for p in view["parts"]] == [(codes["Cornice"], 2)]  # same piece: not 2 + 2
+    assert sorted(x["yield"] for x in view["parts"][0]["plates"]) == [2, 3]
+    assert "Base" not in {s["name"] for s in (await async_client.get(f"{API}/shapes")).json()}
+    retired = {c["code"]: c["retired"] for c in (await async_client.get(f"{API}/components")).json()}
+    assert retired[codes["Base"]] is True

@@ -221,6 +221,23 @@ async def set_kind(project_id: int, data: KindIn, db: AsyncSession = Depends(get
     return {"project_id": project_id, "kind": product.kind}
 
 
+def _by_shape(groups: list[list[int]], rows: list) -> list[list[int]]:
+    """Geometry groups already linked to the same shape shown as one piece (other versions of the model)."""
+    out: list[list[int]] = []
+    seen: dict[int, list[int]] = {}
+    for members in groups:
+        shapes = Counter(rows[i][0].shape_id for i in members if rows[i][0].shape_id is not None)
+        shape_id = shapes.most_common(1)[0][0] if shapes else None
+        if shape_id is None:
+            out.append(members)
+        elif shape_id in seen:
+            seen[shape_id].extend(members)
+        else:
+            seen[shape_id] = list(members)
+            out.append(seen[shape_id])
+    return out
+
+
 @router.get("/products/{project_id}/pieces", dependencies=[products._read])
 async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
     """Distinct pieces in the 3MF projects of the product's folders, with their part in the product."""
@@ -243,7 +260,7 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
     product_colors = Counter(c.color for _, c in parts if c.color)
 
     pieces = []
-    for members in group([r[0].fingerprint for r in rows]):
+    for members in _by_shape(group([r[0].fingerprint for r in rows]), rows):
         items = [rows[i] for i in members]
         names = Counter(y.object_name for y, _, _ in items)
         shape_counts = Counter(y.shape_id for y, _, _ in items if y.shape_id is not None)
