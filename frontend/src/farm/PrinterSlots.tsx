@@ -8,6 +8,7 @@ import type { FilamentReqsData } from '../components/PrintModal/types';
 import { buildLoadedFilaments, useFilamentMapping } from '../hooks/useFilamentMapping';
 import { getCurrencySymbol } from '../utils/currency';
 import { farmApi } from './api';
+import { componentSlot } from './slotColour';
 import './i18n';
 
 const Swatch = ({ color }: { color: string }) => (
@@ -61,14 +62,22 @@ export function PrinterSlots({ printerId, plateId, plateLabel, color, colorHex, 
   const status = useQuery({ queryKey: ['printer-status', printerId], queryFn: () => api.getPrinterStatus(printerId) });
   const assignments = useQuery({ queryKey: ['spool-assignments', printerId], queryFn: () => api.getAssignments(printerId) });
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
-  // The filaments the sliced plate uses, in the component's colour: one 3MF serves every colour variant.
-  const filamentReqs = useMemo(
-    () => reqs.data && ({
-      filaments: reqs.data.filaments.map((f) => ({ ...f, used_meters: f.used_meters ?? 0, tray_info_idx: '',
-        color: colorHex ? `#${colorHex}` : f.color })),
-    } as FilamentReqsData),
-    [reqs.data, colorHex],
-  );
+  const plan = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
+  const tolerance = plan.data?.tolerance ?? 80;
+  // The filaments the sliced plate uses, wanted in the component's colour (one 3MF serves every variant). The farm
+  // says which slot is that colour, with its tolerance and by material type, as dispatch maps it; upstream then
+  // gets that slot's own colour and proposes it as a match. No such slot: the component's colour, and its warning.
+  const filamentReqs = useMemo(() => {
+    if (!reqs.data) return undefined;
+    const loaded = buildLoadedFilaments(status.data, assignments.data, printerId);
+    return {
+      filaments: reqs.data.filaments.map((f) => {
+        const slot = colorHex ? componentSlot(f.type, loaded, colorHex, tolerance) : null;
+        return { ...f, used_meters: f.used_meters ?? 0, tray_info_idx: '',
+          color: slot ? slot.color : colorHex ? `#${colorHex}` : f.color };
+      }),
+    } as FilamentReqsData;
+  }, [reqs.data, colorHex, status.data, assignments.data, printerId, tolerance]);
   const { amsMapping } = useFilamentMapping(filamentReqs, status.data, mappings, settings.data?.prefer_lowest_filament,
     assignments.data, printerId);
   const manual = Object.keys(mappings).length > 0;
