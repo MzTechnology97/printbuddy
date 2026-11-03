@@ -134,6 +134,43 @@ async def test_shared_shapes_and_codes_move_to_one_product_each(async_client, sh
     assert again["components"] == {"assigned": 0, "split": [], "retired": []}
 
 
+@pytest.mark.integration
+async def test_a_split_code_gets_its_own_products_copy_of_the_shape(async_client, db_session, tmp_path):
+    """The shape stays with a third product: both halves of the split code move to their own copies."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Ami" / "ami.3mf", {1: [("Maniglia", tetra(), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    [lib] = await ok(await async_client.get(f"{API}/library/files"))
+    ami = (await ok(await async_client.get(f"/api/v1/library/files/{lib['library_file_id']}")))["folder_id"]
+    shape = (await ok(await async_client.post(f"{API}/shapes", json={"name": "Maniglia"})))["id"]
+    [piece] = await ok(await async_client.get(f"{API}/pieces"))
+    await ok(await async_client.put(f"{API}/pieces", json={"yield_ids": piece["yield_ids"], "shape_id": shape}))
+    black = await ok(await async_client.post(f"{API}/components", json={"shape_id": shape, "color": "Nero"}))
+    yellow = await ok(await async_client.post(f"{API}/components", json={"shape_id": shape, "color": "Giallo"}))
+
+    ids = {}
+    for name, code in (("Nero", black["code"]), ("Giallo", yellow["code"]), ("Giallo bis", yellow["code"])):
+        ids[name] = (await ok(await async_client.post(f"{API}/products", json={"name": name})))["project_id"]
+        await ok(await async_client.put(f"{API}/products/{ids[name]}/folders/{ami}", json={"linked": True}))
+        comp = await db_session.scalar(select(FarmComponent).where(FarmComponent.code == code))
+        db_session.add(FarmProductPart(project_id=ids[name], component_id=comp.id, quantity=4))
+        await db_session.commit()
+
+    report = await migrate(async_client, False)
+    copies = {r["product"]: r["new_shape_id"] for r in report["shapes"]["rows"]}
+    assert copies["Nero"] is None  # the lowest id: keeps the shape
+    [split] = report["components"]["split"]
+    assert (split["code"], split["kept_by"]) == (yellow["code"], ids["Giallo"])
+    shapes = {
+        name: [p["shape_id"] for p in (await ok(await async_client.get(f"{API}/products/{pid}/view")))["parts"]]
+        for name, pid in ids.items()
+    }
+    assert shapes == {"Nero": [shape], "Giallo": [copies["Giallo"]], "Giallo bis": [copies["Giallo bis"]]}
+    assert await ok(await async_client.get(f"{API}/checks/isolation")) == {"ok": True, "problems": []}
+
+
 @pytest.mark.asyncio
 async def test_shape_names_repeat_across_products_in_an_older_database():
     """A database from before kept shape names unique overall: start-up drops that, keeping the rows."""
