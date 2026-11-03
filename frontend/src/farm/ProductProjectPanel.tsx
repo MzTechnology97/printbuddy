@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { Link, Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, CheckCircle2, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FileBox, ListPlus, Loader2, Package } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
@@ -17,6 +17,7 @@ const INPUT =
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 import { AccodaSummary } from './PrintPlanPage';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
+import { FilePlates } from './PlatesPanel';
 import './i18n';
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
@@ -174,6 +175,52 @@ function AddPart({ view }: { view: FarmProductView }) {
   );
 }
 
+/** The plates of the product's 3MF files, those to confirm first, each file opened in place. */
+function ProductPlates({ view }: { view: FarmProductView }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const shapes = useQuery({ queryKey: ['farm', 'shapes'], queryFn: farmApi.getShapes });
+  const files = view.files
+    .filter((f) => !f.excluded)
+    .sort((a, b) => Number(b.proposed > 0 || !b.opened) - Number(a.proposed > 0 || !a.opened));
+  const [open, setOpen] = useState<number | null>(null);
+  return (
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-white">{t('farm.project.plates')}</h3>
+      <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.project.platesIntro')}</p>
+      {files.length === 0 ? (
+        <p className="text-sm text-bambu-gray">{t('farm.project.noFiles')}</p>
+      ) : (
+        <ul className="space-y-2">
+          {files.map((f) => {
+            const isOpen = open === f.library_file_id;
+            const todo = f.proposed > 0 || !f.opened;
+            return (
+              <li key={f.library_file_id} className="bg-bambu-dark rounded-lg">
+                <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : f.library_file_id)}
+                  className="w-full text-left p-3 flex items-start gap-2 text-sm">
+                  {isOpen ? <ChevronDown className="w-4 h-4 mt-0.5 shrink-0" /> : <ChevronRight className="w-4 h-4 mt-0.5 shrink-0" />}
+                  <span className="min-w-0 flex-1 break-all">
+                    <span className="text-white">{f.filename}</span>
+                    <span className="text-xs text-bambu-gray block">{f.folder}</span>
+                  </span>
+                  <span className={`text-xs shrink-0 ${todo ? 'text-amber-400' : 'text-bambu-gray'}`}>
+                    {f.opened ? t('farm.plates.counts', { todo: f.proposed, done: f.confirmed }) : t('farm.plates.notOpened')}
+                  </span>
+                </button>
+                {isOpen && (
+                  <FilePlates file={{ library_file_id: f.library_file_id, path: f.path }} shapes={shapes.data || []}
+                    onShapeCreated={() => queryClient.invalidateQueries({ queryKey: ['farm', 'shapes'] })} />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /** Set or kit, and what is still missing before the product can be printed. */
 function ProductStatus({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
@@ -299,6 +346,8 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
 
         <ProductPiecesPanel projectId={view.project_id} />
 
+        <ProductPlates view={view} />
+
         <section className="space-y-2">
           <h3 className="text-sm font-semibold text-white">{t('farm.project.files')}</h3>
           {view.files.length === 0 ? (
@@ -328,14 +377,6 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
                     onClick={() => exclude.mutate({ id: f.library_file_id, excluded: !f.excluded })}>
                     {t(f.excluded ? 'farm.project.include' : 'farm.project.exclude')}
                   </Button>
-                  {!f.excluded && (!f.opened || f.proposed > 0) && (
-                    <Link
-                      to={`/farm/products?tab=plates&q=${encodeURIComponent(f.filename)}`}
-                      className="text-xs text-bambu-green hover:underline"
-                    >
-                      {t('farm.project.confirmPlates')}
-                    </Link>
-                  )}
                 </li>
               ))}
             </ul>

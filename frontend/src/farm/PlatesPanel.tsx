@@ -172,8 +172,8 @@ function PlateCard({ plate, fileName, shapes, onShapeCreated }: {
   );
 }
 
-function FilePlates({ file, shapes, onShapeCreated }: {
-  file: FarmLibraryFileState;
+export function FilePlates({ file, shapes, onShapeCreated }: {
+  file: Pick<FarmLibraryFileState, 'library_file_id' | 'path'>;
   shapes: FarmShape[];
   onShapeCreated: () => void;
 }) {
