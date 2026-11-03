@@ -20,6 +20,11 @@ vi.mock('../../api/client', async (importOriginal) => {
       setNozzleTemperature: vi.fn(),
       setBedTemperature: vi.fn(),
       disableSteppers: vi.fn(),
+      setChamberTemperature: vi.fn(),
+      klipperMacros: vi.fn(),
+      klipperRunMacro: vi.fn(),
+      klipperConsole: vi.fn(),
+      klipperConsoleSend: vi.fn(),
     },
   };
 });
@@ -65,6 +70,8 @@ describe('KlipperControlPanel PrusaLink controls', () => {
     vi.mocked(api.klipperHome).mockResolvedValue({ success: true });
     vi.mocked(api.klipperExtrude).mockResolvedValue({ success: true });
     vi.mocked(api.disableSteppers).mockResolvedValue({ success: true, message: 'ok' });
+    vi.mocked(api.klipperMacros).mockResolvedValue({ macros: [] });
+    vi.mocked(api.klipperConsole).mockResolvedValue({ lines: [] });
     vi.clearAllMocks();
   });
 
@@ -112,5 +119,60 @@ describe('KlipperControlPanel PrusaLink controls', () => {
     await user.click(screen.getByRole('button', { name: /disable steppers/i }));
 
     await waitFor(() => expect(api.disableSteppers).toHaveBeenCalledWith(7));
+  });
+});
+
+describe('KlipperControlPanel chamber, macros and console', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.setChamberTemperature).mockResolvedValue({ success: true, message: 'ok' });
+    vi.mocked(api.klipperMacros).mockResolvedValue({ macros: ['START_PRINT', 'set_case_leds_on'] });
+    vi.mocked(api.klipperRunMacro).mockResolvedValue({ success: true });
+    vi.mocked(api.klipperConsole).mockResolvedValue({
+      lines: [
+        { message: 'QUERY_ENDSTOPS', time: 1700000000, type: 'command' },
+        { message: '!! Unknown command:"FOO"', time: 1700000001, type: 'response' },
+      ],
+    });
+    vi.mocked(api.klipperConsoleSend).mockResolvedValue({ success: true });
+  });
+
+  it('sets the chamber only on printers whose chamber heater reports a max temperature', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <KlipperControlPanel printer={fluiddPrinter} status={{ connected: true, temperatures: { nozzle: 25, bed: 25 } }} showToast={vi.fn()} />,
+    );
+    expect(screen.queryByLabelText('Chamber temperature target')).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <KlipperControlPanel
+        printer={fluiddPrinter}
+        status={{ connected: true, temperatures: { nozzle: 25, bed: 25, chamber: 33, chamber_max: 80 } }}
+        showToast={vi.fn()}
+      />,
+    );
+    await user.type(screen.getByLabelText('Chamber temperature target'), '50{Enter}');
+    await waitFor(() => expect(api.setChamberTemperature).toHaveBeenCalledWith(7, 50));
+  });
+
+  it('runs a macro only after the confirm', async () => {
+    const user = userEvent.setup();
+    render(<KlipperControlPanel printer={fluiddPrinter} status={{ connected: true }} showToast={vi.fn()} />);
+
+    await user.click(await screen.findByRole('button', { name: 'set_case_leds_on' }));
+    expect(api.klipperRunMacro).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(api.klipperRunMacro).toHaveBeenCalledWith(7, 'set_case_leds_on'));
+  });
+
+  it('shows the console lines and sends a command', async () => {
+    const user = userEvent.setup();
+    render(<KlipperControlPanel printer={fluiddPrinter} status={{ connected: true }} showToast={vi.fn()} />);
+
+    expect(await screen.findByText('!! Unknown command:"FOO"')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('G-code command'), 'M115{Enter}');
+    await waitFor(() => expect(api.klipperConsoleSend).toHaveBeenCalledWith(7, 'M115'));
+    await waitFor(() => expect(screen.getByLabelText('G-code command')).toHaveValue(''));
   });
 });

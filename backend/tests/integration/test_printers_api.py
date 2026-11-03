@@ -3641,3 +3641,73 @@ class TestPrinterCustomImage:
             deleted = await async_client.delete(f"/api/v1/printers/{printer.id}")
         assert deleted.status_code == 200
         assert not (self.images_dir / filename).exists()
+
+
+class _FakeKlipperClient:
+    """The Moonraker client's control methods, recording what the routes send."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def send_gcode(self, script):
+        self.sent.append(script)
+        return True
+
+    def set_chamber_temperature(self, target):
+        if target > 80:
+            raise ValueError("Chamber temperature must be 0-80°C")
+        return self.send_gcode(f"M141 S{target}")
+
+    def list_macros(self):
+        return ["START_PRINT", "set_case_leds_on"]
+
+    def run_macro(self, name):
+        if name not in self.list_macros():
+            raise ValueError(f"Unknown macro '{name}'")
+        return self.send_gcode(name)
+
+    def gcode_store(self, count=100):
+        return [{"message": "ok", "time": 1.0, "type": "response"}][:count]
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_chamber_macros_and_console_routes(async_client: AsyncClient, printer_factory):
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="K2", provider="klipper", api_url="http://k2.local:7125")
+    client = _FakeKlipperClient()
+    base = f"/api/v1/printers/{printer.id}"
+    with patch.dict(printer_manager._clients, {printer.id: client}):
+        assert (await async_client.post(f"{base}/temperature/chamber?target=50")).status_code == 200
+        too_hot = await async_client.post(f"{base}/temperature/chamber?target=90")
+        assert too_hot.status_code == 400 and "0-80" in too_hot.json()["detail"]
+
+        assert (await async_client.get(f"{base}/klipper/macros")).json() == {
+            "macros": ["START_PRINT", "set_case_leds_on"]
+        }
+        assert (await async_client.post(f"{base}/klipper/macros/set_case_leds_on")).status_code == 200
+        assert (await async_client.post(f"{base}/klipper/macros/FIRMWARE_RESTART")).status_code == 404
+
+        assert (await async_client.get(f"{base}/klipper/console?count=5")).json()["lines"][0]["message"] == "ok"
+        sent = await async_client.post(f"{base}/klipper/console", json={"script": "QUERY_ENDSTOPS"})
+        assert sent.status_code == 200
+        assert (await async_client.post(f"{base}/klipper/console", json={"script": ""})).status_code == 422
+
+    assert client.sent == ["M141 S50", "set_case_leds_on", "QUERY_ENDSTOPS"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_macros_and_console_are_refused_for_other_providers(async_client: AsyncClient, printer_factory):
+    from types import SimpleNamespace
+
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="P1S")
+    bambu = SimpleNamespace(send_gcode=lambda script: True)
+    base = f"/api/v1/printers/{printer.id}"
+    with patch.dict(printer_manager._clients, {printer.id: bambu}):
+        assert (await async_client.get(f"{base}/klipper/macros")).status_code == 400
+        assert (await async_client.post(f"{base}/klipper/console", json={"script": "M115"})).status_code == 400
+        assert (await async_client.post(f"{base}/temperature/chamber?target=40")).status_code == 400

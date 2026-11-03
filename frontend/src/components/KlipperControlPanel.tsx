@@ -14,6 +14,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
 import type { Printer, PrinterStatus } from '../api/client';
+import { KlipperMacrosConsole } from './KlipperMacrosConsole';
 
 type ToastType = 'success' | 'error' | 'warning' | 'info' | 'loading';
 
@@ -40,6 +41,7 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
   const [extrudeSpeed, setExtrudeSpeed] = useState(5);
   const [nozzleInput, setNozzleInput] = useState('');
   const [bedInput, setBedInput] = useState('');
+  const [chamberInput, setChamberInput] = useState('');
   // PrusaLink and OctoPrint have no Klipper-specific routes (z-offset, macros);
   // they use the provider-neutral jog/home/extrude endpoints.
   const usesGenericControls = printer.provider === 'prusalink' || printer.provider === 'octoprint';
@@ -93,6 +95,12 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
     mutationFn: (target: number) => api.setBedTemperature(printer.id, target),
     onSuccess: () => setBedInput(''),
     onError,
+  });
+
+  const chamberMut = useMutation({
+    mutationFn: (target: number) => api.setChamberTemperature(printer.id, target),
+    onSuccess: () => setChamberInput(''),
+    onError: (error: Error) => showToast(error.message, 'error'),
   });
 
   const disableSteppersMut = useMutation({
@@ -517,6 +525,39 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
               Set
             </button>
           </div>
+          {/* Chamber: only printers with a chamber heater report its max temperature */}
+          {temps.chamber_max != null && (
+            <div className="flex items-center gap-2">
+              <Thermometer size={14} className="text-green-400 shrink-0" />
+              <label className="text-xs text-[var(--text-muted)] w-16 shrink-0">
+                {t('printers.temperatures.chamber', 'Chamber')}
+              </label>
+              <span className="text-xs font-mono tabular-nums text-[var(--text-secondary)] w-12">
+                {Math.round(temps.chamber ?? 0)}°C
+              </span>
+              <input
+                type="number"
+                aria-label="Chamber temperature target"
+                className={inputClass}
+                value={chamberInput}
+                min={0}
+                max={temps.chamber_max}
+                placeholder={String(Math.round(temps.chamber_target ?? 0) || '—')}
+                onChange={(e) => setChamberInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && chamberInput !== '') chamberMut.mutate(Number(chamberInput));
+                }}
+              />
+              <button
+                aria-label="Chamber"
+                className={`px-2 py-1 rounded text-xs ${secondaryControlBtn}`}
+                disabled={chamberMut.isPending || chamberInput === ''}
+                onClick={() => chamberMut.mutate(Number(chamberInput))}
+              >
+                Set
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Z-offset fine adjustment */}
@@ -573,6 +614,8 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
           </button>
         </div>
       </div>
+
+      <KlipperMacrosConsole printerId={printer.id} showToast={showToast} />
     </div>
   );
 }

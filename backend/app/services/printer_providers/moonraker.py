@@ -378,6 +378,11 @@ def _moonraker_light_is_on(values: Any) -> bool:
     )
 
 
+def _moonraker_chamber_heater(available: list[str]) -> str | None:
+    """The chamber's ``heater_generic`` (``chamber_heater`` on a K2, K1 or Zero), if the printer has one."""
+    return next((n for n in available if n.startswith("heater_generic ") and "chamber" in n.lower()), None)
+
+
 def _moonraker_speed_level(gcode_move: Any) -> int | None:
     factor = _safe_float(gcode_move.get("speed_factor")) if isinstance(gcode_move, dict) else None
     if factor is None:
@@ -641,6 +646,7 @@ class MoonrakerPrinterClient:
         self._current_print_started_at: float | None = None
         self.webcams: list[dict[str, Any]] = []
         self._file_metadata: dict[str, dict[str, Any]] = {}  # fork: per printed file, read once
+        self._heater_max_temp: dict[str, float] = {}  # fork: chamber heater -> its config max_temp
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -1528,6 +1534,12 @@ class MoonrakerPrinterClient:
             except Exception:  # noqa: BLE001 - the light is optional
                 pass
             self.state.chamber_light = _moonraker_light_is_on(status.get(light_object))
+        chamber_heater = _moonraker_chamber_heater(available_objects)
+        if chamber_heater:
+            try:
+                status.update(self._query_objects([chamber_heater]))
+            except Exception:  # noqa: BLE001 - the chamber reading is optional
+                pass
         if "exclude_object" in available_objects:
             try:
                 status.update(self._query_objects(["exclude_object"]))
@@ -1585,6 +1597,15 @@ class MoonrakerPrinterClient:
                 {**print_stats, "estimated_time": estimate}, self.state.progress
             )
         self.state.temperatures = _moonraker_temperatures(status)
+        heater = status.get(chamber_heater) if chamber_heater else None
+        if isinstance(heater, dict):
+            # fork: chamber_max marks a real, settable chamber heater (the card shows it, the panel sets it)
+            self.state.temperatures.update(
+                chamber=_heater_temperature(heater),
+                chamber_target=_heater_target(heater),
+                chamber_heating=_is_heating(heater),
+                chamber_max=self._chamber_max_temp(chamber_heater),
+            )
         speed_level = _moonraker_speed_level(status.get("gcode_move"))
         if speed_level is not None:
             self.state.speed_level = speed_level
@@ -1686,6 +1707,45 @@ class MoonrakerPrinterClient:
             return False
         self.state.chamber_light = bool(on)
         return True
+
+    def _chamber_max_temp(self, heater: str) -> float | None:
+        """The heater's ``max_temp`` from the Klipper config (80 on a K2, 70 on a Zero), read once."""
+        if heater not in self._heater_max_temp:
+            try:
+                result = self._get("printer/objects/query?configfile=settings")
+            except Exception:  # noqa: BLE001 - asked again on the next poll
+                return None
+            settings = result.get("status", result).get("configfile", {}).get("settings", {})
+            self._heater_max_temp[heater] = _safe_float(settings.get(heater.lower(), {}).get("max_temp")) or 0.0
+        return self._heater_max_temp[heater] or None
+
+    def set_chamber_temperature(self, target: int | float) -> bool:
+        available = self._available_objects()
+        heater = _moonraker_chamber_heater(available)
+        if heater is None:
+            raise ValueError("This printer has no chamber heater")
+        limit = self._chamber_max_temp(heater)
+        if target < 0 or (limit and target > limit):
+            raise ValueError(f"Chamber temperature must be 0-{limit:g}°C")
+        # The printer's own M141 also drives the chamber fans (K2, K1, Zero); plain Klipper has only the heater.
+        if any(name.lower() == "gcode_macro m141" for name in available):
+            return self.send_gcode(f"M141 S{int(target)}")
+        return self.send_gcode(f"SET_HEATER_TEMPERATURE HEATER={heater.partition(' ')[2]} TARGET={int(target)}")
+
+    def list_macros(self) -> list[str]:
+        """The printer's ``gcode_macro`` commands, without the internal ``_NAME`` ones."""
+        names = (name.partition(" ")[2] for name in self._available_objects() if name.startswith("gcode_macro "))
+        return sorted((name for name in names if name and not name.startswith("_")), key=str.lower)
+
+    def run_macro(self, name: str) -> bool:
+        if name not in self.list_macros():
+            raise ValueError(f"Unknown macro '{name}'")
+        return self.send_gcode(name)
+
+    def gcode_store(self, count: int = 100) -> list[dict[str, Any]]:
+        """Moonraker's latest console lines: commands sent and Klipper's responses, oldest first."""
+        store = self._get(f"server/gcode_store?count={int(count)}").get("gcode_store")
+        return store if isinstance(store, list) else []
 
     def set_print_speed(self, mode: int) -> bool:
         percent = _SPEED_MODE_PERCENT.get(int(mode))
