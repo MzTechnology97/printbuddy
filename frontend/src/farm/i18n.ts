@@ -166,6 +166,7 @@ const en = {
       to_assign: 'to assign',
       not_production: 'not production',
     },
+    otherColour: '(printed in this colour: the component is {{color}})',
   },
   outside: {
     title_one: '{{count}} print outside the queue to assign',
@@ -520,6 +521,7 @@ const it: typeof en = {
       to_assign: 'da assegnare',
       not_production: 'non è produzione',
     },
+    otherColour: '(stampato in questo colore: il componente è {{color}})',
   },
   outside: {
     title_one: '{{count}} stampa fuori coda da assegnare',

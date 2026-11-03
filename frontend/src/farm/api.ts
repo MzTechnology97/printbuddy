@@ -186,7 +186,9 @@ export interface FarmPlanComponent {
 export interface FarmJob {
   id: number;
   component_code: string; // '' while a print outside the queue is to assign
-  color: string | null;
+  color: string | null; // the batch: the filament the printer fed when known, else the component colour
+  component_color?: string | null;
+  color_from_printer?: boolean;
   state:
     | 'waiting'
     | 'pending'

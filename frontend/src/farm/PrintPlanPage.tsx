@@ -558,6 +558,9 @@ function JobsList() {
               <li key={j.id} className="p-3 flex flex-wrap items-center gap-3 text-sm">
                 <span className="font-mono text-bambu-green">{j.component_code}</span>
                 <span className="text-white">{j.color}</span>
+                {j.color_from_printer && j.component_color && j.component_color.toLowerCase() !== j.color?.toLowerCase() && (
+                  <span className="text-xs text-amber-400">{t('farm.jobs.otherColour', { color: j.component_color })}</span>
+                )}
                 <span className="text-bambu-gray">{t('farm.plan.yield', { count: j.pieces })}</span>
                 <span className="text-white">{t(`farm.jobs.state.${j.state}`, { defaultValue: j.state })}</span>
                 {j.printer && <span className="text-bambu-gray">· {j.printer}</span>}

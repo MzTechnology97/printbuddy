@@ -24,7 +24,9 @@ class FarmPrintJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     component_code: Mapped[str] = mapped_column(String(12), index=True)
-    color: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(50), nullable=True)  # the component's
+    # The filament the printer really fed (``service.record_used_colors``): the batch's colour when known
+    used_color: Mapped[str | None] = mapped_column(String(50), nullable=True)
     plate_ids: Mapped[list] = mapped_column(JSON)  # alternatives, preferred first
     expected_pieces: Mapped[int] = mapped_column(Integer)  # the first alternative's yield, until a plate is chosen
     # waiting | queued | cancelled; outside | to_assign | not_production
@@ -50,6 +52,7 @@ add_columns(
     "farm_print_jobs",
     {
         "queue_options": "JSON",
+        "used_color": "VARCHAR(50)",
         "source": "VARCHAR(80)",
         "outside_name": "VARCHAR(255)",
         "finished_at": "DATETIME",

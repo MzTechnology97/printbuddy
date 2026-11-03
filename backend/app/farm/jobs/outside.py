@@ -9,7 +9,8 @@ this order:
 2. the archived file's SHA-256 is a farm job's file or a plate's sliced output;
 3. otherwise it is ``to_assign``, with a proposal when its name looks like a plate's 3MF; the
    user says the components and pieces (``assign``), or that it is not production.
-A plate whose components only differ by colour is a proposal too: the colour is the user's call.
+A plate whose components only differ by colour takes the one in the colour the printer fed
+(``service.record_used_colors``); without it, it is a proposal: the colour is the user's call.
 
 On Klipper, Moonraker's history adds the prints done while Printbuddy was off (no archive).
 Failed and cancelled prints make no batch. Only prints that end after the first scan count
@@ -29,6 +30,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.settings import get_setting, set_setting
+from backend.app.farm.jobs import service
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.products.folders import component_files, may_print
@@ -186,8 +188,10 @@ async def _proposal(db: AsyncSession, names: list[str | None]) -> list[dict] | N
     return _clean(await _plate_parts(db, best, None)) or None
 
 
-async def recognise(db: AsyncSession, names: list[str | None], sha256: str | None) -> tuple[list[dict], list | None]:
-    """``(parts, None)`` when the print is known, else ``([], proposal)``."""
+async def recognise(
+    db: AsyncSession, names: list[str | None], sha256: str | None, used: str | None = None
+) -> tuple[list[dict], list | None]:
+    """``(parts, None)`` when the print is known, else ``([], proposal)``; ``used``: the colour fed."""
     sha8 = next((m.group(1) for n in names if n and (m := FINGERPRINT_RE.search(n))), None)
     keys = ([{"sha8": sha8, "sha256": None}] if sha8 else []) + ([{"sha8": None, "sha256": sha256}] if sha256 else [])
     for key in keys:
@@ -198,6 +202,8 @@ async def recognise(db: AsyncSession, names: list[str | None], sha256: str | Non
                 {"component_code": job.component_code, "pieces": pieces, "color": job.color, "plate_id": job.plate_id}
             ], None
         parts = await _from_outputs(db, **key)
+        if parts and _ambiguous(parts) and used:
+            parts = [p for p in parts if (p["color"] or "").lower() == used.lower()] or parts
         if parts:
             return ([], _clean(parts)) if _ambiguous(parts) else (_clean(parts), None)
     return [], await _proposal(db, names)
@@ -211,9 +217,16 @@ async def _record(
     finished_at: datetime | None,
     names: list[str | None],
     sha256: str | None,
+    used: str | None = None,
 ) -> None:
-    parts, proposal = await recognise(db, names, sha256)
-    common = {"source": source, "printer_id": printer_id, "outside_name": name[:255], "finished_at": finished_at}
+    parts, proposal = await recognise(db, names, sha256, used)
+    common = {
+        "source": source,
+        "printer_id": printer_id,
+        "outside_name": name[:255],
+        "finished_at": finished_at,
+        "used_color": used,
+    }
     if not parts:
         db.add(
             FarmPrintJob(
@@ -273,7 +286,8 @@ async def scan_archives(db: AsyncSession) -> int:
             (extra.get("_print_data") or {}).get("gcode_file"),
         ]
         name = archive.print_name or archive.filename
-        await _record(db, source, archive.printer_id, name, archive.completed_at, names, archive.content_hash)
+        used = service.used_color(extra)
+        await _record(db, source, archive.printer_id, name, archive.completed_at, names, archive.content_hash, used)
         done += 1
     if done:
         await db.commit()
@@ -358,7 +372,11 @@ async def assign(db: AsyncSession, job: FarmPrintJob, parts: list[dict], not_pro
         target = job
         if i:
             target = FarmPrintJob(
-                source=job.source, printer_id=job.printer_id, outside_name=job.outside_name, finished_at=job.finished_at
+                source=job.source,
+                printer_id=job.printer_id,
+                outside_name=job.outside_name,
+                finished_at=job.finished_at,
+                used_color=job.used_color,
             )
             db.add(target)
         target.component_code = p["component_code"]

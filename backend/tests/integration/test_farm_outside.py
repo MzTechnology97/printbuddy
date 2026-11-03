@@ -4,13 +4,15 @@ No printer is contacted: archives are written directly and Moonraker's history i
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from backend.app.api.routes.settings import set_setting
-from backend.app.farm.jobs import outside
+from backend.app.farm.jobs import outside, service
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.models import FarmLibraryFile  # noqa: F401 - its table, read by the plate lookups
+from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
@@ -86,7 +88,14 @@ async def farm(async_client, db_session, printer_factory):
     db_session.add(job)
     await set_setting(db_session, outside.SINCE_KEY, at(8).isoformat())
     await db_session.commit()
-    return {"code": black["code"], "plate": plate.id, "a1": a1.id, "k2": k2.id, "queued": job.id}
+    return {
+        "code": black["code"],
+        "shape": shape["id"],
+        "plate": plate.id,
+        "a1": a1.id,
+        "k2": k2.id,
+        "queued": job.id,
+    }
 
 
 async def completed(client, **params):
@@ -213,3 +222,91 @@ async def test_klipper_prints_done_while_printbuddy_was_off(async_client, db_ses
         "K2",
         "2026-01-01T11:40:00",
     )
+
+
+def test_colour_name_from_the_colour_table():
+    from backend.app.farm.plan.service import DEFAULT_COLORS
+
+    assert service.colour_name("#161616", DEFAULT_COLORS, 80) == "Nero"
+    assert service.colour_name("FFFFFF", DEFAULT_COLORS, 80) == "Bianco"
+    assert service.colour_name("#00ffff", DEFAULT_COLORS, 80) == "#00ffff"  # nothing near: the colour itself
+
+
+@pytest.fixture
+def printing(farm, monkeypatch):
+    """The A1 feeds AMS slot 1 (white); the K2 reports no slot (no CFS). Add printers to the set to run them."""
+    from backend.app.services.printer_manager import printer_manager
+
+    running: set[int] = set()
+    monkeypatch.setattr(
+        printer_manager,
+        "get_status",
+        lambda pid: SimpleNamespace(state="RUNNING" if pid in running else "IDLE", tray_now=1),
+    )
+    trays = [{"global_tray_id": 0, "color": "#161616"}, {"global_tray_id": 1, "color": "#f5f5f5"}]
+    monkeypatch.setattr(service, "_loaded_trays", lambda pid: trays if pid == farm["a1"] else [])
+    return running
+
+
+@pytest.mark.asyncio
+async def test_the_batch_colour_is_the_filament_the_printer_fed(async_client, db_session, farm, printing):
+    a1, k2 = farm["a1"], farm["k2"]
+    # Accoda's black job printing on the A1 from the white slot; on the K2, a print from its display.
+    running = archive(a1, "Sopra__abcdef12.3mf", QUEUE_HASH, status="printing", ended=at(15))
+    display = archive(k2, "Sopra__abcdef12.gcode", status="printing", ended=at(15))
+    db_session.add_all(
+        [running, display, FarmPrinterSpool(printer_id=k2, material="PLA", color_name="Rosso", color="d32f2f")]
+    )
+    await db_session.flush()
+    item = PrintQueueItem(printer_id=a1, archive_id=running.id, status="printing")
+    db_session.add(item)
+    await db_session.flush()
+    job = FarmPrintJob(
+        component_code=farm["code"],
+        color="Nero",
+        plate_ids=[farm["plate"]],
+        expected_pieces=15,
+        status="queued",
+        queue_item_id=item.id,
+        printer_id=a1,
+        plate_id=farm["plate"],
+        pieces=15,
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    printing.update({a1, k2})
+    assert await service.record_used_colors(db_session) == 2
+    assert await service.record_used_colors(db_session) == 2
+    item.status, item.completed_at = "completed", at(16)
+    for a in (running, display):
+        a.status = "completed"
+    await db_session.commit()
+    printing.clear()
+    assert await service.record_used_colors(db_session) == 0
+    await outside.scan_archives(db_session)
+
+    batches = {b["printer"]: b for b in await completed(async_client, since=at(15).isoformat())}
+    assert [(p, b["color"], b["component_color"], b["color_from_printer"]) for p, b in sorted(batches.items())] == [
+        ("A1 uno", "Bianco", "Nero", True),  # the slot in use, not the component's colour
+        ("K2", "Rosso", "Nero", True),  # no CFS: the spool set by hand
+    ]
+    # Printed before this: no sample, the component's colour.
+    [old] = [b for b in await completed(async_client) if b["id"] == farm["queued"]]
+    assert (old["color"], old["color_from_printer"]) == ("Nero", False)
+
+
+@pytest.mark.asyncio
+async def test_the_colour_fed_picks_between_components_of_one_piece(async_client, db_session, farm):
+    body = {"shape_id": farm["shape"], "color": "Bianco"}
+    white = (await async_client.post(f"{API}/components", json=body)).json()
+    fed_white = archive(farm["a1"], "copia.gcode.3mf", OUTPUT_HASH, ended=at(10))
+    fed_white.extra_data = {service.USED_COLORS_KEY: {"Bianco": 9, "Nero": 1}}
+    db_session.add_all([fed_white, archive(farm["a1"], "copia 2.gcode.3mf", OUTPUT_HASH, ended=at(11))])
+    await db_session.commit()
+    await outside.scan_archives(db_session)
+
+    [batch] = [b for b in await completed(async_client) if b["outside_queue"]]
+    assert (batch["component_code"], batch["color"]) == (white["code"], "Bianco")
+    [left] = [j for j in (await async_client.get(f"{API}/jobs")).json() if j["state"] == "to_assign"]
+    assert sorted(p["component_code"] for p in left["proposal"]) == sorted([farm["code"], white["code"]])

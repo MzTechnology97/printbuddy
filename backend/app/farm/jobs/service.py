@@ -45,12 +45,14 @@ from backend.app.farm import notify
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan import service as plan
+from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.service import _latest_slices
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
 from backend.app.farm.products.models import FarmComponent
 from backend.app.farm.products.shapes import ProductShapes, plate_yield, product_shapes
+from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
@@ -68,6 +70,7 @@ RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
 EXTRACTED_VERSION = 2  # 2: with the plate's preview and layer info; older extractions are redone
 QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection")
+USED_COLORS_KEY = "farm_used_colors"  # in a print's archive extra_data: {colour: samples taken while printing}
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
 
@@ -341,6 +344,68 @@ def _loaded_trays(printer_id: int) -> list[dict]:
     return scheduler._build_loaded_filaments(status) if status is not None and status.raw_data else []
 
 
+def colour_name(color: str, colors: dict[str, str], tolerance: int) -> str:
+    """The colour table's name nearest a spool's colour, as components name it ("Nero"); else ``#rrggbb``."""
+    color = color.lstrip("#").lower()[:6]
+    near = min(colors.items(), key=lambda kv: plan.color_distance(kv[1], color), default=None)
+    if near is not None and plan.color_distance(near[1], color) <= tolerance:
+        return near[0].capitalize()
+    return f"#{color}"
+
+
+def used_color(extra: dict | None) -> str | None:
+    """The colour most sampled while the print ran (see ``record_used_colors``)."""
+    samples = (extra or {}).get(USED_COLORS_KEY) or {}
+    return max(samples, key=samples.get) if samples else None
+
+
+async def record_used_colors(db: AsyncSession) -> int:
+    """Sample, on each running print's archive and farm job, the colour of the filament being fed.
+
+    The AMS/CFS slot in use (or the external spool); a Klipper printer without CFS reports none,
+    so its spool set by hand. The batch's colour is the one sampled most. Returns how many prints.
+    """
+    config = await plan.load_config(db)
+    by_hand = {s.printer_id: s for s in (await db.execute(select(FarmPrinterSpool))).scalars()}
+    sampled = 0
+    for printer in (await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all():
+        status = printer_manager.get_status(printer.id)
+        if status is None or status.state != "RUNNING":
+            continue
+        trays = _loaded_trays(printer.id)
+        if trays:
+            tray = next((t for t in trays if t["global_tray_id"] == getattr(status, "tray_now", None)), None)
+            if tray is None or not tray.get("color"):
+                continue  # between two slots, or a tray without colour
+            name = colour_name(tray["color"], config["colors"], config["tolerance"])
+        elif printer.id in by_hand:
+            name = by_hand[printer.id].color_name
+        else:
+            continue
+        archive = await db.scalar(
+            select(PrintArchive)
+            .where(PrintArchive.printer_id == printer.id, PrintArchive.status == "printing")
+            .order_by(PrintArchive.id.desc())
+            .limit(1)
+        )
+        if archive is None:
+            continue
+        samples = dict((archive.extra_data or {}).get(USED_COLORS_KEY) or {})
+        samples[name] = samples.get(name, 0) + 1
+        archive.extra_data = {**(archive.extra_data or {}), USED_COLORS_KEY: samples}
+        jobs = await db.execute(
+            select(FarmPrintJob)
+            .join(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
+            .where(PrintQueueItem.archive_id == archive.id)
+        )
+        for job in jobs.scalars():
+            job.used_color = used_color(archive.extra_data)
+        sampled += 1
+    if sampled:
+        await db.commit()
+    return sampled
+
+
 def _slot_mapping(used: list[dict], trays: list[dict], color_hex: str, tolerance: int) -> list[int] | None:
     """Each filament the plate uses on a tray of the component's colour and a compatible material, the others
     -1 (position = slot_id - 1, as upstream's ``ams_mapping``); None when one of them has no such tray."""
@@ -552,6 +617,7 @@ class FarmJobDispatcher:
                 async with database.async_session() as db:
                     await dispatch_once(db)
                     await alerts.check(db)  # never raises
+                    await record_used_colors(db)
                     await outside.scan_archives(db)
                     if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
                         last_history = time.monotonic()
