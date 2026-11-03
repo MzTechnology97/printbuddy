@@ -6,6 +6,7 @@ from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
+from backend.app.farm.columns import add_columns
 
 
 class FarmPrintJob(Base):
@@ -28,5 +29,10 @@ class FarmPrintJob(Base):
     printer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plate_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pieces: Mapped[int | None] = mapped_column(Integer, nullable=True)  # yield of the chosen plate
+    # What the print dialog sets on the upstream queue item: ams_mapping, scheduled_time (ISO, UTC), manual_start...
+    queue_options: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+add_columns("farm_print_jobs", {"queue_options": "JSON"})

@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
-import { PrintPlanPage } from '../../farm/PrintPlanPage';
+import { AccodaSummary, PrintPlanPage } from '../../farm/PrintPlanPage';
 
 const plate = (id: number, model: string, score: number, sliced: boolean, printers: object[]) => ({
   plate_id: id,
@@ -209,6 +209,57 @@ describe('PrintPlanPage', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(savedSettings).toEqual({ url: 'http://hub2.test:8000', tolerance: 80, colors: { nero: '111111' } }),
+    );
+  });
+
+  it('prints the ticked components with their picture, slots chosen by hand and a manual start', async () => {
+    server.use(
+      http.get('/api/v1/farm/plates/:id/filaments', ({ params }) =>
+        HttpResponse.json({
+          plate_id: Number(params.id),
+          sliced: true,
+          // The 3MF says yellow: the proposal still looks for the component's brown.
+          filaments: [{ slot_id: 1, type: 'PLA', color: '#FFC800', used_grams: 150, used_meters: 50 }],
+        }),
+      ),
+      http.get('/api/v1/printers/1/status', () =>
+        HttpResponse.json({
+          connected: true,
+          state: 'IDLE',
+          ams: [{ id: 0, humidity: null, temp: null, tray: [
+            { id: 0, tray_type: 'PLA', tray_color: 'FFFFFFFF' },
+            { id: 1, tray_type: 'PLA', tray_color: '6B4226FF' },
+          ] }],
+          vt_tray: [],
+        }),
+      ),
+      http.get('/api/v1/spool-assignments', () => HttpResponse.json([])),
+    );
+    const [needed, ...rest] = plan.components;
+    const covered = { ...needed, code: 'C-0122', name: 'Tartufo sotto – Marrone', missing: 0 };
+    const user = userEvent.setup();
+    render(<AccodaSummary components={[needed, covered, ...rest]} byHand onClose={() => undefined}
+      onDone={() => undefined} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    // What is still missing is ticked, the rest can be added; each shows its picture.
+    expect(within(dialog).getByLabelText('Print C-0121')).toBeChecked();
+    expect(within(dialog).getByLabelText('Print C-0122')).not.toBeChecked();
+    expect(within(dialog).getByRole('img', { name: 'Tartufo sopra – Marrone' }).getAttribute('src')).toContain(
+      '/farm/components/C-0121/image?c=6b4226',
+    );
+
+    // A chosen printer shows what it has loaded and upstream's slot mapping; a slot picked by hand goes.
+    await user.selectOptions(within(dialog).getByLabelText('Printer'), 'A1 uno · free');
+    expect(await within(dialog).findByText('Loaded now:')).toBeInTheDocument();
+    const slot = await within(dialog).findByTitle('Auto-matched');
+    expect(slot).toHaveValue('1'); // the brown one, proposed
+    await user.selectOptions(slot, '0');
+    await user.click(within(dialog).getByRole('button', { name: /Queue Only/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() =>
+      expect(createdJobs).toEqual({
+        jobs: [{ component_code: 'C-0121', plate_ids: [1], printer_id: 1, ams_mapping: [0], manual_start: true }],
+      }),
     );
   });
 });

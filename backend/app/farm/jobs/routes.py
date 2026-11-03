@@ -14,6 +14,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.jobs import service
 from backend.app.farm.jobs.models import FarmPrintJob
+from backend.app.farm.plates.models import FarmPlate
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 
@@ -29,6 +30,13 @@ class JobIn(BaseModel):
     component_code: str = Field(min_length=1, max_length=12)
     plate_ids: list[int] = Field(min_length=1, max_length=50)
     printer_id: int | None = None  # None: the first free printer that fits
+    # Upstream queue options, as in its print dialog. Slots: global tray ids by the plate's filament order.
+    ams_mapping: list[int] | None = Field(default=None, max_length=32)
+    scheduled_time: datetime | None = None
+    manual_start: bool = False
+    require_previous_success: bool = False
+    auto_off_after: bool = False
+    gcode_injection: bool = False
 
 
 class JobsIn(BaseModel):
@@ -49,6 +57,7 @@ def _job_dict(job: FarmPrintJob, item_status: str | None, printer: str | None) -
         "printer": printer,
         "queue_item_id": job.queue_item_id,
         "pieces": job.pieces if job.pieces is not None else job.expected_pieces,
+        "scheduled_time": (job.queue_options or {}).get("scheduled_time"),
         "created_at": job.created_at,
     }
 
@@ -59,6 +68,17 @@ async def create_jobs(data: JobsIn, db: AsyncSession = Depends(get_db)) -> list[
     if any(j.printer_id for j in jobs):
         await service.dispatch_once(db)  # a chosen printer's queue gets it now, not at the next tick
     return [_job_dict(j, "pending" if j.status == "queued" else None, None) for j in jobs]
+
+
+@router.get("/plates/{plate_id}/filaments", dependencies=[_read])
+async def plate_filaments(plate_id: int, color: str | None = None, db: AsyncSession = Depends(get_db)) -> dict:
+    """Filament slots of the plate sliced in the component's ``color``, for the print dialog's slot mapping;
+    ``sliced`` false: none yet."""
+    plate = await db.get(FarmPlate, plate_id)
+    if plate is None:
+        raise HTTPException(404, "Plate not found")
+    filaments = await service.plate_filaments(db, plate, color)
+    return {"plate_id": plate_id, "sliced": filaments is not None, "filaments": filaments or []}
 
 
 @router.get("/jobs", dependencies=[_read])

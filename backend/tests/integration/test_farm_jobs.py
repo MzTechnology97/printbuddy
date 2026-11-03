@@ -62,20 +62,29 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
     ]
     slicing_asked = []
 
-    async def fake_sliced(db, plate):
+    async def fake_sliced(db, plate, color):
         return sliced if plate.printer_model == "A1" else None
 
-    async def fake_ask(db, plate):
-        slicing_asked.append(plate.printer_model)
+    async def fake_ask(db, plate, color):
+        slicing_asked.append((plate.printer_model, color))
 
     async def fake_local(db, lib_file):
         return sliced_path
 
-    monkeypatch.setattr(service, "sliced_file", fake_sliced)
-    monkeypatch.setattr(service, "ask_slicing", fake_ask)
+    monkeypatch.setattr(service, "variant_file", fake_sliced)
+    monkeypatch.setattr(service, "ask_variant", fake_ask)
     monkeypatch.setattr(service, "_local_path", fake_local)
     monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 1, "type": "PLA"}])
     monkeypatch.setattr(plan, "printer_snapshot", lambda printers: snapshot)
+    # The live slots: the snapshot's loaded filaments, tray i on AMS slot i.
+    monkeypatch.setattr(
+        service,
+        "_loaded_trays",
+        lambda pid: [
+            {"type": f["type"], "color": f"#{f['color']}", "global_tray_id": i}
+            for i, f in enumerate(next(p for p in snapshot if p["id"] == pid)["loaded"])
+        ],
+    )
     return {
         "code": black["code"],
         "plates": [plates["A1"].id, plates["P1S"].id],
@@ -95,16 +104,14 @@ async def accoda(client, code, plate_ids):
 async def test_job_waits_then_goes_to_the_free_printer_with_the_colour(async_client, db_session, farm):
     job = await accoda(async_client, farm["code"], farm["plates"])
     assert (job["state"], job["pieces"]) == ("waiting", 15)
-    assert farm["slicing"] == ["P1S"]  # the plate without a sliced file is sliced right away
+    assert farm["slicing"] == [("P1S", "Nero")]  # sliced right away, in the component's colour
     assert await service.queued_pieces(db_session) == {farm["code"]: 15}
 
     assert await service.dispatch_once(db_session) == 1
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     a1_one = farm["printers"][0]
     assert (item.printer_id, item.plate_id, item.status) == (a1_one, 2, "pending")
-    assert json.loads(item.filament_overrides) == [
-        {"slot_id": 1, "type": "PLA", "color": "#161616", "force_color_match": True}
-    ]
+    assert (json.loads(item.ams_mapping), item.filament_overrides, item.manual_start) == ([0], None, False)
     assert json.loads(item.required_filament_types) == ["PLA"]
 
     jobs = (await async_client.get(f"{API}/jobs")).json()
@@ -160,7 +167,7 @@ async def test_klipper_gets_the_plate_gcode_and_a_manual_start(async_client, db_
     assert (gcode.filename, gcode.file_type) == ("sopra_plate2_plate2.gcode", "gcode")
     # Colour not readable: queued, but it starts only when the user starts it after checking the spool.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (farm["printers"][0], True, None)
-    assert "Check the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
+    assert "Load the Nero spool on A1 uno" in (await db_session.get(FarmPrintJob, job["id"])).note
 
     # The extracted G-code is reused for the next job on the same plate.
     await db_session.get(PrintQueueItem, item.id)
@@ -187,7 +194,7 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
     assert job.plate_ids == [farm["plates"][0]]  # only the A1 plate
     # No black spool loaded: queued anyway, started by hand after loading it.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_two, True, None)
-    assert "Check the Nero spool on A1 due" in job.note
+    assert "Load the Nero spool on A1 due" in job.note
 
     # A printer of a model without a plate is refused.
     bad = await async_client.post(
@@ -202,8 +209,10 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
 
 
 @pytest.mark.asyncio
-async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client, db_session, farm):
+async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client, db_session, farm, monkeypatch):
     """Two 3MF for the same printer, PLA and PETG: black PETG is loaded, so the PETG one goes."""
+    reads = iter([[{"slot_id": 1, "type": "PLA"}], [{"slot_id": 1, "type": "PETG"}]])  # each 3MF's slice_info
+    monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: next(reads))
     a1_two = farm["printers"][1]
     pla = await db_session.get(FarmPlate, farm["plates"][0])
     petg = FarmPlate(library_file_id=60, plate_index=1, printer_model="A1", materials=["PETG"])
@@ -220,7 +229,7 @@ async def test_chosen_printer_takes_the_3mf_of_the_loaded_material(async_client,
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
     assert (job.plate_id, job.pieces, item.manual_start) == (petg.id, 12, False)
-    assert json.loads(item.filament_overrides)[0]["color"] == "#141414"
+    assert (json.loads(item.ams_mapping), item.filament_overrides) == ([0], None)
 
 
 @pytest.mark.asyncio
@@ -308,3 +317,98 @@ async def test_klipper_gcode_follows_a_new_slice_of_the_output(db_session, tmp_p
 
     # The extracted G-code carries the output's metadata but is not an output of the project.
     assert (await _latest_slices(db_session, SimpleNamespace(id=99), "v1")) == {1: sliced}
+
+
+@pytest.mark.asyncio
+async def test_print_dialog_options_reach_the_queue_item(async_client, db_session, farm):
+    """Slots chosen by hand, start time and queue flags go to the queue item; no spool check then."""
+    a1_two = farm["printers"][1]
+    farm["snapshot"][1]["loaded"] = [{"type": "PLA", "color": "ffffff"}]  # white: no match, but slots are chosen
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {
+                    "component_code": farm["code"],
+                    "plate_ids": farm["plates"][:1],
+                    "printer_id": a1_two,
+                    "ams_mapping": [2],
+                    "scheduled_time": "2030-01-02T10:30:00+01:00",
+                    "require_previous_success": True,
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["scheduled_time"] == "2030-01-02T09:30:00"
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert (item.printer_id, json.loads(item.ams_mapping), item.filament_overrides) == (a1_two, [2], None)
+    assert (item.manual_start, item.require_previous_success, str(item.scheduled_time)) == (
+        False,
+        True,
+        "2030-01-02 09:30:00",
+    )
+    assert (await db_session.get(FarmPrintJob, r.json()[0]["id"])).note is None
+
+    # Slots belong to a chosen printer.
+    job = {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "ams_mapping": [0]}
+    assert (await async_client.post(f"{API}/jobs", json={"jobs": [job]})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_first_free_printer_job_waits_for_its_start_time(async_client, db_session, farm):
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {"component_code": farm["code"], "plate_ids": farm["plates"], "scheduled_time": "2999-01-01T08:00:00Z"},
+                {"component_code": farm["code"], "plate_ids": farm["plates"], "manual_start": True},
+            ]
+        },
+    )
+    later, manual = r.json()
+    assert await service.dispatch_once(db_session) == 1  # only the one without a start time
+    assert (await db_session.get(FarmPrintJob, later["id"])).note == "Starts at 2999-01-01 08:00 UTC"
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert item.id == (await db_session.get(FarmPrintJob, manual["id"])).queue_item_id
+    assert item.manual_start is True  # black is loaded, but the user asked to start it by hand
+
+
+@pytest.mark.asyncio
+async def test_plate_filaments_for_the_slot_mapping(async_client, farm):
+    a1, p1s = farm["plates"]
+    assert (await async_client.get(f"{API}/plates/{a1}/filaments")).json() == {
+        "plate_id": a1,
+        "sliced": True,
+        "filaments": [{"slot_id": 1, "type": "PLA"}],
+    }
+    assert (await async_client.get(f"{API}/plates/{p1s}/filaments")).json()["sliced"] is False
+    assert (await async_client.get(f"{API}/plates/99999/filaments")).status_code == 404
+
+
+def test_slot_mapping_follows_the_component_colour_not_the_3mf():
+    """3 filaments in the 3MF, the plate uses the 3rd: the black variant goes on the black tray, the rest -1."""
+    used = [{"slot_id": 3, "type": "PETG", "color": "#FFC800"}]  # the 3MF says yellow: it doesn't count
+    trays = [
+        {"type": "PETG", "color": "#FFC800", "global_tray_id": 0},
+        {"type": "PLA", "color": "#111111", "global_tray_id": 1},  # black, wrong material
+        {"type": "PETG", "color": "#121212", "global_tray_id": 2},
+        {"type": "PETG", "color": "#FF7A00", "global_tray_id": 3},
+    ]
+    assert service._slot_mapping(used, trays, "111111", 80) == [-1, -1, 2]
+    assert service._slot_mapping(used, trays[:2], "111111", 80) is None  # no black PETG loaded
+
+
+@pytest.mark.asyncio
+async def test_job_waits_without_a_tray_of_the_component_colour(async_client, db_session, farm, monkeypatch):
+    monkeypatch.setattr(service, "extract_filament_requirements", lambda path, plate: [{"slot_id": 3, "type": "PLA"}])
+    farm["snapshot"][0]["loaded"] = [{"type": "PLA", "color": "ffc800"}, {"type": "PLA", "color": "ff7a00"}]
+    farm["snapshot"][1]["idle"] = False
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 0  # no black PLA: not sent by itself
+    assert "A1 uno: no Nero PLA loaded" in (await db_session.get(FarmPrintJob, job["id"])).note
+
+    farm["snapshot"][0]["loaded"].append({"type": "PLA", "color": "161616"})
+    assert await service.dispatch_once(db_session) == 1
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    assert (json.loads(item.ams_mapping), item.manual_start) == ([-1, -1, 2], False)
