@@ -314,7 +314,6 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
     )
     own = await excluded_by(db, project_id)
     hidden = own | await excluded_files(db)
-    plates = [p for p in plates if p.library_file_id not in hidden]
     folders = await project_folders(db, project_id)
     files = list(
         (
@@ -326,7 +325,9 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
             )
         ).scalars()
     )
-    file_ids = {f.id for f in files} | {p.library_file_id for p in plates}
+    # Only this product's 3MFs: another product's plate of the same shape is not one of its plates.
+    plates = [p for p in plates if p.library_file_id not in hidden and p.library_file_id in {f.id for f in files}]
+    file_ids = {f.id for f in files}
     paths = dict(
         (
             await db.execute(

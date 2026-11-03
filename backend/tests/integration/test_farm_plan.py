@@ -5,6 +5,7 @@ import pytest
 
 from backend.app.farm.plan import service
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+from backend.tests.integration.test_farm_products import product_files
 
 API = "/api/v1/farm"
 
@@ -38,6 +39,7 @@ async def farm(async_client, db_session, monkeypatch):
         f"{API}/products", json={"name": "Tappo – Nero", "parts": [{"component_code": black["code"], "quantity": 2}]}
     )
     assert r.status_code == 200, r.text
+    pids = [r.json()["project_id"]]
     # Another product sold in white too: a colour variant of its black part.
     r = await async_client.post(
         f"{API}/products",
@@ -48,8 +50,9 @@ async def farm(async_client, db_session, monkeypatch):
         },
     )
     assert r.status_code == 200, r.text
-    for index, (model, pieces) in enumerate([("A1", 15), ("P1S", 20), ("K1", 10)], start=1):
-        plate = FarmPlate(library_file_id=40 + index, plate_index=1, printer_model=model, materials=["PLA"])
+    files = await product_files(db_session, [*pids, r.json()["project_id"]], 3)
+    for file_id, (model, pieces) in zip(files, [("A1", 15), ("P1S", 20), ("K1", 10)], strict=True):
+        plate = FarmPlate(library_file_id=file_id, plate_index=1, printer_model=model, materials=["PLA"])
         plate.status = "confirmed"
         plate.print_time_seconds = 3600
         plate.yields = [FarmPlateYield(object_name="sopra", quantity=pieces, shape_id=shape["id"])]
@@ -73,7 +76,7 @@ async def farm(async_client, db_session, monkeypatch):
     monkeypatch.setattr(service, "printer_snapshot", lambda printers: PRINTERS)
     r = await async_client.put(f"{API}/plan/settings", json={"url": "http://hub.test:8000/"})
     assert r.status_code == 200, r.text
-    return {"black": black["code"], "white": white["code"]}
+    return {"black": black["code"], "white": white["code"], "files": files}
 
 
 @pytest.mark.asyncio
@@ -115,6 +118,8 @@ async def test_a_product_printed_by_hand_whatever_seller_hub_asks(async_client, 
         },
     )
     pid = r.json()["project_id"]
+    folder = (await async_client.get(f"/api/v1/library/files/{farm['files'][0]}")).json()["folder_id"]
+    await async_client.put(f"{API}/products/{pid}/folders/{folder}", json={"linked": True})  # the same 3MFs
 
     body = (await async_client.get(f"{API}/plan/products/{pid}")).json()
     rows = [(c["code"], c["name"], c["to_print"], c["missing"], len(c["plates"])) for c in body["components"]]

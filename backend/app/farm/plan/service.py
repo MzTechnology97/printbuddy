@@ -23,7 +23,7 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.products.folders import excluded_files
+from backend.app.farm.products.folders import component_files, excluded_files, may_print
 from backend.app.farm.products.models import (
     FarmComponent,
     FarmProduct,
@@ -276,6 +276,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
             if entry not in used_in.setdefault(target, []):
                 used_in[target].append(entry)
     resolver = await PrinterModelResolver.load(db)
+    files = await component_files(db)
     active = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars())
     printers = await with_spools_set_by_hand(db, printer_snapshot(active))
     queued = queued or {}
@@ -288,7 +289,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         options = []
         for plate in plates:
             pieces = component_yield(comp, plate.yields) if comp else 0
-            if not pieces:
+            if not pieces or not may_print(files, comp.id, plate.library_file_id):  # another product's 3MF
                 continue
             model = resolver.resolve(plate.printer_model).target_model or plate.printer_model or ""
             fits = [
