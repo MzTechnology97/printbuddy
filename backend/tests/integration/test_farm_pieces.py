@@ -246,6 +246,7 @@ async def test_product_leaves_a_3mf_out(async_client, tmp_path):
     assert r.status_code == 200, r.text
     view = (await async_client.get(f"{API}/products/{pid}/view")).json()
     assert {f["filename"]: f["excluded"] for f in view["files"]} == {"kit.3mf": False, "old.3mf": True}
+    assert [f["folder_id"] for f in view["folders"]] == [kit_folder]
     assert next(p for p in view["parts"] if p["code"] == lid_code)["plates"] == []
     pieces = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
     assert [p["names"] for p in pieces] == [["Hook"]]
@@ -259,11 +260,13 @@ async def test_product_leaves_a_3mf_out(async_client, tmp_path):
     make_mesh_project(old, {1: [("Spring", tetra(), None)]})
     await scan(async_client, folder)
 
-    # Another product using the same folder still sees it.
+    # Another product using the same folder (linked from its own sheet) still sees it.
     other = (await async_client.post(f"{API}/products", json={"name": "Kit bis"})).json()["project_id"]
-    await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid, other]})
+    r = await async_client.put(f"{API}/products/{other}/folders/{kit_folder}", json={"linked": True})
+    assert sorted(r.json()["project_ids"]) == sorted([pid, other])
     assert any(p["library_file_id"] == files["old.3mf"] for p in (await async_client.get(f"{API}/plates")).json())
-    await async_client.put(f"{API}/folders/{kit_folder}/projects", json={"project_ids": [pid]})
+    r = await async_client.put(f"{API}/products/{other}/folders/{kit_folder}", json={"linked": False})
+    assert r.json()["project_ids"] == [pid]  # unlinking one product leaves the other
 
     r = await async_client.put(f"{API}/products/{pid}/files/{files['old.3mf']}", json={"excluded": False})
     assert r.status_code == 200

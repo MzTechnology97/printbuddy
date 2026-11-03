@@ -94,6 +94,15 @@ async def project_folders(db: AsyncSession, project_id: int) -> dict[int, str]:
     return labels
 
 
+async def linked_folders(db: AsyncSession, project_id: int) -> list[int]:
+    """Folders linked to the project itself (their subfolders come with them)."""
+    ids = set(
+        (await db.execute(select(FarmFolderLink.folder_id).where(FarmFolderLink.project_id == project_id))).scalars()
+    )
+    ids |= set((await db.execute(select(LibraryFolder.id).where(LibraryFolder.project_id == project_id))).scalars())
+    return sorted(ids)
+
+
 async def excluded_by(db: AsyncSession, project_id: int) -> set[int]:
     """Library file ids of the 3MF projects this product leaves out."""
     from backend.app.farm.models import FarmLibraryFile

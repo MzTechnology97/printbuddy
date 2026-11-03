@@ -29,7 +29,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.plates.models import FarmPlateYield
 from backend.app.farm.plates.service import plates_for
-from backend.app.farm.products.folders import linked_project_ids, set_linked_projects
+from backend.app.farm.products.folders import linked_folders, linked_project_ids, set_linked_projects
 from backend.app.farm.products.models import (
     FarmComponent,
     FarmProduct,
@@ -236,8 +236,7 @@ def _component_dict(c: FarmComponent, shapes: dict[int, str]) -> dict:
         "retired": c.retired_at is not None,
         # A set printed together: its pieces per set.
         "recipe": [
-            {"shape_id": r["shape_id"], "shape": shapes.get(r["shape_id"]), "quantity": r["quantity"]}
-            for r in c.recipe
+            {"shape_id": r["shape_id"], "shape": shapes.get(r["shape_id"]), "quantity": r["quantity"]} for r in c.recipe
         ]
         if c.recipe
         else None,
@@ -366,6 +365,10 @@ async def product_view(project_id: int, db: AsyncSession = Depends(get_db)) -> d
                 "plates": plates_of(c),
             }
             for part, c in parts
+        ],
+        # The folders linked to the product (subfolders come with them), by their path in the library.
+        "folders": [
+            {"folder_id": fid, "name": folders[fid]} for fid in await linked_folders(db, project_id) if fid in folders
         ],
         "files": [
             {
@@ -738,6 +741,26 @@ async def put_folder_projects(folder_id: int, data: FolderProjectsIn, db: AsyncS
     if missing := sorted(set(data.project_ids) - found):
         raise HTTPException(422, f"Unknown projects: {missing}")
     await set_linked_projects(db, folder, data.project_ids)
+    await db.commit()
+    return {"folder_id": folder_id, "project_ids": await linked_project_ids(db, folder_id)}
+
+
+class ProductFolderIn(BaseModel):
+    linked: bool
+
+
+@router.put("/products/{project_id}/folders/{folder_id}", dependencies=[_folders_write])
+async def put_product_folder(
+    project_id: int, folder_id: int, data: ProductFolderIn, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Link a library folder to this product, or unlink it; the folder's other projects stay."""
+    if await db.get(FarmProduct, project_id) is None:
+        raise HTTPException(404, "Not a product")
+    folder = await db.get(LibraryFolder, folder_id)
+    if folder is None:
+        raise HTTPException(404, "Folder not found")
+    others = [pid for pid in await linked_project_ids(db, folder_id) if pid != project_id]
+    await set_linked_projects(db, folder, [*others, project_id] if data.linked else others)
     await db.commit()
     return {"folder_id": folder_id, "project_ids": await linked_project_ids(db, folder_id)}
 
