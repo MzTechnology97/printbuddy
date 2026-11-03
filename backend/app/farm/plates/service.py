@@ -24,6 +24,7 @@ from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.geometry import object_fingerprints, object_meshes, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
+from backend.app.farm.products.folders import excluded_files
 from backend.app.farm.products.models import FarmShape
 from backend.app.models.library import LibraryFile, LibraryFolder
 
@@ -320,6 +321,7 @@ async def _confirmed_plates_by(db: AsyncSession, attr: str, wanted: set) -> dict
         await db.execute(
             select(FarmPlate)
             .where(FarmPlate.status == "confirmed", FarmPlate.yields.any(column.in_(wanted)))
+            .where(FarmPlate.library_file_id.notin_(await excluded_files(db)))
             .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
         )
     ).scalars()

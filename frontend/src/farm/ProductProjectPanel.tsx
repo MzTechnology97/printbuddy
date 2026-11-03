@@ -2,10 +2,12 @@
 // Production Plan and BOM (which list every file as a part and have no quantities for products).
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, FileBox, Package } from 'lucide-react';
+import { Button } from '../components/Button';
 import { Card, CardContent } from '../components/Card';
+import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmProductView } from './api';
 import { ProductPiecesPanel } from './ProductPiecesPanel';
 import './i18n';
@@ -15,6 +17,14 @@ const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
 
 function FarmProductPanel({ view }: { view: FarmProductView }) {
   const { t } = useTranslation();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const exclude = useMutation({
+    mutationFn: ({ id, excluded }: { id: number; excluded: boolean }) =>
+      farmApi.setFileExcluded(view.project_id, id, excluded),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
   return (
     <Card>
       <CardContent className="p-4 space-y-4">
@@ -80,18 +90,29 @@ function FarmProductPanel({ view }: { view: FarmProductView }) {
           ) : (
             <ul className="divide-y divide-bambu-dark-tertiary">
               {view.files.map((f) => (
-                <li key={f.library_file_id} className="py-2 flex flex-wrap items-center gap-2 text-sm">
+                <li key={f.library_file_id}
+                  className={`py-2 flex flex-wrap items-center gap-2 text-sm ${f.excluded ? 'opacity-50' : ''}`}
+                  title={f.excluded ? t('farm.project.excludeHint') : undefined}>
                   <FileBox className="w-4 h-4 text-bambu-gray shrink-0" />
                   <span className="min-w-0 flex-1 break-all">
-                    <span className="text-white">{f.filename}</span>
+                    <span className={f.excluded ? 'text-bambu-gray line-through' : 'text-white'}>{f.filename}</span>
                     <span className="text-xs text-bambu-gray block">{f.folder}</span>
                   </span>
-                  <span className="text-xs text-bambu-gray">
-                    {f.opened
-                      ? t('farm.plates.counts', { todo: f.proposed, done: f.confirmed })
-                      : t('farm.plates.notOpened')}
-                  </span>
-                  {(!f.opened || f.proposed > 0) && (
+                  {f.excluded ? (
+                    <span className="text-xs text-bambu-gray">{t('farm.project.excluded')}</span>
+                  ) : (
+                    <span className="text-xs text-bambu-gray">
+                      {f.opened
+                        ? t('farm.plates.counts', { todo: f.proposed, done: f.confirmed })
+                        : t('farm.plates.notOpened')}
+                    </span>
+                  )}
+                  <Button size="sm" variant="secondary" disabled={exclude.isPending}
+                    aria-label={`${t(f.excluded ? 'farm.project.include' : 'farm.project.exclude')} ${f.filename}`}
+                    onClick={() => exclude.mutate({ id: f.library_file_id, excluded: !f.excluded })}>
+                    {t(f.excluded ? 'farm.project.include' : 'farm.project.exclude')}
+                  </Button>
+                  {!f.excluded && (!f.opened || f.proposed > 0) && (
                     <Link
                       to={`/farm/products?tab=plates&q=${encodeURIComponent(f.filename)}`}
                       className="text-xs text-bambu-green hover:underline"

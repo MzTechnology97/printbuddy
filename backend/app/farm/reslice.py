@@ -74,9 +74,11 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[int | None], 
 
 async def schedule(db: AsyncSession, project_ids: list[int]) -> None:
     """Queue a re-slice job for each changed project that has outputs (one at a time per project)."""
+    from backend.app.farm.products.folders import excluded_files
     from backend.app.services.slice_dispatch import slice_dispatch
 
-    for project_id, plates in (await sliced_plates(db, set(project_ids))).items():
+    excluded = await excluded_files(db)
+    for project_id, plates in (await sliced_plates(db, set(project_ids) - excluded)).items():
         if project_id in _running:
             continue  # the running job re-checks the version before it ends
         lib_file = await db.get(LibraryFile, project_id)

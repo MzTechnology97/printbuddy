@@ -30,7 +30,7 @@ from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.plates.render import render_png
 from backend.app.farm.plates.service import link_by_geometry, object_mesh, suggest_shapes
 from backend.app.farm.products import routes as products
-from backend.app.farm.products.folders import project_folders
+from backend.app.farm.products.folders import excluded_by, project_folders
 from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart, FarmShape
 from backend.app.models.library import LibraryFile
 
@@ -67,6 +67,7 @@ async def product_pieces(project_id: int, db: AsyncSession = Depends(get_db)) ->
                 select(LibraryFile.id, LibraryFile.filename)
                 .where(LibraryFile.deleted_at.is_(None), LibraryFile.folder_id.in_(folders))
                 .where(LibraryFile.filename.ilike("%.3mf"), LibraryFile.filename.not_ilike("%.gcode.3mf"))
+                .where(LibraryFile.id.notin_(await excluded_by(db, project_id)))
             )
         ).all()
     )

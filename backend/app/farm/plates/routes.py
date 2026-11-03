@@ -24,6 +24,7 @@ from backend.app.farm.plates.service import (
     refresh_plates,
     suggest_shapes,
 )
+from backend.app.farm.products.folders import excluded_files
 from backend.app.farm.products.models import FarmShape
 from backend.app.models.library import LibraryFile
 
@@ -107,6 +108,8 @@ async def get_file_plates(library_file_id: int, db: AsyncSession = Depends(get_d
     if lib_file.file_type != "3mf":
         raise HTTPException(status_code=400, detail="Plates come from unsliced 3MF projects")
     state = await _file_state(db, library_file_id)
+    if library_file_id in await excluded_files(db):
+        return []  # left out by its products: no plates proposed nor measured
     try:
         plates = await refresh_plates(db, lib_file, state)
     except PlateReadError as exc:
@@ -121,9 +124,9 @@ async def get_file_plates(library_file_id: int, db: AsyncSession = Depends(get_d
 async def plates_summary(db: AsyncSession = Depends(get_db), _=_read):
     """Plates per file and status, for the confirmation page: ``[{library_file_id, proposed, confirmed}]``."""
     rows = await db.execute(
-        select(FarmPlate.library_file_id, FarmPlate.status, func.count()).group_by(
-            FarmPlate.library_file_id, FarmPlate.status
-        )
+        select(FarmPlate.library_file_id, FarmPlate.status, func.count())
+        .where(FarmPlate.library_file_id.notin_(await excluded_files(db)))
+        .group_by(FarmPlate.library_file_id, FarmPlate.status)
     )
     out: dict[int, dict] = {}
     for file_id, status, count in rows.all():
@@ -140,7 +143,11 @@ async def list_plates(
     _=_read,
 ):
     """Stored plates (only files whose plates were opened at least once)."""
-    query = select(FarmPlate).order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
+    query = (
+        select(FarmPlate)
+        .where(FarmPlate.library_file_id.notin_(await excluded_files(db)))
+        .order_by(FarmPlate.library_file_id, FarmPlate.plate_index)
+    )
     if status is not None:
         query = query.where(FarmPlate.status == status)
     if component_code is not None:
@@ -194,7 +201,8 @@ async def list_pieces(db: AsyncSession = Depends(get_db), _=_read):
     files = dict(
         (await db.execute(select(LibraryFile.id, LibraryFile.filename).where(LibraryFile.deleted_at.is_(None)))).all()
     )
-    rows = [r for r in rows if r[0].fingerprint and r[1] in files]
+    excluded = await excluded_files(db)
+    rows = [r for r in rows if r[0].fingerprint and r[1] in files and r[1] not in excluded]
     pieces = []
     for members in group([r[0].fingerprint for r in rows]):
         items = [rows[i] for i in members]
