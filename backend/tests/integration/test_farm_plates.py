@@ -356,6 +356,9 @@ class TestPlates:
 
         source = await db_session.get(LibraryFile, file_id)
         with zipfile.ZipFile(library_path(source.file_path), "a") as zf:
+            zf.writestr("Metadata/plate_2.png", b"another-plate")
+        assert (await async_client.get(url)).status_code == 404  # a project's lone picture may be another plate's
+        with zipfile.ZipFile(library_path(source.file_path), "a") as zf:
             zf.writestr("Metadata/plate_1.png", b"from-3mf")
         resp = await async_client.get(url)
         assert (resp.status_code, resp.headers["content-type"], resp.content) == (200, "image/png", b"from-3mf")
@@ -363,7 +366,7 @@ class TestPlates:
         sliced = tmp_path / "out" / "lid.gcode.3mf"
         sliced.parent.mkdir()
         with zipfile.ZipFile(sliced, "w") as zf:
-            zf.writestr("Metadata/plate_1.png", b"from-slice")
+            zf.writestr("Metadata/plate_3.png", b"from-slice")  # a slice's lone picture is its plate's
         state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == file_id))
         db_session.add(
             LibraryFile(

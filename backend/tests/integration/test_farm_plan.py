@@ -2,6 +2,7 @@
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from backend.app.farm.plan import service
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
@@ -207,8 +208,36 @@ def test_colour_tolerance():
 
 
 def test_solid_grams_until_the_slice_weighs_it():
-    measured = FarmPlateYield(object_name="Hook", quantity=2, fingerprint=[1000.0, 600.0, 1.0, 1.0, 1.0, 1.0])
-    unmeasured = FarmPlateYield(object_name="Lid", quantity=1, fingerprint=None)
+    def hook():
+        return FarmPlateYield(object_name="Hook", quantity=2, fingerprint=[1000.0, 600.0, 1.0, 1.0, 1.0, 1.0])
+
     # 2 cm³ of PETG (the CF blend counts as PETG) at 1.27 g/cm³.
-    assert service.solid_grams(FarmPlate(materials=["PETG-CF"], yields=[measured, unmeasured])) == 2.5
-    assert service.solid_grams(FarmPlate(materials=["PETG"], yields=[unmeasured])) is None
+    assert service.solid_grams(FarmPlate(materials=["PETG-CF"], yields=[hook()])) == 2.5
+    # No bound rather than one too low or made up: an unmeasured object, two materials, an unknown one.
+    lid = FarmPlateYield(object_name="Lid", quantity=1, fingerprint=None)
+    assert service.solid_grams(FarmPlate(materials=["PETG"], yields=[hook(), lid])) is None
+    assert service.solid_grams(FarmPlate(materials=["PLA", "TPU"], yields=[hook()])) is None
+    assert service.solid_grams(FarmPlate(materials=["PA12"], yields=[hook()])) is None
+
+
+@pytest.mark.asyncio
+async def test_plates_carry_the_slicer_weight_or_the_solid_bound(async_client, db_session, farm):
+    plates = {
+        p.library_file_id: p
+        for p in (
+            await db_session.execute(select(FarmPlate).where(FarmPlate.library_file_id.in_(farm["files"])))
+        ).scalars()
+    }
+    a1, p1s, _k1 = (plates[f] for f in farm["files"])
+    for plate in (a1, p1s):
+        for y in plate.yields:
+            y.fingerprint = [1000.0, 600.0, 1.0, 1.0, 1.0, 1.0]
+    p1s.filament_grams = 80.0
+    await db_session.commit()
+
+    black = (await async_client.get(f"{API}/plan")).json()["components"][1]
+    assert [(o["printer_model"], o["filament_grams"], o["filament_grams_max"]) for o in black["plates"]] == [
+        ("A1", None, 18.6),  # 15 cm³ of PLA, solid
+        ("P1S", 80.0, None),  # the slicer's weight wins
+        ("K1", None, None),  # objects not measured
+    ]

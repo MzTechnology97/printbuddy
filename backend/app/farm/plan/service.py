@@ -57,7 +57,7 @@ COMPONENT_FIELDS = ("code", "name", "status", "to_print", "stock", "need", "days
 TIMEOUT_SECONDS = 15.0
 # Seller Hub computes its whole plan on every call (about 1 s), and Accoda's dialog opens often.
 CACHE_SECONDS = 60
-# g/cm³ of the base polymer ("PETG-CF" counts as PETG); anything else as PLA.
+# g/cm³ of the base polymer ("PETG-CF" counts as PETG); other materials get no estimate.
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21, "PA": 1.14, "PC": 1.2}
 
 
@@ -90,11 +90,13 @@ def solid_grams(plate: FarmPlate) -> float | None:
 
     shortcut: walls, infill and supports are ignored; slicing replaces it with the slicer's figure.
     """
-    volumes = [y.quantity * y.fingerprint[0] for y in plate.yields if y.fingerprint]
-    if not volumes:
+    # No bound rather than a wrong one: an unmeasured object, or several or unknown materials.
+    if not plate.yields or any(not y.fingerprint for y in plate.yields) or len(plate.materials or []) != 1:
         return None
-    base = ((plate.materials or ["PLA"])[0].split("-")[0]).upper()
-    return round(sum(volumes) / 1000 * DENSITY.get(base, DENSITY["PLA"]), 1)
+    density = DENSITY.get(plate.materials[0].split("-")[0].upper())
+    if density is None:
+        return None
+    return round(sum(y.quantity * y.fingerprint[0] for y in plate.yields) / 1000 * density, 1)
 
 
 async def load_config(db: AsyncSession) -> dict:

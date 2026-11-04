@@ -199,14 +199,17 @@ async def confirm_plate(plate_id: int, body: PlateUpdate, db: AsyncSession = Dep
     return _plate_dict(plate, await PrinterModelResolver.load(db))
 
 
-def _plate_png(index: int, fh: BinaryIO) -> bytes | None:
-    """``Metadata/plate_N.png`` of a 3MF; a slice of one plate may carry only that plate's picture."""
+def _plate_png(index: int, sliced: bool, fh: BinaryIO) -> bytes | None:
+    """``Metadata/plate_N.png`` of a 3MF; a slice of one plate may carry only that plate's picture.
+
+    A project's lone picture may be another plate's, so only a slice falls back to it.
+    """
     with zipfile.ZipFile(fh) as zf:
         names = zf.namelist()
         if (want := f"Metadata/plate_{index}.png") in names:
             return zf.read(want)
         only = [n for n in names if re.fullmatch(r"Metadata/plate_\d+\.png", n)]
-        return zf.read(only[0]) if len(only) == 1 else None
+        return zf.read(only[0]) if sliced and len(only) == 1 else None
 
 
 @router.get("/plates/{plate_id}/image")
@@ -222,7 +225,8 @@ async def plate_image(
         if f is None:
             continue
         try:
-            png = await access_run(read_file, f.file_path, partial(_plate_png, plate.plate_index))
+            sliced = file_id == plate.sliced_file_id
+            png = await access_run(read_file, f.file_path, partial(_plate_png, plate.plate_index, sliced))
         except (OSError, zipfile.BadZipFile):  # unreadable or not a 3MF: try the next file
             png = None
         if png:
