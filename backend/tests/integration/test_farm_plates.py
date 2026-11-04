@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from backend.app.api.routes import library
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver, models_in_path
 from backend.app.farm.plates.service import parse_plates, plates_by_component
 from backend.app.models.library import LibraryFile
@@ -80,6 +81,41 @@ def test_parse_plates_orca_emboss_prefix_and_empty_plate(tmp_path):
     plates, _ = parse_plates(path)
     # Extruder 7 is out of range: falls back to the first filament.
     assert [(p.index, p.objects, p.materials) for p in plates] == [(1, {"Tag": 1}, ["PLA"])]
+
+
+def test_parse_plates_counts_copies_left_out_of_model_settings(tmp_path):
+    """Orca lists one instance of an object on its plate but prints every build item of it there."""
+
+    def obj(oid, name):
+        return f'<object id="{oid}"><metadata key="name" value="{name}"/><part id="1"/></object>'
+
+    def plate(index, *oids):
+        insts = "".join(f'<model_instance><metadata key="object_id" value="{o}"/></model_instance>' for o in oids)
+        return f'<plate><metadata key="plater_id" value="{index}"/>{insts}</plate>'
+
+    items = (
+        ['<item objectid="1"/>'] * 15  # a handle copied 15 times, listed once on plate 1
+        + ['<item objectid="2"/>', '<item objectid="2" printable="0"/>']  # one copy not printable
+        + ['<item objectid="3"/>'] * 3  # listed on plates 2 and 3: its third copy can't be placed
+    )
+    path = tmp_path / "copies.3mf"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "3D/3dmodel.model",
+            '<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources/>'
+            f"<build>{''.join(items)}</build></model>",
+        )
+        zf.writestr(
+            "Metadata/model_settings.config",
+            f"<config>{obj(1, 'Handle')}{obj(2, 'Pin')}{obj(3, 'Clip')}"
+            f"{plate(1, 1)}{plate(2, 2, 3)}{plate(3, 3)}</config>",
+        )
+    plates, _ = parse_plates(path)
+    assert [(p.index, p.objects) for p in plates] == [
+        (1, {"Handle": 15}),
+        (2, {"Pin": 1, "Clip": 1}),
+        (3, {"Clip": 1}),
+    ]
 
 
 def test_parse_plates_without_model_settings(tmp_path):
@@ -166,6 +202,22 @@ class TestPlates:
         ]
         assert (first["printer_model"], first["target_model"], first["target_model_source"]) == ("P1S", "P1S", "auto")
         assert (first["materials"], first["nozzle_diameter"]) == (["PETG", "PLA"], 0.4)
+
+    async def test_plates_read_by_an_older_parser_are_read_again(self, async_client, db_session, farm):
+        await get_plates(async_client, farm["hook.3mf"])
+        stored = (
+            await db_session.execute(select(FarmPlate).where(FarmPlate.library_file_id == farm["hook.3mf"]))
+        ).scalars()
+        for plate in stored:
+            plate.parse_version = None  # read before copies left out of model_settings counted
+            for y in plate.yields:
+                y.quantity = 1
+        await db_session.commit()
+        plates = await get_plates(async_client, farm["hook.3mf"])
+        assert [{y["object_name"]: y["quantity"] for y in p["yields"]} for p in plates] == [
+            {"Hook": 4, "Base": 1},
+            {"Lid": 2},
+        ]
 
     async def test_warns_when_folder_names_another_printer(self, async_client, farm):
         hook = await get_plates(async_client, farm["hook.3mf"])

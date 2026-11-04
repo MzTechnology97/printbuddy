@@ -45,6 +45,7 @@ class FarmPlate(Base):
     filament_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
     sliced_file_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_version: Mapped[int | None] = mapped_column(Integer, nullable=True)  # service.PARSE_VERSION; NULL = 1
     status: Mapped[str] = mapped_column(String(16), default="proposed")  # proposed | confirmed
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -72,4 +73,5 @@ class FarmPlateYield(Base):
     plate: Mapped[FarmPlate] = relationship(back_populates="yields")
 
 
+add_columns("farm_plates", {"parse_version": "INTEGER"})
 add_columns("farm_plate_yields", {"shape_id": "INTEGER", "fingerprint": "JSON"})

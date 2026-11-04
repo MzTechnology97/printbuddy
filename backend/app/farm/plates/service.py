@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
-from backend.app.farm.plates.geometry import object_fingerprints, object_meshes, same_piece
+from backend.app.farm.plates.geometry import MAIN_MODEL, object_fingerprints, object_meshes, same_piece
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.plates.printer_map import PrinterModelResolver, canonical_model, models_in_path
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
@@ -30,6 +30,7 @@ from backend.app.models.library import LibraryFile, LibraryFolder
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
 SLICE_INFO_ENTRY = "Metadata/slice_info.config"
+PARSE_VERSION = 2  # 2: an object's copies left out of model_settings count; older plates are read again
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,20 @@ def _model_objects(root) -> dict[str, tuple[str, set[int]]]:
     return objects
 
 
+def _build_instances(zf: zipfile.ZipFile) -> dict[str, int]:
+    """Printable instances per object id in the 3MF build (one build item each)."""
+    if MAIN_MODEL not in zf.namelist():
+        return {}
+    counts: dict[str, int] = {}
+    with zf.open(MAIN_MODEL) as fh:
+        for _, elem in ET.iterparse(fh):
+            if elem.tag.rsplit("}", 1)[-1] == "item" and elem.get("printable") != "0":
+                oid = elem.get("objectid", "")
+                counts[oid] = counts.get(oid, 0) + 1
+            elem.clear()  # inline meshes can be large
+    return counts
+
+
 def object_mesh(fh, object_name: str):
     """The mesh of one object of a project 3MF (as :func:`parse_plates` names it), or None."""
     with zipfile.ZipFile(fh) as zf:
@@ -109,6 +124,7 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
         objects = _model_objects(root)
 
         plates: dict[int, ParsedPlate] = {}
+        listed: dict[str, list[int]] = {}  # object id -> the plate of each instance model_settings lists
         for plate_elem in root.findall("plate"):
             index = _int(_meta(plate_elem, "plater_id"))
             if index is None:
@@ -116,9 +132,11 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
             plate = ParsedPlate(index=index, name=(_meta(plate_elem, "plater_name") or "").strip() or None)
             extruders: set[int] = set()
             for inst in plate_elem.findall("model_instance"):
-                name, obj_extruders = objects.get(_meta(inst, "object_id") or "", (None, set()))
+                oid = _meta(inst, "object_id") or ""
+                name, obj_extruders = objects.get(oid, (None, set()))
                 if name:
                     plate.objects[name] = plate.objects.get(name, 0) + 1
+                    listed.setdefault(oid, []).append(index)
                     extruders |= obj_extruders
             if not plate.objects:
                 continue  # empty plate in the project: prints nothing
@@ -126,6 +144,17 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
             materials = {filament_types[s - 1] for s in slots if 0 < s <= len(filament_types)}
             plate.materials = sorted(materials) or filament_types[:1]
             plates[index] = plate
+
+        # Orca may list only an object's first instance on its plate, yet prints all the copies of it
+        # there (a K2 plate counted 1 handle and printed 15): the unlisted ones count on that plate.
+        # shortcut: an object listed on several plates keeps its listed instances; place the rest by
+        # position if such a project shows up.
+        built = _build_instances(zf)
+        for oid, on in listed.items():
+            extra = built.get(oid, 0) - len(on)
+            if extra > 0 and len(set(on)) == 1:
+                name = objects[oid][0]
+                plates[on[0]].objects[name] += extra
 
         # Projects saved after slicing in the GUI carry per-plate estimates.
         if SLICE_INFO_ENTRY in names:
@@ -186,7 +215,9 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
         p.plate_index: p
         for p in (await db.execute(select(FarmPlate).where(FarmPlate.library_file_id == lib_file.id))).scalars()
     }
-    stale = not plates or any(p.source_sha256 != state.sha256 for p in plates.values())
+    stale = not plates or any(
+        p.source_sha256 != state.sha256 or (p.parse_version or 1) < PARSE_VERSION for p in plates.values()
+    )
     unmeasured = any(y.fingerprint is None for p in plates.values() for y in p.yields)  # stored before geometry
     if state.status == "ok" and (stale or unmeasured):
         try:
@@ -206,6 +237,7 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
             plate.materials = pp.materials
             plate.nozzle_diameter = nozzle
             plate.source_sha256 = state.sha256
+            plate.parse_version = PARSE_VERSION
             plate.print_time_seconds = pp.print_time_seconds
             plate.filament_grams = pp.filament_grams
             plate.sliced_file_id = None
