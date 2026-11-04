@@ -3,6 +3,7 @@
 No printer is contacted: the live printer snapshot, slicing and file reads are stubbed. Data is made up.
 """
 
+import hashlib
 import json
 import zipfile
 
@@ -471,7 +472,12 @@ async def test_klipper_gcode_row_has_the_plate_time_grams_and_picture(db_session
             '<filament id="1" type="PETG" color="#F75403" used_g="163.98"/></plate></config>',
         )
     sliced = LibraryFile(
-        filename=src.name, file_path=str(src), file_type="gcode", file_size=1, source_type="sliced", file_hash="h1"
+        filename=src.name,
+        file_path=str(src),
+        file_type="gcode",
+        file_size=1,
+        source_type="sliced",
+        file_hash=hashlib.sha256(src.read_bytes()).hexdigest(),
     )
     db_session.add(sliced)
     await db_session.commit()

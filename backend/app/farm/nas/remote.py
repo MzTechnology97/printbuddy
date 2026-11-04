@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from stat import S_ISDIR
 from typing import BinaryIO, Protocol, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class RemoteEntry:
 
 class Remote(Protocol):
     def scandir(self, parts: tuple[str, ...]) -> list[RemoteEntry]: ...
+    def stat(self, parts: tuple[str, ...]) -> RemoteEntry: ...
     def read(self, parts: tuple[str, ...], fn: Callable[[BinaryIO], T]) -> T: ...
     def copy_to(self, parts: tuple[str, ...], dest: BinaryIO) -> None: ...
     def makedirs(self, parts: tuple[str, ...]) -> None: ...
@@ -183,6 +185,14 @@ class SmbRemote:
                 st = e.stat()
                 entries.append(RemoteEntry(e.name, e.is_dir(), st.st_size, st.st_mtime))
         return entries
+
+    def stat(self, parts: tuple[str, ...]) -> RemoteEntry:
+        """Size and mtime of one path, as a listing gives them (nothing is read)."""
+        import smbclient
+
+        with self._session():
+            st = smbclient.stat(self._unc(parts), **self._kwargs)
+        return RemoteEntry(parts[-1], S_ISDIR(st.st_mode), st.st_size, st.st_mtime)
 
     def read(self, parts: tuple[str, ...], fn: Callable[[BinaryIO], T]) -> T:
         """Run ``fn`` on the open remote file: seekable, so zip entries are read without the whole file."""
