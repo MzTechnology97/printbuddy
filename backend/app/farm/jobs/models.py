@@ -36,6 +36,11 @@ class FarmPrintJob(Base):
     printer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plate_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pieces: Mapped[int | None] = mapped_column(Integer, nullable=True)  # yield of the chosen plate
+    # Objects the printer excluded (``service.record_excluded_objects``): {"objects": {printer id: name or None},
+    # "at": last read, ISO UTC}; NULL = never read while it printed
+    excluded: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # ``pieces`` less the excluded copies (complete sets for a set); NULL when an excluded object isn't on the plate
+    printed_pieces: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # What the print dialog sets on the upstream queue item: ams_mapping, scheduled_time (ISO, UTC), manual_start...
     queue_options: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # A print outside the queue: "archive:<id>" or "klipper:<printer id>:<Moonraker job id>"
@@ -58,5 +63,7 @@ add_columns(
         "finished_at": "DATETIME",
         "listed_at": "DATETIME",
         "proposal": "JSON",
+        "excluded": "JSON",
+        "printed_pieces": "INTEGER",
     },
 )

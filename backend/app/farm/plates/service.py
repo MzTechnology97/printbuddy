@@ -98,24 +98,29 @@ def _label(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "_", name)
 
 
+def match_object(label: str, known) -> str | None:
+    """The object of ``known`` a slicer or printer names ``label``, or None.
+
+    Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>", that Klipper upper-cases.
+    """
+    if label in known:
+        return label
+    labels = {_label(n).casefold(): n for n in known}
+    return labels.get(_label(ORCA_COPY_RE.sub("", label.casefold())).casefold())
+
+
 def _sliced_objects(plate_elem, by_identify: dict[str, str], known: set[str]) -> dict[str, int] | None:
     """Pieces per object name a slice printed on this plate (slice_info, one entry per copy).
 
     Skipped copies don't count. None when the slice lists none, or names one that isn't
     an object of the project: the plate keeps its count from model_settings and the build.
     """
-    labels = {_label(n): n for n in known}
     counts: dict[str, int] = {}
     for entry in plate_elem.findall("object"):
         if (entry.get("skipped") or "").lower() == "true":
             continue
         label = entry.get("name") or ""
-        # Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>"
-        name = (
-            by_identify.get(entry.get("identify_id"))
-            or (label if label in known else None)
-            or labels.get(_label(ORCA_COPY_RE.sub("", label)))
-        )
+        name = by_identify.get(entry.get("identify_id")) or match_object(label, known)
         if name is None:
             logger.debug("Slice object %r is no object of the project: plate counted from model_settings", label)
             return None

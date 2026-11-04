@@ -60,10 +60,24 @@ def _state(job: FarmPrintJob, item_status: str | None) -> str:
     return "completed" if job.status == "outside" else job.status
 
 
+def _exclusions(job: FarmPrintJob, state: str, finished_at: datetime | None) -> str | None:
+    """Whether the objects the printer excluded come off the batch: ``read`` (subtracted), ``unread`` (not read
+    to the end), ``unmatched`` (one isn't on the plate); None for a print outside the queue or not started."""
+    if job.source is not None or state not in ("printing", "completed"):
+        return None
+    read = job.excluded
+    if read is None or (finished_at and service._utc(read["at"]) < finished_at - service.EXCLUDED_STALE):
+        return "unread"
+    return "read" if job.printed_pieces is not None else "unmatched"
+
+
 def _job_dict(
     job: FarmPrintJob, item_status: str | None, printer: str | None, finished_at: datetime | None = None
 ) -> dict:
     state = _state(job, item_status)
+    planned = job.pieces if job.pieces is not None else job.expected_pieces
+    exclusions = _exclusions(job, state, finished_at)
+    excluded = (job.excluded or {}).get("objects") if exclusions else None
     return {
         "id": job.id,
         "component_code": job.component_code,
@@ -80,7 +94,11 @@ def _job_dict(
         "printer_id": job.printer_id,
         "printer": printer,
         "queue_item_id": job.queue_item_id,
-        "pieces": job.pieces if job.pieces is not None else job.expected_pieces,
+        # The batch's pieces: the plate's less the excluded objects when they were read, else the plate's
+        "pieces": job.printed_pieces if exclusions == "read" else planned,
+        "pieces_planned": planned,
+        "excluded_objects": None if excluded is None else [n or f"#{oid}" for oid, n in excluded.items()],
+        "exclusions": exclusions,
         "scheduled_time": (job.queue_options or {}).get("scheduled_time"),
         "created_at": job.created_at,
         "finished_at": finished_at or job.finished_at,  # the print's end, UTC

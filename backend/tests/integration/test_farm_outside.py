@@ -3,10 +3,11 @@
 No printer is contacted: archives are written directly and Moonraker's history is stubbed. Data is made up.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from backend.app.api.routes.settings import set_setting
 from backend.app.farm.jobs import outside, service
@@ -14,6 +15,7 @@ from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.models import FarmLibraryFile  # noqa: F401 - its table, read by the plate lookups
 from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+from backend.app.farm.products.models import FarmComponent
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
@@ -597,3 +599,125 @@ async def test_one_printer_failing_never_stops_the_colour_of_the_others(db_sessi
     printing.running.update({farm["a1"], farm["k2"]})
     assert await service.record_used_colors(db_session) == 1
     assert (await db_session.get(PrintArchive, running.id)).extra_data == {service.USED_COLORS_KEY: {"Bianco": 1}}
+
+
+async def printing_job(db_session, farm, printer: str, filename: str) -> tuple[PrintQueueItem, FarmPrintJob]:
+    """Accoda's black 'Sopra' (15 a plate) printing now on ``printer`` from ``filename``."""
+    running = archive(farm[printer], filename, status="printing", ended=at(15))
+    db_session.add(running)
+    await db_session.flush()
+    item = PrintQueueItem(printer_id=farm[printer], archive_id=running.id, status="printing")
+    db_session.add(item)
+    await db_session.flush()
+    job = FarmPrintJob(
+        component_code=farm["code"],
+        color="Nero",
+        plate_ids=[farm["plate"]],
+        expected_pieces=15,
+        status="queued",
+        queue_item_id=item.id,
+        printer_id=farm[printer],
+        plate_id=farm["plate"],
+        pieces=15,
+    )
+    db_session.add(job)
+    await db_session.commit()
+    return item, job
+
+
+def excluding(monkeypatch, objects: dict, skipped: list, **file) -> SimpleNamespace:
+    """Every printer prints the file (``subtask_name`` for Bambu, ``gcode_file`` for Klipper) with these objects."""
+    from backend.app.services.printer_manager import printer_manager
+
+    status = SimpleNamespace(state="RUNNING", printable_objects=objects, skipped_objects=skipped, **file)
+    monkeypatch.setattr(printer_manager, "get_status", lambda pid: status)
+    return status
+
+
+async def batch(client, db_session, item, job_id, ended=None) -> dict:
+    item.status, item.completed_at = "completed", ended or datetime.now(timezone.utc).replace(tzinfo=None)
+    await db_session.commit()
+    return next(b for b in await completed(client) if b["id"] == job_id)
+
+
+def summary(b: dict) -> tuple:
+    return b["pieces"], b["pieces_planned"], b["excluded_objects"], b["exclusions"]
+
+
+@pytest.mark.asyncio
+async def test_bambu_skipped_objects_come_off_the_batch(async_client, db_session, farm, monkeypatch):
+    item, job = await printing_job(db_session, farm, "a1", "Sopra__abcdef12.3mf")
+    copies = {oid: {"name": "sopra", "x": 0, "y": 0} for oid in (437, 448, 470)}
+    status = excluding(monkeypatch, copies, [448], subtask_name="Sopra__abcdef12")
+    assert await service.record_excluded_objects(db_session) == 1
+    [running] = [j for j in (await async_client.get(f"{API}/jobs")).json() if j["id"] == job.id]
+    assert summary(running) == (14, 15, ["sopra"], "read")
+
+    # Printbuddy restarted: the printer still reports its skipped ids, the names come from before.
+    status.printable_objects, status.skipped_objects = {}, [448, 470]
+    assert await service.record_excluded_objects(db_session) == 1
+    assert summary(await batch(async_client, db_session, item, job.id)) == (15, 15, ["sopra", "#470"], "unmatched")
+
+    # The archive 3MF names the one skipped after the restart.
+    monkeypatch.setattr(service, "_archive_objects", lambda a: {"470": "sopra"})
+    item.status = "printing"
+    await db_session.commit()
+    assert await service.record_excluded_objects(db_session) == 1
+    assert summary(await batch(async_client, db_session, item, job.id)) == (13, 15, ["sopra", "sopra"], "read")
+
+
+@pytest.mark.asyncio
+async def test_klipper_excluded_objects_come_off_the_batch(async_client, db_session, farm, monkeypatch):
+    item, job = await printing_job(db_session, farm, "k2", "Sopra__abcdef12.gcode")
+    labels = {i: {"name": f"SOPRA_ID_0_COPY_{i}"} for i in range(15)}  # exclude_object upper-cases Orca labels
+    excluding(monkeypatch, labels, [3, 7], subtask_name=None, gcode_file="Sopra__abcdef12.gcode")
+    assert await service.record_excluded_objects(db_session) == 1
+    excluded = ["SOPRA_ID_0_COPY_3", "SOPRA_ID_0_COPY_7"]
+    assert summary(await batch(async_client, db_session, item, job.id)) == (13, 15, excluded, "read")
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_object_not_on_the_plate_leaves_the_plate_pieces(async_client, db_session, farm, monkeypatch):
+    item, job = await printing_job(db_session, farm, "k2", "Sopra__abcdef12.gcode")
+    labels = {0: {"name": "SOPRA_ID_0_COPY_0"}, 1: {"name": "GANCIO_ID_1_COPY_0"}}
+    excluding(monkeypatch, labels, [1], subtask_name=None, gcode_file="Sopra__abcdef12.gcode")
+    assert await service.record_excluded_objects(db_session) == 1
+    expected = (15, 15, ["GANCIO_ID_1_COPY_0"], "unmatched")
+    assert summary(await batch(async_client, db_session, item, job.id)) == expected
+
+
+@pytest.mark.asyncio
+async def test_no_exclusion_keeps_the_plate_pieces(async_client, db_session, farm, monkeypatch):
+    item, job = await printing_job(db_session, farm, "a1", "Sopra__abcdef12.3mf")
+    excluding(monkeypatch, {437: {"name": "sopra"}}, [], subtask_name="Sopra__abcdef12")
+    assert await service.record_excluded_objects(db_session) == 1
+    assert summary(await batch(async_client, db_session, item, job.id)) == (15, 15, [], "read")
+    # Its end not watched (the last read long before): the plate pieces, flagged.
+    late = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
+    assert summary(await batch(async_client, db_session, item, job.id, late)) == (15, 15, [], "unread")
+    # Printed before exclusions were read: the plate pieces as before, flagged.
+    old = {b["id"]: b for b in await completed(async_client)}[farm["queued"]]
+    assert summary(old) == (15, 15, None, "unread")
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_part_of_a_set_counts_complete_sets(async_client, db_session, farm, monkeypatch):
+    base = (await async_client.post(f"{API}/shapes", json={"name": "Base"})).json()
+    plate = await db_session.get(FarmPlate, farm["plate"])
+    plate.yields.append(FarmPlateYield(object_name="base", quantity=15, shape_id=base["id"]))
+    comp = await db_session.scalar(select(FarmComponent).where(FarmComponent.code == farm["code"]))
+    comp.recipe = [{"shape_id": farm["shape"], "quantity": 1}, {"shape_id": base["id"], "quantity": 1}]
+    await db_session.commit()
+    item, job = await printing_job(db_session, farm, "a1", "Sopra__abcdef12.3mf")
+    objects = {1: {"name": "sopra"}, 2: {"name": "sopra"}, 3: {"name": "base"}}
+    status = excluding(monkeypatch, objects, [1], subtask_name="Sopra__abcdef12")
+    assert await service.record_excluded_objects(db_session) == 1
+    assert (await db_session.get(FarmPrintJob, job.id)).printed_pieces == 14  # one base left over
+    status.skipped_objects = [1, 3]
+    assert await service.record_excluded_objects(db_session) == 1
+    assert summary(await batch(async_client, db_session, item, job.id))[:2] == (14, 15)  # still 14 complete sets
+    status.skipped_objects = [1, 2, 3]
+    item.status = "printing"
+    await db_session.commit()
+    assert await service.record_excluded_objects(db_session) == 1
+    assert summary(await batch(async_client, db_session, item, job.id))[:2] == (13, 15)
