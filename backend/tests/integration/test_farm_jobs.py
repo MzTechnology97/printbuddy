@@ -277,6 +277,30 @@ async def test_chosen_printer_waits_for_the_slice(async_client, db_session, farm
     assert (await db_session.execute(select(PrintQueueItem))).first() is None
 
 
+@pytest.mark.asyncio
+async def test_waiting_job_shows_its_slice_progress(async_client, db_session, farm, monkeypatch):
+    from backend.app.services.slice_dispatch import SliceJob, slice_dispatch
+
+    p1s = farm["printers"][2]
+    await async_client.post(
+        f"{API}/jobs", json={"jobs": [{"component_code": farm["code"], "plate_ids": farm["plates"], "printer_id": p1s}]}
+    )
+    [job] = (await async_client.get(f"{API}/jobs")).json()
+    assert (job["state"], job["slicing"]) == ("waiting", None)  # no slice known: the note says why it waits
+
+    task = SliceJob(id=987654, kind="library_file", source_id=51, source_name="sopra.3mf (Nero)", status="running")
+    task.progress = {"stage": "Generating G-code", "total_percent": 46.6}
+    monkeypatch.setitem(slice_dispatch._jobs, task.id, task)
+    plate = await db_session.get(FarmPlate, farm["plates"][1])
+    monkeypatch.setitem(service.slice_jobs, (plate.library_file_id, plate.plate_index, "nero"), task.id)
+    [job] = (await async_client.get(f"{API}/jobs")).json()
+    assert job["slicing"] == {"status": "running", "percent": 47, "stage": "Generating G-code", "error": None}
+
+    task.status, task.error_detail = "failed", "No filament of that colour"
+    [job] = (await async_client.get(f"{API}/jobs")).json()
+    assert (job["slicing"]["status"], job["slicing"]["error"]) == ("failed", "No filament of that colour")
+
+
 async def test_klipper_gcode_follows_a_new_slice_of_the_output(db_session, tmp_path, monkeypatch):
     """An output sliced again keeps its row: the extracted G-code is refreshed in its own row too."""
     import hashlib

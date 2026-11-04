@@ -76,6 +76,8 @@ SURE_SHARE = 0.9  # ...nearly all of them that colour
 PRINT_MAX_AGE = 7 * 24 * 3600  # an archive still "printing" older than this is a leftover, not the print
 HEX_RE = re.compile(r"[0-9a-f]{6}|[0-9a-f]{3}")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
+# (library_file_id, plate, colour key or None) -> the slice_dispatch job, for the queue's slicing progress
+slice_jobs: dict[tuple[int, int, str | None], int] = {}
 
 
 def _pieces(plate: FarmPlate, comp: FarmComponent, own: dict[int, ProductShapes]) -> int:
@@ -119,7 +121,32 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
         notify.slicing_done(key[0], name, key[1], None, notify.QUEUE_SLICE)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    slice_jobs[(*key, None)] = task.id
+
+
+async def slicing_progress(db: AsyncSession, job: FarmPrintJob) -> dict | None:
+    """The slice a waiting job is waiting for: ``{status, percent, stage, error}``; None when none is known."""
+    from backend.app.farm.slicing import colour_key
+    from backend.app.services.slice_dispatch import slice_dispatch
+
+    found = None
+    for plate_id in job.plate_ids:
+        plate = await db.get(FarmPlate, plate_id)
+        task_id = plate and slice_jobs.get((plate.library_file_id, plate.plate_index, colour_key(job.color)))
+        task = slice_dispatch.get(task_id) if task_id else None
+        if task is None or task.status == "completed":
+            continue
+        progress = task.progress or {}
+        found = {
+            "status": task.status,
+            "percent": round(progress["total_percent"]) if progress.get("total_percent") else None,
+            "stage": progress.get("stage"),
+            "error": task.error_detail,
+        }
+        if task.status != "failed":  # one still running says more than an old failure
+            break
+    return found
 
 
 async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:

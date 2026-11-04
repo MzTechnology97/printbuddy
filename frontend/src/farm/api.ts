@@ -213,6 +213,8 @@ export interface FarmJob {
   outside_queue?: boolean; // printed outside Accoda (display, slicer, Mainsail...)
   print_name?: string | null; // outside the queue: the file it printed
   proposal?: FarmJobProposal[] | null; // to_assign: what its name suggests
+  // waiting: the slice it waits for (percent null until the slicer reports it); null when none is known
+  slicing?: { status: 'pending' | 'running' | 'failed'; percent: number | null; stage: string | null; error: string | null } | null;
 }
 
 export interface FarmJobProposal {

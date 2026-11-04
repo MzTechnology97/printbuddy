@@ -56,6 +56,7 @@ import {
   Snail,
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
+import { WaitingJobs } from '../farm/WaitingJobs'; // fork: printfarm jobs not in the queue yet
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import type { PrintQueueItem, PrintQueueBulkUpdate, Permission } from '../api/client';
 import { Card } from '../components/Card';
@@ -1298,6 +1299,8 @@ export function QueuePage() {
           <span className={`w-1.5 h-1.5 rounded-full ${settings?.queue_shortest_first ? 'bg-bambu-green' : 'bg-bambu-gray'}`} />
         </button>
       </div>
+
+      <WaitingJobs />
 
       {isLoading ? (
         <div className="text-center py-12 text-bambu-gray">{t('common.loading')}</div>

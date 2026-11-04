@@ -143,8 +143,12 @@ async def list_jobs(
             FarmPrintJob.updated_at >= recent,
         )
     ).order_by(FarmPrintJob.id.desc())
-    rows = await db.execute(query)
-    return [_job_dict(job, status, printer, finished) for job, status, printer, finished in rows.all()]
+    out = []
+    for job, status, printer, finished in (await db.execute(query)).all():
+        out.append(_job_dict(job, status, printer, finished))
+        if job.status == "waiting":  # the queue shows what it waits for: a slice, with its progress
+            out[-1]["slicing"] = await service.slicing_progress(db, job)
+    return out
 
 
 @router.post("/jobs/{job_id}/assign", dependencies=[_create])

@@ -168,6 +168,13 @@ const en = {
     },
     otherColour: '(printed in this colour: the component is {{color}})',
   },
+  waiting: {
+    title: 'Getting ready',
+    slicing: 'Slicing {{percent}}%',
+    slicingStarted: 'Slicing…',
+    sliceQueued: 'Waiting to slice',
+    sliceFailed: 'Slicing failed: {{error}}',
+  },
   outside: {
     title_one: '{{count}} print outside the queue to assign',
     title_other: '{{count}} prints outside the queue to assign',
@@ -523,6 +530,13 @@ const it: typeof en = {
       not_production: 'non è produzione',
     },
     otherColour: '(stampato in questo colore: il componente è {{color}})',
+  },
+  waiting: {
+    title: 'In preparazione',
+    slicing: 'Slicing {{percent}}%',
+    slicingStarted: 'Slicing in corso…',
+    sliceQueued: 'In attesa dello slicing',
+    sliceFailed: 'Slicing fallito: {{error}}',
   },
   outside: {
     title_one: '{{count}} stampa fuori coda da assegnare',

@@ -371,4 +371,5 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
         notify.slicing_done(key[0], name, key[1], color, notify.QUEUE_SLICE)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    jobs.slice_jobs[key] = task.id
