@@ -1166,6 +1166,36 @@ class TestLibraryPermissions:
         assert response.status_code == 403
 
 
+class TestLibraryPlateThumbnailAPI:
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_klipper_plate_gcode_serves_its_row_thumbnail(self, async_client: AsyncClient, db_session, tmp_path):
+        """A plate's G-code extracted for Klipper is no 3MF: the queue's plate thumbnail is the row's picture."""
+        from backend.app.models.library import LibraryFile
+
+        (tmp_path / "library" / "files").mkdir(parents=True)
+        (tmp_path / "library" / "thumbnails").mkdir(parents=True)
+        (tmp_path / "library" / "files" / "k1-plate-1.gcode").write_text("G28\n")
+        (tmp_path / "library" / "thumbnails" / "k1.png").write_bytes(b"\x89PNG plate picture")
+        lib_file = LibraryFile(
+            filename="K1-part-plate-1.gcode",
+            file_path="library/files/k1-plate-1.gcode",
+            file_type="gcode",
+            file_size=4,
+            thumbnail_path="library/thumbnails/k1.png",
+        )
+        db_session.add(lib_file)
+        await db_session.commit()
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("backend.app.api.routes.library.app_settings.base_dir", tmp_path)
+            response = await async_client.get(f"/api/v1/library/files/{lib_file.id}/plate-thumbnail/1")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content == b"\x89PNG plate picture"
+
+
 class TestPrintFileUploadValidation:
     """#1401: pre-flight rejection of unprintable uploads at the library +
     archive routes. Smoke tests the shared ``validate_print_file_upload``

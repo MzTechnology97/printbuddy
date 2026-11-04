@@ -2635,6 +2635,9 @@ async def get_library_file_plate_thumbnail(
     file_path = Path(app_settings.base_dir) / lib_file.file_path
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
+    if lib_file.thumbnail_path and not zipfile.is_zipfile(file_path):
+        # A plate's G-code extracted for Klipper is no 3MF: its row already carries the plate's picture
+        return await get_thumbnail(file_id=file_id, db=db, _=None)
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
