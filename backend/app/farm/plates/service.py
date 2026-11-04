@@ -31,6 +31,7 @@ from backend.app.models.library import LibraryFile, LibraryFolder
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
 SLICE_INFO_ENTRY = "Metadata/slice_info.config"
 PARSE_VERSION = 2  # 2: an object's copies left out of model_settings count; older plates are read again
+ORCA_COPY_RE = re.compile(r"_id_\d+_copy_\d+$")
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,36 @@ def _build_instances(zf: zipfile.ZipFile) -> dict[str, int]:
     return counts
 
 
+def _label(name: str) -> str:
+    """An object name as a slicer's object label writes it ("Maniglia Portiera" -> "Maniglia_Portiera")."""
+    return re.sub(r"[^0-9A-Za-z]", "_", name)
+
+
+def _sliced_objects(plate_elem, by_identify: dict[str, str], known: set[str]) -> dict[str, int] | None:
+    """Pieces per object name a slice printed on this plate (slice_info, one entry per copy).
+
+    Skipped copies don't count. None when the slice lists none, or names one that isn't
+    an object of the project: the plate keeps its count from model_settings and the build.
+    """
+    labels = {_label(n): n for n in known}
+    counts: dict[str, int] = {}
+    for entry in plate_elem.findall("object"):
+        if (entry.get("skipped") or "").lower() == "true":
+            continue
+        label = entry.get("name") or ""
+        # Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>"
+        name = (
+            by_identify.get(entry.get("identify_id"))
+            or (label if label in known else None)
+            or labels.get(_label(ORCA_COPY_RE.sub("", label)))
+        )
+        if name is None:
+            logger.debug("Slice object %r is no object of the project: plate counted from model_settings", label)
+            return None
+        counts[name] = counts.get(name, 0) + 1
+    return counts or None
+
+
 def object_mesh(fh, object_name: str):
     """The mesh of one object of a project 3MF (as :func:`parse_plates` names it), or None."""
     with zipfile.ZipFile(fh) as zf:
@@ -125,6 +156,7 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
 
         plates: dict[int, ParsedPlate] = {}
         listed: dict[str, list[int]] = {}  # object id -> the plate of each instance model_settings lists
+        by_identify: dict[str, str] = {}  # instance identify_id -> object name (slice_info names them so)
         for plate_elem in root.findall("plate"):
             index = _int(_meta(plate_elem, "plater_id"))
             if index is None:
@@ -137,6 +169,8 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
                 if name:
                     plate.objects[name] = plate.objects.get(name, 0) + 1
                     listed.setdefault(oid, []).append(index)
+                    if identify := _meta(inst, "identify_id"):
+                        by_identify[identify] = name
                     extruders |= obj_extruders
             if not plate.objects:
                 continue  # empty plate in the project: prints nothing
@@ -147,8 +181,9 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
 
         # Orca may list only an object's first instance on its plate, yet prints all the copies of it
         # there (a K2 plate counted 1 handle and printed 15): the unlisted ones count on that plate.
-        # shortcut: an object listed on several plates keeps its listed instances; place the rest by
-        # position if such a project shows up.
+        # A slice's own list of the plate's objects, below, wins over this.
+        # shortcut: a copy left off every plate still counts, and an object listed on several plates
+        # keeps its listed instances; place copies by position if such an unsliced project shows up.
         built = _build_instances(zf)
         for oid, on in listed.items():
             extra = built.get(oid, 0) - len(on)
@@ -156,14 +191,25 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
                 name = objects[oid][0]
                 plates[on[0]].objects[name] += extra
 
-        # Projects saved after slicing in the GUI carry per-plate estimates.
+        # Projects saved after slicing in the GUI carry per-plate estimates, and the objects printed.
         if SLICE_INFO_ENTRY in names:
+            known = {name for name, _ in objects.values()}
             for plate_elem in ET.fromstring(zf.read(SLICE_INFO_ENTRY)).findall("plate"):
                 plate = plates.get(_int(_meta(plate_elem, "index")) or -1)
                 if plate is not None:
                     plate.print_time_seconds = _int(_meta(plate_elem, "prediction"))
                     weight = _meta(plate_elem, "weight")
                     plate.filament_grams = float(weight) if weight else None
+                    sliced = _sliced_objects(plate_elem, by_identify, known)
+                    if sliced and sliced != plate.objects:
+                        logger.debug(
+                            "%s plate %s: the slice printed %s, model_settings and build give %s",
+                            path.name,
+                            plate.index,
+                            sliced,
+                            plate.objects,
+                        )
+                        plate.objects = sliced
 
         try:
             fingerprints = object_fingerprints(zf, {oid: name for oid, (name, _) in objects.items()})
@@ -252,8 +298,9 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
                         twin = next((y for y in old if same_piece(fp, y.fingerprint)), None)
                         shape_id, code = (twin.shape_id, twin.component_code) if twin else (None, None)
                     yields.append(
-                        FarmPlateYield(object_name=name, quantity=qty, shape_id=shape_id, component_code=code,
-                                       fingerprint=fp)
+                        FarmPlateYield(
+                            object_name=name, quantity=qty, shape_id=shape_id, component_code=code, fingerprint=fp
+                        )
                     )
                 plate.yields = yields
                 plate.status = "proposed"
