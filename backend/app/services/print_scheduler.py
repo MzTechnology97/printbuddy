@@ -2369,20 +2369,13 @@ class PrintScheduler:
                     )
                 )
 
-            # Get estimated time for notification
-            estimated_time = None
-            if archive and archive.print_time_seconds:
-                estimated_time = archive.print_time_seconds
-            elif library_file and library_file.print_time_seconds:
-                estimated_time = library_file.print_time_seconds
-
             # Send job started notification
             await notification_service.on_queue_job_started(
                 job_name=filename.replace(".gcode.3mf", "").replace(".3mf", ""),
                 printer_id=printer.id,
                 printer_name=printer.name,
                 db=db,
-                estimated_time=estimated_time,
+                estimated_time=self._estimated_time(archive, library_file),
             )
 
             # MQTT relay - publish queue job started
@@ -2433,6 +2426,17 @@ class PrintScheduler:
             )
 
             await self._power_off_if_needed(db, item)
+
+    @staticmethod
+    def _estimated_time(archive: PrintArchive | None, library_file: LibraryFile | None) -> int | None:
+        """Print time for the started notification. A library file keeps it in its metadata: a plain
+        G-code (Klipper) has no time in its archive, and reading a missing attribute here aborted the
+        queue check right after the print started (fork fix)."""
+        if archive and archive.print_time_seconds:
+            return archive.print_time_seconds
+        if library_file:
+            return (library_file.file_metadata or {}).get("print_time_seconds")
+        return None
 
     @staticmethod
     async def _watchdog_print_start(
