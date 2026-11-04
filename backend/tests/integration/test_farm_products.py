@@ -9,6 +9,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
+from backend.app.api.routes import projects as project_api
 from backend.app.core.auth import generate_api_key
 from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
 from backend.app.farm.products import routes as product_routes
@@ -388,7 +389,7 @@ class TestSellerHubImport:
         monkeypatch.setattr(product_routes, "get_project_attachments_dir", lambda pid: tmp_path / str(pid))
         existing = await product(async_client, name="Fatto a mano", skus=["LA-01"])
         data = plan()
-        data["parts"][0]["image_url"] = "https://m.media-amazon.com/images/I/31TEST+x.jpg"
+        data["parts"][0]["image_url"] = "https://m.media-amazon.com/images/I/31TEST+x._SL300_.jpg"
         data["parts"][1]["image_url"] = "https://example.com/images/I/evil.jpg"  # not Amazon's CDN: ignored
 
         r = await async_client.post(f"{API}/import/sellerhub", json=data)
@@ -397,6 +398,7 @@ class TestSellerHubImport:
         x = (await db_session.execute(select(Project).where(Project.name == "Portaoggetti X"))).scalar_one()
         assert (tmp_path / str(x.id) / x.cover_image_filename).read_bytes() == b"jpeg bytes"
         assert x.cover_image_filename.endswith(".jpg")
+        assert x.cover_source_url == "https://m.media-amazon.com/images/I/31TEST+x.jpg"  # full size, remembered
 
         # Existing products get the image too, and a cover is never replaced.
         data["parts"][1]["image_url"] = "https://m.media-amazon.com/images/I/41LAMP.png"
@@ -416,3 +418,89 @@ class TestSellerHubImport:
         assert r.json()["products_skipped"] == 1
         names = (await db_session.execute(select(Project.name))).scalars().all()
         assert sorted(names) == ["Fatto a mano", "Portaoggetti X"]
+
+
+class TestCoverSync:
+    IMG = "https://m.media-amazon.com/images/I/"
+
+    @pytest.fixture
+    def fetched(self, monkeypatch, tmp_path) -> list[str]:
+        urls: list[str] = []
+
+        async def fake_fetch(url: str) -> bytes | None:
+            urls.append(url)
+            return None if "BROKEN" in url else url.encode()
+
+        monkeypatch.setattr(product_routes, "_fetch_image", fake_fetch)
+        for module in (product_routes, project_api):
+            monkeypatch.setattr(module, "get_project_attachments_dir", lambda pid: tmp_path / str(pid))
+        return urls
+
+    async def sync(self, client, *items) -> dict:
+        r = await client.post(f"{API}/products/covers/sync", json={"items": list(items)})
+        assert r.status_code == 200, r.text
+        return {k: v for k, v in r.json().items() if v}
+
+    @pytest.mark.asyncio
+    async def test_a_cover_follows_the_listing_photo(self, async_client, db_session, fetched, tmp_path):
+        pid = await product(async_client, name="Maniglia Arancione", skus=["MA-OR"], asins=["B0TESTOR01"])
+        yellow = {"skus": ["MA-OR"], "image_url": self.IMG + "41YELLOW._SL300_.jpg"}
+        assert await self.sync(async_client, yellow) == {"added": 1}
+        project = await db_session.get(Project, pid)
+        await db_session.refresh(project)
+        first = project.cover_image_filename
+        assert (fetched, project.cover_source_url) == ([self.IMG + "41YELLOW.jpg"], self.IMG + "41YELLOW.jpg")
+
+        # The same image at another size: nothing fetched.
+        assert await self.sync(async_client, {**yellow, "image_url": self.IMG + "41YELLOW._AC_SX679_.jpg"}) == {
+            "unchanged": 1
+        }
+        assert len(fetched) == 1
+
+        # The seller's own photo, by ASIN: the cover is replaced and the old file deleted.
+        orange = {"asins": ["B0TESTOR01"], "image_url": self.IMG + "51ORANGE._SL300_.jpg"}
+        assert await self.sync(async_client, orange) == {"replaced": 1}
+        await db_session.refresh(project)
+        assert project.cover_source_url == self.IMG + "51ORANGE.jpg"
+        assert (tmp_path / str(pid) / project.cover_image_filename).read_bytes() == (self.IMG + "51ORANGE.jpg").encode()
+        assert not (tmp_path / str(pid) / first).exists()
+
+        # A download that fails keeps the cover there is.
+        assert await self.sync(async_client, {**orange, "image_url": self.IMG + "61BROKEN.jpg"}) == {"failed": 1}
+        await db_session.refresh(project)
+        assert project.cover_source_url == self.IMG + "51ORANGE.jpg"
+
+    @pytest.mark.asyncio
+    async def test_a_cover_uploaded_by_hand_is_never_replaced(self, async_client, db_session, fetched):
+        pid = await product(async_client, name="Maniglia Verde", skus=["MA-VE"])
+        r = await async_client.post(
+            f"/api/v1/projects/{pid}/cover-image", files={"file": ("foto.png", b"own photo", "image/png")}
+        )
+        assert r.status_code == 200, r.text
+        item = {"skus": ["MA-VE"], "image_url": self.IMG + "41GREEN.jpg"}
+        assert await self.sync(async_client, item) == {"manual": 1}
+        assert fetched == []
+
+        # An Amazon cover replaced by hand stops following Amazon too.
+        await async_client.delete(f"/api/v1/projects/{pid}/cover-image")
+        assert await self.sync(async_client, item) == {"added": 1}
+        r = await async_client.post(
+            f"/api/v1/projects/{pid}/cover-image", files={"file": ("foto.png", b"own photo", "image/png")}
+        )
+        project = await db_session.get(Project, pid)
+        await db_session.refresh(project)
+        assert project.cover_source_url is None
+        assert await self.sync(async_client, {**item, "image_url": self.IMG + "51OTHER.jpg"}) == {"manual": 1}
+
+    @pytest.mark.asyncio
+    async def test_unclear_or_foreign_images_are_left_alone(self, async_client, db_session, fetched):
+        await product(async_client, name="Kit", skus=["KIT-A", "KIT-B"])
+        await product(async_client, name="Altro", skus=["ALT-1"])
+        items = [
+            {"skus": ["KIT-A"], "image_url": self.IMG + "41ONE.jpg"},
+            {"skus": ["KIT-B"], "image_url": self.IMG + "41TWO.jpg"},  # two photos for one product
+            {"skus": ["ALT-1"], "image_url": "https://example.com/images/I/41EVIL.jpg"},  # not Amazon's CDN
+            {"skus": ["ALT-1"], "image_url": self.IMG + "41X.gif"},
+        ]
+        assert await self.sync(async_client, *items) == {"ambiguous": 1}
+        assert fetched == []

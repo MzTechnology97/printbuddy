@@ -24,6 +24,8 @@ class Project(Base):
     # attachments but is tracked here separately so users can manage one without
     # the other.
     cover_image_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # fork: the Amazon image the farm import set as cover (farm module); None for a cover uploaded by hand.
+    cover_source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     target_count: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )  # Optional target number of prints (plates)

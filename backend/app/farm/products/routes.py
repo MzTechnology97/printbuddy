@@ -51,6 +51,8 @@ QTY_MAX = 1000  # same bound as Seller Hub's bills of materials
 RECENT_DAYS = 7
 # Only Amazon's image CDN: the import must not turn Printbuddy into a fetcher of arbitrary URLs.
 AMAZON_IMAGE_RE = re.compile(r"^https://m\.media-amazon\.com/images/I/[\w.+%-]+\.(jpg|jpeg|png)$")
+# ``<id>._SL300_.jpg`` / ``<id>._AC_SX679_.jpg`` → ``<id>.jpg``: the full-size image, named by its id.
+AMAZON_SIZE_RE = re.compile(r"(/images/I/[^/.]+)\.[^/]+(\.(?:jpg|jpeg|png))$")
 IMAGE_MAX_BYTES = 5_000_000
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -237,7 +239,9 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                     # The same groups in the variant's components, ``pieces`` times as many per sale.
                     "assemblies": []
                     if None in resolved
-                    else contract(groups, {c.code: r.code for (c, _), r in zip(own, resolved, strict=True)}, v["pieces"]),
+                    else contract(
+                        groups, {c.code: r.code for (c, _), r in zip(own, resolved, strict=True)}, v["pieces"]
+                    ),
                 }
             )
         products.append(
@@ -998,10 +1002,20 @@ async def _fetch_image(url: str) -> bytes | None:
     return r.content if ok and len(r.content) <= IMAGE_MAX_BYTES else None
 
 
-async def _set_amazon_cover(project: Project, url: object) -> bool:
-    """Save the Amazon listing image as the project cover, unless it already has one."""
-    if project.cover_image_filename or not isinstance(url, str) or not AMAZON_IMAGE_RE.match(url):
-        return False
+def _amazon_image(url: object) -> str | None:
+    """The full-size Amazon CDN image of a listing image URL, None for any other URL."""
+    if not isinstance(url, str):
+        return None
+    full = AMAZON_SIZE_RE.sub(r"\1\2", url)
+    return full if AMAZON_IMAGE_RE.match(full) else None
+
+
+def _image_id(url: str) -> str:
+    return url.rsplit("/", 1)[-1].split(".", 1)[0]
+
+
+async def _save_amazon_cover(project: Project, url: str) -> bool:
+    """Make the Amazon image ``url`` the project cover, deleting the one it replaces."""
     content = await _fetch_image(url)
     if content is None:
         return False
@@ -1009,8 +1023,16 @@ async def _set_amazon_cover(project: Project, url: object) -> bool:
     folder.mkdir(parents=True, exist_ok=True)
     filename = f"cover_{uuid.uuid4().hex}{os.path.splitext(url)[1].lower()}"
     (folder / filename).write_bytes(content)
-    project.cover_image_filename = filename
+    if project.cover_image_filename:
+        (folder / project.cover_image_filename).unlink(missing_ok=True)
+    project.cover_image_filename, project.cover_source_url = filename, url
     return True
+
+
+async def _set_amazon_cover(project: Project, url: object) -> bool:
+    """Save the Amazon listing image as the project cover, unless it already has one."""
+    full = _amazon_image(url)
+    return not project.cover_image_filename and full is not None and await _save_amazon_cover(project, full)
 
 
 @router.post("/import/sellerhub", dependencies=[_create])
@@ -1090,5 +1112,52 @@ async def import_sellerhub(plan: dict, db: AsyncSession = Depends(get_db)) -> di
         if await _set_amazon_cover(project, part.get("image_url")):
             result["covers_added"] += 1
 
+    await db.commit()
+    return result
+
+
+class CoverIn(BaseModel):
+    skus: list[str] = Field(default_factory=list, max_length=100)
+    asins: list[str] = Field(default_factory=list, max_length=100)
+    image_url: str = Field(max_length=2048)
+
+
+class CoverSyncIn(BaseModel):
+    items: list[CoverIn] = Field(max_length=10_000)
+
+
+@router.post("/products/covers/sync", dependencies=[_create])
+async def sync_covers(body: CoverSyncIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Follow Seller Hub's listing photos: ``items`` maps SKUs/ASINs to their Amazon image.
+
+    A product without a cover gets its image (as the import does); a cover the import set
+    is replaced when the image changed; a cover uploaded by hand is never touched. A product
+    whose SKUs/ASINs point to different images is left as it is.
+    """
+    images: dict[str, set[str]] = {}
+    for item in body.items:
+        full = _amazon_image(item.image_url)
+        if full is not None:
+            for key in [f"sku:{s}" for s in item.skus] + [f"asin:{a}" for a in item.asins]:
+                images.setdefault(key, set()).add(full)
+    result = {"added": 0, "replaced": 0, "unchanged": 0, "manual": 0, "ambiguous": 0, "failed": 0}
+    for p, project in (await db.execute(select(FarmProduct, Project).join(Project))).all():
+        found = set().union(*(images.get(f"sku:{s}", ()) for s in p.skus or []))
+        found |= set().union(*(images.get(f"asin:{a}", ()) for a in p.asins or []))
+        if not found:
+            continue
+        if len({_image_id(u) for u in found}) > 1:
+            result["ambiguous"] += 1
+            continue
+        url, had = min(found), project.cover_image_filename
+        if had and project.cover_source_url is None:
+            outcome = "manual"
+        elif had and _image_id(project.cover_source_url) == _image_id(url):
+            outcome = "unchanged"
+        elif await _save_amazon_cover(project, url):
+            outcome = "replaced" if had else "added"
+        else:
+            outcome = "failed"
+        result[outcome] += 1
     await db.commit()
     return result
