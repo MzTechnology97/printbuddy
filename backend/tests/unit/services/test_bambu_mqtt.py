@@ -2886,6 +2886,23 @@ class TestTrayChangeLog:
 
         assert mqtt_client.state.tray_change_log == [(2, 0)]
 
+    def test_skipped_objects_cleared_on_new_print(self, mqtt_client):
+        """A new print never inherits the last print's skipped objects, whatever the 3MF extraction does."""
+        mqtt_client.state.skipped_objects = [448]
+        mqtt_client.state.printable_objects = {448: {"name": "old"}}
+        mqtt_client._previous_gcode_state = "FINISH"
+
+        mqtt_client._process_message({"print": {"gcode_state": "RUNNING", "gcode_file": "new.3mf"}})
+
+        assert mqtt_client.state.skipped_objects == []
+        assert mqtt_client.state.printable_objects == {}
+
+    def test_skipped_objects_kept_on_the_first_push_after_a_restart(self, mqtt_client):
+        """Printbuddy started mid-print: the skips the printer reports are this print's."""
+        mqtt_client._process_message({"print": {"gcode_state": "RUNNING", "gcode_file": "now.3mf", "s_obj": [448]}})
+
+        assert mqtt_client.state.skipped_objects == [448]
+
     def test_tray_change_log_cleared_on_new_print(self, mqtt_client):
         """Old log entries are cleared when a new print starts."""
         mqtt_client.state.tray_change_log = [(5, 0), (3, 100)]

@@ -15,7 +15,7 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import library_path
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver, models_in_path
-from backend.app.farm.plates.service import parse_plates, plates_by_component
+from backend.app.farm.plates.service import match_object, parse_plates, plates_by_component
 from backend.app.models.library import LibraryFile
 from backend.tests.integration.test_farm_library import BAMBU, add_external, age, scan
 
@@ -412,3 +412,17 @@ class TestPrinterModelMap:
             "/api/v1/farm/printer-models", json={"source_model": "Voron 2.4", "target_model": "Ender 3"}
         )
         assert resp.status_code == 400
+
+
+def test_an_excluded_object_is_matched_only_when_its_label_fits_one_object():
+    handles = ["Maniglia-Mezza luna 1", "Maniglia-Mezza luna 2"]
+    assert match_object("MANIGLIA-MEZZA_LUNA_1_ID_0_COPY_0", handles) == "Maniglia-Mezza luna 1"  # Klipper
+    assert match_object("Maniglia-Mezza luna 2", handles) == "Maniglia-Mezza luna 2"  # Bambu, by name
+    assert match_object("Gancio_id_3_copy_0", handles) is None
+    # "Base 1" and "Base-1" write the same label: never a guess; their own names still match.
+    assert match_object("BASE_1_ID_0_COPY_0", ["Base 1", "Base-1"]) is None
+    assert match_object("Base-1", ["Base 1", "Base-1"]) == "Base-1"
+    # Accents: one object is matched, two that write alike are not; names with no ASCII letter never.
+    assert match_object("CITTÀ_ID_0_COPY_1", ["Città", "Citta"]) == "Città"
+    assert match_object("CITTÀ_ID_0_COPY_1", ["Città", "Cittè"]) is None
+    assert match_object("日本_ID_0_COPY_0", ["日本", "中国"]) is None

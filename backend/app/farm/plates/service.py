@@ -98,6 +98,19 @@ def _label(name: str) -> str:
     return re.sub(r"[^0-9A-Za-z]", "_", name)
 
 
+def match_object(label: str, known) -> str | None:
+    """The object of ``known`` a printer names ``label`` when excluding it, or None.
+
+    Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>", that Klipper upper-cases.
+    None also when the label fits two objects ("Base 1" and "Base-1" both write "Base_1"): never a guess.
+    """
+    if label in known:
+        return label
+    key = _label(ORCA_COPY_RE.sub("", label.casefold())).casefold()
+    found = {n for n in known if _label(n).casefold() == key}
+    return found.pop() if len(found) == 1 else None
+
+
 def _sliced_objects(plate_elem, by_identify: dict[str, str], known: set[str]) -> dict[str, int] | None:
     """Pieces per object name a slice printed on this plate (slice_info, one entry per copy).
 

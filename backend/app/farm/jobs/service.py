@@ -25,6 +25,7 @@ so it doesn't hold a printer; one for a chosen printer waits in that printer's q
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -33,8 +34,10 @@ import re
 import time
 import uuid
 import zipfile
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -49,7 +52,7 @@ from backend.app.farm.plan import service as plan
 from backend.app.farm.plan.models import FarmPrinterSpool
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
-from backend.app.farm.plates.service import _latest_slices
+from backend.app.farm.plates.service import _latest_slices, match_object
 from backend.app.farm.products.folders import component_files, excluded_files, may_print
 from backend.app.farm.products.models import FarmComponent
 from backend.app.farm.products.shapes import ProductShapes, plate_yield, product_shapes
@@ -233,8 +236,9 @@ async def queued_pieces(db: AsyncSession) -> dict[str, int]:
     for job, item_status in rows.all():
         if job.status == "waiting":
             out[job.component_code] = out.get(job.component_code, 0) + job.expected_pieces
-        elif item_status in ACTIVE_QUEUE:
-            out[job.component_code] = out.get(job.component_code, 0) + (job.pieces or 0)
+        elif item_status in ACTIVE_QUEUE:  # less the objects the printer excluded
+            pieces = job.printed_pieces if job.printed_pieces is not None else job.pieces
+            out[job.component_code] = out.get(job.component_code, 0) + (pieces or 0)
     return out
 
 
@@ -557,7 +561,19 @@ async def _sample_colour(db: AsyncSession, printer_id: int, config: dict, by_han
         name = by_hand
     if not name:
         return False  # no slot, no spool set by hand, or a slot reporting no real colour
-    # The archive of the print running now: the newest "printing" one of the file the printer reports.
+    archive = await _running_archive(db, printer_id, status)
+    if archive is None:
+        return False
+    samples = dict((archive.extra_data or {}).get(USED_COLORS_KEY) or {})
+    samples[name] = samples.get(name, 0) + 1
+    archive.extra_data = {**(archive.extra_data or {}), USED_COLORS_KEY: samples}
+    for job in await _archive_jobs(db, archive):
+        job.used_color = used_color(archive.extra_data)
+    return True
+
+
+async def _running_archive(db: AsyncSession, printer_id: int, status) -> PrintArchive | None:
+    """The archive of the print running now: the newest "printing" one of the file the printer reports."""
     printing = getattr(status, "subtask_name", None) or getattr(status, "gcode_file", None)
     recent = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PRINT_MAX_AGE)
     candidates = await db.execute(
@@ -569,23 +585,124 @@ async def _sample_colour(db: AsyncSession, printer_id: int, config: dict, by_han
         )
         .order_by(PrintArchive.id.desc())
     )
-    archive = next(
+    return next(
         (a for a in candidates.scalars() if _same_file(printing, a.filename) or _same_file(printing, a.print_name)),
         None,
     )
-    if archive is None:
-        return False
-    samples = dict((archive.extra_data or {}).get(USED_COLORS_KEY) or {})
-    samples[name] = samples.get(name, 0) + 1
-    archive.extra_data = {**(archive.extra_data or {}), USED_COLORS_KEY: samples}
+
+
+async def _archive_jobs(db: AsyncSession, archive: PrintArchive) -> list[FarmPrintJob]:
     jobs = await db.execute(
         select(FarmPrintJob)
         .join(PrintQueueItem, PrintQueueItem.id == FarmPrintJob.queue_item_id)
         .where(PrintQueueItem.archive_id == archive.id)
     )
-    for job in jobs.scalars():
-        job.used_color = used_color(archive.extra_data)
+    return list(jobs.scalars())
+
+
+async def record_excluded_objects(db: AsyncSession) -> int:
+    """Read, on each running print's farm jobs, the objects the printer excluded and the pieces left.
+
+    Bambu skip objects (ids of its slice_info), Klipper ``exclude_object`` (names); every tick while the
+    print runs or is paused, and once more as it ends (``record_excluded_at_end``). The printer's list is
+    the truth: read twice, an object counts once; one it restores is excluded no more. Names read before
+    stay (a restart loses Bambu's). Returns how many prints.
+    """
+    read = 0
+    for printer_id in (await db.execute(select(Printer.id).where(Printer.is_active.is_(True)))).scalars().all():
+        try:  # one printer at a time: one that always fails never holds back the others
+            if await _sample_excluded(db, printer_id):
+                await db.commit()
+                read += 1
+        except Exception:
+            await db.rollback()
+            logger.exception("Printer %s: excluded objects not read", printer_id)
+    return read
+
+
+async def record_excluded_at_end(printer_id: int) -> None:
+    """The last read of a print's excluded objects as it ends, before its archive closes
+    (``main.on_print_complete``): one excluded after the last tick counts, and only then is the batch ``read``."""
+    try:
+        async with database.async_session() as db:
+            if await _sample_excluded(db, printer_id, ending=True):
+                await db.commit()
+    except Exception:
+        logger.exception("Printer %s: excluded objects not read at the end", printer_id)
+
+
+async def _sample_excluded(db: AsyncSession, printer_id: int, ending: bool = False) -> bool:
+    status = printer_manager.get_status(printer_id)
+    # A printer that dropped keeps its last state: what it would say now is unknown
+    if status is None or not getattr(status, "connected", True):
+        return False
+    if not ending and status.state not in ("RUNNING", "PAUSE"):
+        return False
+    archive = await _running_archive(db, printer_id, status)
+    jobs = await _archive_jobs(db, archive) if archive is not None else []
+    if not jobs:
+        return False
+    printable = getattr(status, "printable_objects", None) or {}
+    names = {str(k): v.get("name") if isinstance(v, dict) else v for k, v in printable.items()}
+    skipped = [str(oid) for oid in getattr(status, "skipped_objects", None) or []]
+    for job in jobs:
+        before = (job.excluded or {}).get("objects") or {}
+        if any(before.get(oid) is None and oid not in names for oid in skipped):
+            # Bambu after a restart: its objects are in the archive's 3MF
+            names = {**await asyncio.to_thread(_archive_objects, archive.file_path or ""), **names}
+        objects = {oid: before.get(oid) or names.get(oid) for oid in skipped}
+        if job.excluded is not None and objects == before and not ending:
+            continue  # nothing new: no write
+        pieces = await _printed_pieces(db, job, list(objects.values()))
+        job.excluded = {"objects": objects, "matched": pieces is not None, **({"end": True} if ending else {})}
+        if pieces is not None:  # else the last valid count stays: the pieces never go back up for an unknown
+            job.printed_pieces = pieces
     return True
+
+
+@functools.lru_cache(maxsize=16)
+def _archive_objects(file_path: str) -> dict[str, str]:
+    """``{identify_id: name}`` of the objects in an archive's 3MF; {} when there is none."""
+    from backend.app.services.archive import extract_printable_objects_from_3mf
+
+    path = settings.base_dir / file_path
+    if not path.is_file() or path.suffix != ".3mf":
+        return {}
+    return {str(k): v for k, v in extract_printable_objects_from_3mf(path.read_bytes()).items()}
+
+
+async def _printed_pieces(db: AsyncSession, job: FarmPrintJob, excluded: list[str | None]) -> int | None:
+    """The job's pieces less those excluded: complete sets for a set (a spare part isn't a unit).
+
+    None when an excluded object has no name or isn't an object of the plate: the batch keeps its pieces.
+    """
+    planned = job.pieces if job.pieces is not None else job.expected_pieces
+    if not excluded:
+        return planned
+    plate = await db.get(FarmPlate, job.plate_id) if job.plate_id else None
+    comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))
+    if plate is None or comp is None or None in excluded:
+        return None
+    objects = [y.object_name for y in plate.yields]
+    lost = Counter(match_object(name, objects) for name in excluded)
+    if None in lost or any(lost[y.object_name] > y.quantity for y in plate.yields):
+        return None
+    own = await product_shapes(db, {comp.project_id}) if comp.project_id is not None else {}
+    full = _pieces(plate, comp, own)
+    left = SimpleNamespace(
+        status=plate.status,
+        yields=[
+            SimpleNamespace(
+                object_name=y.object_name,
+                quantity=y.quantity - lost[y.object_name],
+                shape_id=y.shape_id,
+                component_code=y.component_code,
+                fingerprint=y.fingerprint,
+            )
+            for y in plate.yields
+        ],
+    )
+    return max(planned - (full - _pieces(left, comp, own)), 0) if full else None
 
 
 def _slot_mapping(used: list[dict], trays: list[dict], color_hex: str, tolerance: int) -> list[int] | None:
@@ -817,6 +934,7 @@ class FarmJobDispatcher:
                     alerts.start_check()  # its own task: Seller Hub's speed never delays the dispatch
                     # Each on its own: one failing never stops the dispatch or the others.
                     await _guarded(db, "colour sampling", record_used_colors)
+                    await _guarded(db, "excluded objects", record_excluded_objects)
                     await _guarded(db, "prints outside the queue", outside.scan_archives)
                     if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
                         last_history = time.monotonic()

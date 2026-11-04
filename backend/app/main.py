@@ -75,7 +75,7 @@ from backend.app.core.config import APP_VERSION, settings as app_settings
 from backend.app.core.database import async_session, engine, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.farm import routes as farm_routes  # fork: printfarm
-from backend.app.farm.jobs.service import farm_job_dispatcher  # fork: printfarm Accoda
+from backend.app.farm.jobs.service import farm_job_dispatcher, record_excluded_at_end  # fork: printfarm Accoda
 from backend.app.farm.library_sync import farm_library_scheduler  # fork: printfarm
 from backend.app.farm.nas.cache import NasCacheMiddleware  # fork: printfarm
 from backend.app.models.smart_plug import SmartPlug
@@ -4051,6 +4051,9 @@ async def on_print_complete(printer_id: int, data: dict):
     # nothing else legitimately needs the bytes; keeping them would only risk
     # handing a stale file to the next print if it reuses the same name.
     clear_3mf_cache(printer_id)
+
+    # fork: printfarm - the objects the printer excluded, read once more before the archive closes
+    await record_excluded_at_end(printer_id)
 
     try:
         ws_data = {

@@ -2948,6 +2948,10 @@ class BambuMQTTClient:
         if is_new_print or is_file_change:
             # Clear any old HMS errors when a new print starts
             self.state.hms_errors = []
+            # fork: printfarm - the last print's objects and skips never pass to this one, however the
+            # 3MF extraction in main.on_print_start goes (farm batches subtract the skipped objects)
+            self.state.skipped_objects = []
+            self.state.printable_objects = {}
             # Reset layer tracking for new print (needed for layer-based timelapse)
             self.state.layer_num = 0
             # Reset completion tracking for new print
