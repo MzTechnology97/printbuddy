@@ -25,6 +25,7 @@ so it doesn't hold a printer; one for a chosen printer waits in that printer's q
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -77,7 +78,6 @@ USED_COLORS_KEY = "farm_used_colors"  # in a print's archive extra_data: {colour
 SURE_SAMPLES = 10  # a colour picks between components only after 5 minutes of samples...
 SURE_SHARE = 0.9  # ...nearly all of them that colour
 PRINT_MAX_AGE = 7 * 24 * 3600  # an archive still "printing" older than this is a leftover, not the print
-EXCLUDED_STALE = timedelta(minutes=5)  # exclusions last read this long before the end: the end wasn't watched
 HEX_RE = re.compile(r"[0-9a-f]{6}|[0-9a-f]{3}")
 _slicing: dict[tuple[int, int], float] = {}  # (library_file_id, plate) -> when slicing was asked
 
@@ -604,10 +604,9 @@ async def record_excluded_objects(db: AsyncSession) -> int:
     """Read, on each running print's farm jobs, the objects the printer excluded and the pieces left.
 
     Bambu skip objects (ids of its slice_info), Klipper ``exclude_object`` (names); every tick while the
-    print runs or is paused. The printer's list is the truth: read twice, an object counts once; one it
-    restores is excluded no more. Names read before stay (a restart loses Bambu's).
-    shortcut: an object excluded in the last tick before the end is missed; read at FINISH too if that happens.
-    Returns how many prints.
+    print runs or is paused, and once more as it ends (``record_excluded_at_end``). The printer's list is
+    the truth: read twice, an object counts once; one it restores is excluded no more. Names read before
+    stay (a restart loses Bambu's). Returns how many prints.
     """
     read = 0
     for printer_id in (await db.execute(select(Printer.id).where(Printer.is_active.is_(True)))).scalars().all():
@@ -621,9 +620,23 @@ async def record_excluded_objects(db: AsyncSession) -> int:
     return read
 
 
-async def _sample_excluded(db: AsyncSession, printer_id: int) -> bool:
+async def record_excluded_at_end(printer_id: int) -> None:
+    """The last read of a print's excluded objects as it ends, before its archive closes
+    (``main.on_print_complete``): one excluded after the last tick counts, and only then is the batch ``read``."""
+    try:
+        async with database.async_session() as db:
+            if await _sample_excluded(db, printer_id, ending=True):
+                await db.commit()
+    except Exception:
+        logger.exception("Printer %s: excluded objects not read at the end", printer_id)
+
+
+async def _sample_excluded(db: AsyncSession, printer_id: int, ending: bool = False) -> bool:
     status = printer_manager.get_status(printer_id)
-    if status is None or status.state not in ("RUNNING", "PAUSE"):
+    # A printer that dropped keeps its last state: what it would say now is unknown
+    if status is None or not getattr(status, "connected", True):
+        return False
+    if not ending and status.state not in ("RUNNING", "PAUSE"):
         return False
     archive = await _running_archive(db, printer_id, status)
     jobs = await _archive_jobs(db, archive) if archive is not None else []
@@ -632,23 +645,27 @@ async def _sample_excluded(db: AsyncSession, printer_id: int) -> bool:
     printable = getattr(status, "printable_objects", None) or {}
     names = {str(k): v.get("name") if isinstance(v, dict) else v for k, v in printable.items()}
     skipped = [str(oid) for oid in getattr(status, "skipped_objects", None) or []]
-    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     for job in jobs:
         before = (job.excluded or {}).get("objects") or {}
         if any(before.get(oid) is None and oid not in names for oid in skipped):
             # Bambu after a restart: its objects are in the archive's 3MF
-            names = {**await asyncio.to_thread(_archive_objects, archive), **names}
+            names = {**await asyncio.to_thread(_archive_objects, archive.file_path or ""), **names}
         objects = {oid: before.get(oid) or names.get(oid) for oid in skipped}
-        job.excluded = {"objects": objects, "at": now}
-        job.printed_pieces = await _printed_pieces(db, job, list(objects.values()))
+        if job.excluded is not None and objects == before and not ending:
+            continue  # nothing new: no write
+        pieces = await _printed_pieces(db, job, list(objects.values()))
+        job.excluded = {"objects": objects, "matched": pieces is not None, **({"end": True} if ending else {})}
+        if pieces is not None:  # else the last valid count stays: the pieces never go back up for an unknown
+            job.printed_pieces = pieces
     return True
 
 
-def _archive_objects(archive: PrintArchive) -> dict[str, str]:
-    """``{identify_id: name}`` of the objects in the archive's 3MF; {} when there is none."""
+@functools.lru_cache(maxsize=16)
+def _archive_objects(file_path: str) -> dict[str, str]:
+    """``{identify_id: name}`` of the objects in an archive's 3MF; {} when there is none."""
     from backend.app.services.archive import extract_printable_objects_from_3mf
 
-    path = settings.base_dir / (archive.file_path or "")
+    path = settings.base_dir / file_path
     if not path.is_file() or path.suffix != ".3mf":
         return {}
     return {str(k): v for k, v in extract_printable_objects_from_3mf(path.read_bytes()).items()}

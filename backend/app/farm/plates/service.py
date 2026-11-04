@@ -99,14 +99,16 @@ def _label(name: str) -> str:
 
 
 def match_object(label: str, known) -> str | None:
-    """The object of ``known`` a slicer or printer names ``label``, or None.
+    """The object of ``known`` a printer names ``label`` when excluding it, or None.
 
     Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>", that Klipper upper-cases.
+    None also when the label fits two objects ("Base 1" and "Base-1" both write "Base_1"): never a guess.
     """
     if label in known:
         return label
-    labels = {_label(n).casefold(): n for n in known}
-    return labels.get(_label(ORCA_COPY_RE.sub("", label.casefold())).casefold())
+    key = _label(ORCA_COPY_RE.sub("", label.casefold())).casefold()
+    found = {n for n in known if _label(n).casefold() == key}
+    return found.pop() if len(found) == 1 else None
 
 
 def _sliced_objects(plate_elem, by_identify: dict[str, str], known: set[str]) -> dict[str, int] | None:
@@ -115,12 +117,18 @@ def _sliced_objects(plate_elem, by_identify: dict[str, str], known: set[str]) ->
     Skipped copies don't count. None when the slice lists none, or names one that isn't
     an object of the project: the plate keeps its count from model_settings and the build.
     """
+    labels = {_label(n): n for n in known}
     counts: dict[str, int] = {}
     for entry in plate_elem.findall("object"):
         if (entry.get("skipped") or "").lower() == "true":
             continue
         label = entry.get("name") or ""
-        name = by_identify.get(entry.get("identify_id")) or match_object(label, known)
+        # Bambu names the object; Orca writes a label, "<name>_id_<object>_copy_<n>"
+        name = (
+            by_identify.get(entry.get("identify_id"))
+            or (label if label in known else None)
+            or labels.get(_label(ORCA_COPY_RE.sub("", label)))
+        )
         if name is None:
             logger.debug("Slice object %r is no object of the project: plate counted from model_settings", label)
             return None
