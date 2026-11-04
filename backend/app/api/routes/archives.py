@@ -3350,6 +3350,9 @@ async def get_plate_thumbnail(
     file_path = settings.base_dir / archive.file_path
     if not file_path.is_file():
         raise HTTPException(404, "Archive file not found")
+    if archive.thumbnail_path and not zipfile.is_zipfile(file_path):
+        # An archived plate G-code (Klipper) is no 3MF: its own thumbnail is the plate's picture
+        return await get_thumbnail(archive_id=archive_id, db=db, _=None)
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:

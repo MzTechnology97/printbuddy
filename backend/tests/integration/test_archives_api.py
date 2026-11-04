@@ -1022,6 +1022,30 @@ class TestArchiveF3DEndpoints:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_plate_thumbnail_of_gcode_archive_is_its_thumbnail(
+        self, async_client: AsyncClient, archive_factory, printer_factory, tmp_path
+    ):
+        """An archived Klipper plate G-code is no 3MF: its plate thumbnail is the archive's own thumbnail."""
+        printer = await printer_factory()
+        (tmp_path / "archives" / "k1").mkdir(parents=True)
+        (tmp_path / "archives" / "k1" / "part-plate-1.gcode").write_text("G28\n")
+        (tmp_path / "archives" / "k1" / "thumbnail.png").write_bytes(b"\x89PNG plate picture")
+        archive = await archive_factory(
+            printer.id,
+            filename="part-plate-1.gcode",
+            file_path="archives/k1/part-plate-1.gcode",
+            thumbnail_path="archives/k1/thumbnail.png",
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("backend.app.api.routes.archives.settings.base_dir", tmp_path)
+            response = await async_client.get(f"/api/v1/archives/{archive.id}/plate-thumbnail/1")
+
+        assert response.status_code == 200
+        assert response.content == b"\x89PNG plate picture"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_filament_requirements_not_found(self, async_client: AsyncClient):
         """Verify filament-requirements returns 404 for non-existent archive."""
         response = await async_client.get("/api/v1/archives/999999/filament-requirements")
