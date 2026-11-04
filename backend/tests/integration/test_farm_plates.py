@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from backend.app.api.routes import library
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.nas.access import library_path
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver, models_in_path
 from backend.app.farm.plates.service import parse_plates, plates_by_component
@@ -347,6 +348,38 @@ class TestPlates:
         plate = (await get_plates(async_client, file_id))[0]
         assert (plate["print_time_seconds"], plate["filament_grams"]) == (3600, 12.5)
         assert plate["sliced_file_id"] is not None
+
+    async def test_picture_from_the_slice_else_from_the_3mf(self, async_client, db_session, farm, tmp_path):
+        file_id = farm["P2S-PETG-lid.3mf"]
+        url = f"/api/v1/farm/plates/{(await get_plates(async_client, file_id))[0]['id']}/image"
+        assert (await async_client.get(url)).status_code == 404  # no picture: the dialog shows a placeholder
+
+        source = await db_session.get(LibraryFile, file_id)
+        with zipfile.ZipFile(library_path(source.file_path), "a") as zf:
+            zf.writestr("Metadata/plate_1.png", b"from-3mf")
+        resp = await async_client.get(url)
+        assert (resp.status_code, resp.headers["content-type"], resp.content) == (200, "image/png", b"from-3mf")
+
+        sliced = tmp_path / "out" / "lid.gcode.3mf"
+        sliced.parent.mkdir()
+        with zipfile.ZipFile(sliced, "w") as zf:
+            zf.writestr("Metadata/plate_1.png", b"from-slice")
+        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == file_id))
+        db_session.add(
+            LibraryFile(
+                folder_id=source.folder_id,
+                filename=sliced.name,
+                file_path=str(sliced),
+                file_type="gcode",
+                file_size=1,
+                source_type="sliced",
+                file_metadata={"sliced_from_library_file_id": file_id, "sliced_from_sha256": state.sha256},
+            )
+        )
+        await db_session.commit()
+        assert (await get_plates(async_client, file_id))[0]["sliced_file_id"] is not None
+        assert (await async_client.get(url)).content == b"from-slice"
+        assert (await async_client.get("/api/v1/farm/plates/999999/image")).status_code == 404
 
 
 @pytest.mark.integration

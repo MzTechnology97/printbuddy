@@ -151,6 +151,8 @@ export interface FarmPlanPlate {
   yield: number;
   print_time_seconds: number | null;
   filament_grams: number | null;
+  /** Solid-piece estimate, set only while the plate has no slicer weight. */
+  filament_grams_max?: number | null;
   sliced: boolean;
   score: number;
   printers: {
@@ -468,6 +470,7 @@ export const farmApi = {
       `/products/${projectId}/parts/${code}`,
       { method: 'PUT', body: JSON.stringify({ quantity }) },
     ),
+  plateImageUrl: (plateId: number) => withStreamToken(`/api/v1/farm/plates/${plateId}/image`),
   pieceImageUrl: (yieldId: number, colorHex?: string | null) =>
     withStreamToken(`/api/v1/farm/pieces/${yieldId}/image${colorHex ? `?color=${colorHex}` : ''}`),
   linkPiece: (yieldIds: number[], shapeId: number | null) =>

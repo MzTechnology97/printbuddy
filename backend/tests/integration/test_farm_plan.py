@@ -204,3 +204,11 @@ def test_colour_tolerance():
     assert service.printer_fit(near_black, ["PLA"], "f5f5f5", 80)["color_ok"] is False
     # Black loaded but in another material does not count.
     assert service.printer_fit(near_black, ["PETG"], "111111", 80)["material_ok"] is False
+
+
+def test_solid_grams_until_the_slice_weighs_it():
+    measured = FarmPlateYield(object_name="Hook", quantity=2, fingerprint=[1000.0, 600.0, 1.0, 1.0, 1.0, 1.0])
+    unmeasured = FarmPlateYield(object_name="Lid", quantity=1, fingerprint=None)
+    # 2 cm³ of PETG (the CF blend counts as PETG) at 1.27 g/cm³.
+    assert service.solid_grams(FarmPlate(materials=["PETG-CF"], yields=[measured, unmeasured])) == 2.5
+    assert service.solid_grams(FarmPlate(materials=["PETG"], yields=[unmeasured])) is None

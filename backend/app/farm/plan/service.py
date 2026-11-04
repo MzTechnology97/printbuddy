@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plan.models import FarmPrinterSpool
+from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver
 from backend.app.farm.products.folders import component_files, may_print
 from backend.app.farm.products.models import (
@@ -56,6 +57,8 @@ COMPONENT_FIELDS = ("code", "name", "status", "to_print", "stock", "need", "days
 TIMEOUT_SECONDS = 15.0
 # Seller Hub computes its whole plan on every call (about 1 s), and Accoda's dialog opens often.
 CACHE_SECONDS = 60
+# g/cm³ of the base polymer ("PETG-CF" counts as PETG); anything else as PLA.
+DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21, "PA": 1.14, "PC": 1.2}
 
 
 def _key(name: str) -> str:
@@ -80,6 +83,18 @@ def clean_hex(raw: str) -> str:
     if len(value) != 6 or any(c not in "0123456789abcdef" for c in value):
         raise ValueError(f"Invalid colour {raw!r}")
     return value
+
+
+def solid_grams(plate: FarmPlate) -> float | None:
+    """Filament of the plate's objects printed solid: an upper bound until a slice gives the real weight.
+
+    shortcut: walls, infill and supports are ignored; slicing replaces it with the slicer's figure.
+    """
+    volumes = [y.quantity * y.fingerprint[0] for y in plate.yields if y.fingerprint]
+    if not volumes:
+        return None
+    base = ((plate.materials or ["PLA"])[0].split("-")[0]).upper()
+    return round(sum(volumes) / 1000 * DENSITY.get(base, DENSITY["PLA"]), 1)
 
 
 async def load_config(db: AsyncSession) -> dict:
@@ -310,6 +325,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
                     "yield": pieces,
                     "print_time_seconds": plate.print_time_seconds,
                     "filament_grams": plate.filament_grams,
+                    "filament_grams_max": None if plate.filament_grams else solid_grams(plate),
                     "sliced": plate.sliced_file_id is not None,
                     "printers": fits,
                     "score": 2 if ready else 1 if free else 0,
