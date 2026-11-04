@@ -342,7 +342,7 @@ describe('PrintModal', () => {
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
     });
 
-    it('shows Queue Only option', () => {
+    it('shows Manual start option', () => {
       render(
         <PrintModal
           mode="add-to-queue"
@@ -352,7 +352,7 @@ describe('PrintModal', () => {
         />
       );
 
-      expect(screen.getByText('Queue Only')).toBeInTheDocument();
+      expect(screen.getByText('Manual start')).toBeInTheDocument();
     });
 
     it('shows power off option', () => {
@@ -464,7 +464,7 @@ describe('PrintModal', () => {
       expect(screen.getByText('Print Options')).toBeInTheDocument();
     });
 
-    it('shows Queue Only option', () => {
+    it('shows Manual start option', () => {
       const item = createMockQueueItem();
 
       render(
@@ -477,7 +477,7 @@ describe('PrintModal', () => {
         />
       );
 
-      expect(screen.getByText('Queue Only')).toBeInTheDocument();
+      expect(screen.getByText('Manual start')).toBeInTheDocument();
     });
 
     it('shows power off option', () => {

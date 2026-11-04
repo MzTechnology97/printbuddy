@@ -3944,6 +3944,7 @@ export default {
     insufficientFilamentLine: '{{printer}} - {{slot}}：需要 {{required}}g，剩余 {{remaining}}g',
     printAnyway: '仍然打印',
     forceColorMatch: '强制颜色匹配',
+    manualStart: '手动开始',
     staggerPrinterStarts: '错峰启动打印机',
     staggerGroupSize: '组大小',
     staggerInterval: '间隔（分钟）',

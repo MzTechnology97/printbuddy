@@ -3946,6 +3946,7 @@ export default {
     insufficientFilamentLine: '{{printer}} - {{slot}} : nécessite {{required}}g, restant {{remaining}}g',
     printAnyway: 'Imprimer quand même',
     forceColorMatch: 'Forcer correspondance des couleurs',
+    manualStart: 'Démarrage manuel',
     staggerPrinterStarts: 'Échelonner démarrages',
     staggerGroupSize: 'Taille du groupe',
     staggerInterval: 'Intervalle (min)',

@@ -3957,6 +3957,7 @@ export default {
     insufficientFilamentLine: '{{printer}} - {{slot}}: 必要 {{required}}g、残り {{remaining}}g',
     printAnyway: 'それでも印刷',
     forceColorMatch: 'カラーマッチを強制',
+    manualStart: '手動開始',
     staggerPrinterStarts: 'プリンター開始を段階的に',
     staggerGroupSize: 'グループサイズ',
     staggerInterval: '間隔（分）',
