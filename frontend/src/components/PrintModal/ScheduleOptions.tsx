@@ -16,7 +16,7 @@ import {
 
 /**
  * Schedule options component for queue items.
- * Includes schedule type (ASAP/Scheduled/Queue Only), datetime picker,
+ * Includes schedule type (ASAP/Scheduled/Manual start), datetime picker,
  * and options for require previous success and auto power off.
  */
 export function ScheduleOptionsPanel({
@@ -158,7 +158,7 @@ export function ScheduleOptionsPanel({
             onClick={() => handleScheduleTypeChange('manual')}
           >
             <Hand className="w-4 h-4" />
-            Queue Only
+            {t('printModal.manualStart', 'Manual start')}
           </button>
         </div>
       </div>

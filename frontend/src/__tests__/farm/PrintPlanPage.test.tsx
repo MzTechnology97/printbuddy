@@ -341,7 +341,7 @@ describe('PrintPlanPage', () => {
     const slot = await within(dialog).findByTitle('Auto-matched');
     expect(slot).toHaveValue('1'); // the brown one, proposed
     await user.selectOptions(slot, '0');
-    await user.click(within(dialog).getByRole('button', { name: /Queue Only/ }));
+    await user.click(within(dialog).getByRole('button', { name: /Manual start/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() =>
       expect(createdJobs).toEqual({

@@ -3944,6 +3944,7 @@ export default {
     insufficientFilamentLine: '{{printer}} - {{slot}}：需要 {{required}}g，剩餘 {{remaining}}g',
     printAnyway: '仍然列印',
     forceColorMatch: '強制顏色匹配',
+    manualStart: '手動開始',
     staggerPrinterStarts: '錯開印表機啟動',
     staggerGroupSize: '群組大小',
     staggerInterval: '間隔（分鐘）',
