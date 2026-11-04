@@ -337,9 +337,12 @@ export function AssignSpoolModal({ isOpen, onClose, printerId, amsId, trayId, tr
       });
     }
   }
+  // Counted apart so the empty-state hint blames the filter that actually hid the spools.
+  const trayHiddenCount = (availableSpools?.length ?? 0) - (filteredSpools?.length ?? 0);
   if (searchFilter && filteredSpools) {
     filteredSpools = filterSpoolsByQuery(filteredSpools, searchFilter);
   }
+  const searchHiddenCount = (availableSpools?.length ?? 0) - trayHiddenCount - (filteredSpools?.length ?? 0);
 
   const handleAssign = () => {
     if (selectedSpoolmanSpoolId !== null) {
@@ -550,7 +553,10 @@ export function AssignSpoolModal({ isOpen, onClose, printerId, amsId, trayId, tr
                 <p>{t('inventory.noSpoolsMatch')}</p>
                 {availableSpools && (
                   <p className="text-[10px] mt-2 opacity-60">
-                    {availableSpools.length} unassigned spools — {(availableSpools.length) - (filteredSpools?.length ?? 0)} filtered by tray match. Try "Show all spools".
+                    {availableSpools.length} unassigned spools
+                    {trayHiddenCount > 0 && ` — ${trayHiddenCount} filtered by tray match`}
+                    {searchHiddenCount > 0 && ` — ${searchHiddenCount} not matching "${searchFilter}"`}
+                    {trayHiddenCount > 0 && '. Try "Show all spools".'}
                   </p>
                 )}
               </div>
