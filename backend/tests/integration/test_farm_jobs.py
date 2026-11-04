@@ -592,6 +592,67 @@ async def test_klipper_item_gets_the_gcode_of_the_new_slice(db_session, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_3mf_saved_since_the_last_scan_waits_for_the_scan(db_session, tmp_path, printer_factory, monkeypatch):
+    """Saved minutes before the start, before the scan saw it: one stat on the NAS holds the print."""
+    from datetime import datetime
+
+    from backend.app.farm.models import FarmWatchedFolder
+    from backend.app.farm.nas import access, service as nas_service
+    from backend.app.farm.nas.remote import NasConnectionError, RemoteEntry
+
+    q = await _queued_output(db_session, tmp_path, printer_factory, monkeypatch)
+    item, state = q["item"], q["state"]
+    watch = FarmWatchedFolder(folder_id=1, scan_interval_seconds=300, last_scan_at=datetime(2026, 1, 1))
+    db_session.add(watch)
+    await db_session.commit()
+
+    on_nas = {"size": 1, "mtime": 1.0, "error": None}
+    stats = []
+
+    class FakeRemote:
+        def stat(self, parts):
+            stats.append(parts)
+            if on_nas["error"]:
+                raise on_nas["error"]
+            return RemoteEntry(parts[-1], False, on_nas["size"], on_nas["mtime"])
+
+    class FakeActive:
+        remote = FakeRemote()
+
+        def parts(self, path):
+            return ("Stampa 3D", "part.3mf") if path == "/nas/part.3mf" else None
+
+    async def fake_access(db):
+        return FakeActive()
+
+    monkeypatch.setattr(nas_service, "refresh_access", fake_access)
+
+    async def run_here(fn, *args):
+        return fn(*args)
+
+    monkeypatch.setattr(access, "run", run_here)
+
+    assert await service.stale_slice_reason(db_session, item) is None  # same size and mtime as scanned
+    assert stats == [("Stampa 3D", "part.3mf")]  # a stat, nothing read
+
+    on_nas["mtime"] = 500.0  # saved again since the scan
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NAS_CHANGED
+    await db_session.refresh(watch)
+    assert watch.last_scan_at is None  # the scan runs at the next tick, with its 60 s settle rule
+    assert q["asked"] == []  # no slice of a version not read yet
+
+    on_nas["error"] = NasConnectionError("no answer")  # the NAS is down: the known version stands
+    assert await service.stale_slice_reason(db_session, item) is None
+    on_nas["error"] = FileNotFoundError("part.3mf")  # the NAS answered: gone, read it again
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NAS_CHANGED
+
+    on_nas.update(error=None, size=2, mtime=500.0)  # the scan read the new version...
+    state.size, state.mtime, state.sha256 = 2, 500.0, "v2"
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NEW_SLICE  # ...and it is re-sliced
+
+
+@pytest.mark.asyncio
 async def test_files_that_are_not_farm_outputs_start_as_before(db_session, printer_factory):
     printer = await printer_factory(name="Farm", model="A1")
     plain = LibraryFile(filename="a.gcode.3mf", file_path="/x/a.gcode.3mf", file_type="3mf", file_size=1)

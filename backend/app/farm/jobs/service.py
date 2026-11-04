@@ -333,19 +333,46 @@ async def _local_path(db: AsyncSession, lib_file: LibraryFile) -> Path:
 
 # Why a queued farm output waits instead of starting (``waiting_reason`` of its queue item).
 WAIT_NEW_SLICE = "3MF changed after queueing: waiting for the new slice"
+WAIT_NAS_CHANGED = "3MF changed on the NAS: waiting for it to be read again"
 WAIT_NO_SOURCE = "The 3MF this was sliced from is missing or unreadable"
 WAIT_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate again"
 WAIT_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
-WAIT_REASONS = (WAIT_NEW_SLICE, WAIT_NO_SOURCE, WAIT_NO_OUTPUT, WAIT_NO_GCODE)
+WAIT_REASONS = (WAIT_NEW_SLICE, WAIT_NAS_CHANGED, WAIT_NO_SOURCE, WAIT_NO_OUTPUT, WAIT_NO_GCODE)
 
 _reslice_asked: dict[tuple[int, str], float] = {}  # (project id, version) -> when a start asked to re-slice it
+
+
+async def _changed_on_nas(db: AsyncSession, state: FarmLibraryFile) -> bool:
+    """Whether a NAS 3MF was saved again since the scan read it: one stat, size and mtime only.
+
+    A NAS that doesn't answer is no reason to hold the print: the known version stands.
+    """
+    from backend.app.farm.nas import access, service as nas_service
+    from backend.app.farm.nas.remote import NasBusyError
+
+    try:
+        active = await nas_service.refresh_access(db)
+        parts = active.parts(state.path) if active else None
+        if parts is None:
+            return False  # not on the NAS
+        entry = await access.run(active.remote.stat, parts)
+    except (ConnectionError, TimeoutError, NasBusyError) as exc:
+        logger.warning("Farm start check: no stat of %s on the NAS (%s): using the known version", state.path, exc)
+        return False
+    except OSError:
+        return True  # the NAS answered: gone or unreadable, the scan reads it again
+    except Exception:  # a failed check must not stop the queue check of every printer
+        logger.warning("Farm start check: stat of %s failed: using the known version", state.path, exc_info=True)
+        return False
+    return entry.size != state.size or abs(entry.mtime - state.mtime) >= 1
 
 
 async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | None:
     """Why a queued farm output may not start: it was sliced from another version of its 3MF.
 
     A project saved again is re-sliced in place (``farm.reslice``), so the item waits for that
-    (asked again here when it isn't under way). A Klipper G-code extracted from an output sliced
+    (asked again here when it isn't under way); one saved after the last scan is seen by a stat
+    on the NAS and waits for the scan, asked now. A Klipper G-code extracted from an output sliced
     again since is extracted again, into its own row. None: it may start, or it isn't a farm output.
     """
     lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
@@ -361,6 +388,15 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
     state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == project_id))
     if state is None or state.status != "ok":
         return WAIT_NO_SOURCE
+    if await _changed_on_nas(db, state):
+        # Saved after the last scan: scanned again now (the 60 s settle rule holds), then re-sliced.
+        from backend.app.farm.models import FarmWatchedFolder
+
+        watch = await db.get(FarmWatchedFolder, state.watch_folder_id)
+        if watch is not None and watch.last_scan_at is not None:
+            watch.last_scan_at = None
+            await db.commit()
+        return WAIT_NAS_CHANGED
     if (output.file_metadata or {}).get("sliced_from_sha256") != state.sha256:
         key = (project_id, state.sha256)
         if time.monotonic() - _reslice_asked.get(key, -RESLICE_AFTER_SECONDS) >= RESLICE_AFTER_SECONDS:
