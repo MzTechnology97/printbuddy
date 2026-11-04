@@ -152,6 +152,7 @@ class FarmProduct(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+add_columns("projects", {"cover_source_url": "VARCHAR(2048)"})
 add_columns(
     "farm_products",
     {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME", "not_part": "JSON", "assemblies": "JSON"},

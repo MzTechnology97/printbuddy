@@ -1076,6 +1076,7 @@ async def upload_project_cover_image(
         raise HTTPException(status_code=500, detail="Failed to save cover image")
 
     project.cover_image_filename = unique_filename
+    project.cover_source_url = None  # fork: a cover uploaded by hand is never replaced by the farm sync
     db.add(project)
     await db.flush()
     await db.commit()
@@ -1140,6 +1141,7 @@ async def delete_project_cover_image(
             except OSError as e:
                 logger.warning("Failed to delete cover image file %s: %s", file_path, e)
         project.cover_image_filename = None
+        project.cover_source_url = None  # fork: farm module
         db.add(project)
         await db.flush()
         await db.commit()
