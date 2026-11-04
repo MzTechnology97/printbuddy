@@ -650,6 +650,7 @@ async def test_bambu_skipped_objects_come_off_the_batch(async_client, db_session
     copies = {oid: {"name": "sopra", "x": 0, "y": 0} for oid in (437, 448, 470)}
     status = excluding(monkeypatch, copies, [448], subtask_name="Sopra__abcdef12")
     assert await service.record_excluded_objects(db_session) == 1
+    assert await service.record_excluded_objects(db_session) == 1  # read twice, subtracted once
     [running] = [j for j in (await async_client.get(f"{API}/jobs")).json() if j["id"] == job.id]
     assert summary(running) == (14, 15, ["sopra"], "read")
 
@@ -670,10 +671,16 @@ async def test_bambu_skipped_objects_come_off_the_batch(async_client, db_session
 async def test_klipper_excluded_objects_come_off_the_batch(async_client, db_session, farm, monkeypatch):
     item, job = await printing_job(db_session, farm, "k2", "Sopra__abcdef12.gcode")
     labels = {i: {"name": f"SOPRA_ID_0_COPY_{i}"} for i in range(15)}  # exclude_object upper-cases Orca labels
-    excluding(monkeypatch, labels, [3, 7], subtask_name=None, gcode_file="Sopra__abcdef12.gcode")
+    status = excluding(monkeypatch, labels, [3, 7, 9], subtask_name=None, gcode_file="Sopra__abcdef12.gcode")
+    assert await service.record_excluded_objects(db_session) == 1
+    assert await service.queued_pieces(db_session) == {farm["code"]: 12}  # the plan counts what will come out
+    status.skipped_objects = [3, 7]  # one restored: excluded no more
     assert await service.record_excluded_objects(db_session) == 1
     excluded = ["SOPRA_ID_0_COPY_3", "SOPRA_ID_0_COPY_7"]
     assert summary(await batch(async_client, db_session, item, job.id)) == (13, 15, excluded, "read")
+    # Its end not watched: those read come off all the same, flagged as maybe more.
+    late = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
+    assert summary(await batch(async_client, db_session, item, job.id, late)) == (13, 15, excluded, "unread")
 
 
 @pytest.mark.asyncio

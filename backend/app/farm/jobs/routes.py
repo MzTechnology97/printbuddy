@@ -61,8 +61,9 @@ def _state(job: FarmPrintJob, item_status: str | None) -> str:
 
 
 def _exclusions(job: FarmPrintJob, state: str, finished_at: datetime | None) -> str | None:
-    """Whether the objects the printer excluded come off the batch: ``read`` (subtracted), ``unread`` (not read
-    to the end), ``unmatched`` (one isn't on the plate); None for a print outside the queue or not started."""
+    """Whether the objects the printer excluded come off the batch: ``read`` (subtracted), ``unread`` (those read
+    subtracted, not read to the end), ``unmatched`` (one isn't on the plate: none subtracted); None for a print
+    outside the queue or not started."""
     if job.source is not None or state not in ("printing", "completed"):
         return None
     read = job.excluded
@@ -94,8 +95,11 @@ def _job_dict(
         "printer_id": job.printer_id,
         "printer": printer,
         "queue_item_id": job.queue_item_id,
-        # The batch's pieces: the plate's less the excluded objects when they were read, else the plate's
-        "pieces": job.printed_pieces if exclusions == "read" else planned,
+        # The batch's pieces: the plate's less the excluded objects read (``unread``: there may be more), else the
+        # plate's: a ceiling of the good pieces either way
+        "pieces": job.printed_pieces
+        if exclusions in ("read", "unread") and job.printed_pieces is not None
+        else planned,
         "pieces_planned": planned,
         "excluded_objects": None if excluded is None else [n or f"#{oid}" for oid, n in excluded.items()],
         "exclusions": exclusions,

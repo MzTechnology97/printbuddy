@@ -236,8 +236,9 @@ async def queued_pieces(db: AsyncSession) -> dict[str, int]:
     for job, item_status in rows.all():
         if job.status == "waiting":
             out[job.component_code] = out.get(job.component_code, 0) + job.expected_pieces
-        elif item_status in ACTIVE_QUEUE:
-            out[job.component_code] = out.get(job.component_code, 0) + (job.pieces or 0)
+        elif item_status in ACTIVE_QUEUE:  # less the objects the printer excluded
+            pieces = job.printed_pieces if job.printed_pieces is not None else job.pieces
+            out[job.component_code] = out.get(job.component_code, 0) + (pieces or 0)
     return out
 
 
@@ -603,7 +604,8 @@ async def record_excluded_objects(db: AsyncSession) -> int:
     """Read, on each running print's farm jobs, the objects the printer excluded and the pieces left.
 
     Bambu skip objects (ids of its slice_info), Klipper ``exclude_object`` (names); every tick while the
-    print runs or is paused. What was read stays: exclusions only grow, so a restart loses nothing.
+    print runs or is paused. The printer's list is the truth: read twice, an object counts once; one it
+    restores is excluded no more. Names read before stay (a restart loses Bambu's).
     shortcut: an object excluded in the last tick before the end is missed; read at FINISH too if that happens.
     Returns how many prints.
     """
@@ -632,11 +634,11 @@ async def _sample_excluded(db: AsyncSession, printer_id: int) -> bool:
     skipped = [str(oid) for oid in getattr(status, "skipped_objects", None) or []]
     now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     for job in jobs:
-        objects = dict((job.excluded or {}).get("objects") or {})
-        new = [oid for oid in skipped if objects.get(oid) is None]
-        if any(oid not in names for oid in new):  # Bambu after a restart: its objects are in the archive's 3MF
+        before = (job.excluded or {}).get("objects") or {}
+        if any(before.get(oid) is None and oid not in names for oid in skipped):
+            # Bambu after a restart: its objects are in the archive's 3MF
             names = {**await asyncio.to_thread(_archive_objects, archive), **names}
-        objects.update({oid: names.get(oid) for oid in new})
+        objects = {oid: before.get(oid) or names.get(oid) for oid in skipped}
         job.excluded = {"objects": objects, "at": now}
         job.printed_pieces = await _printed_pieces(db, job, list(objects.values()))
     return True
