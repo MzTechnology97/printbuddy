@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from backend.app.api.routes import library
 from backend.app.farm.models import FarmLibraryFile
+from backend.app.farm.plates.models import FarmPlate
 from backend.app.farm.plates.printer_map import PrinterModelResolver, models_in_path
 from backend.app.farm.plates.service import parse_plates, plates_by_component
 from backend.app.models.library import LibraryFile
@@ -80,6 +81,89 @@ def test_parse_plates_orca_emboss_prefix_and_empty_plate(tmp_path):
     plates, _ = parse_plates(path)
     # Extruder 7 is out of range: falls back to the first filament.
     assert [(p.index, p.objects, p.materials) for p in plates] == [(1, {"Tag": 1}, ["PLA"])]
+
+
+def make_copies_project(
+    path: Path, objects: dict[int, str], plates: dict[int, list[int]], items: list[str], slice_info: str | None = None
+) -> Path:
+    """A project whose build holds ``items`` and whose plates list ``{plate: [object id, ...]}``;
+    the instance listed first for object N has identify_id 900+N."""
+    objs = "".join(
+        f'<object id="{o}"><metadata key="name" value="{n}"/><part id="1"/></object>' for o, n in objects.items()
+    )
+    plate_xml = "".join(
+        f'<plate><metadata key="plater_id" value="{index}"/>'
+        + "".join(
+            f'<model_instance><metadata key="object_id" value="{o}"/>'
+            f'<metadata key="identify_id" value="{900 + o}"/></model_instance>'
+            for o in oids
+        )
+        + "</plate>"
+        for index, oids in plates.items()
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "3D/3dmodel.model",
+            '<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources/>'
+            f"<build>{''.join(items)}</build></model>",
+        )
+        zf.writestr("Metadata/model_settings.config", f"<config>{objs}{plate_xml}</config>")
+        if slice_info is not None:
+            zf.writestr("Metadata/slice_info.config", slice_info)
+    return path
+
+
+def test_parse_plates_counts_copies_left_out_of_model_settings(tmp_path):
+    """Orca lists one instance of an object on its plate but prints every build item of it there."""
+    items = (
+        ['<item objectid="1"/>'] * 15  # a handle copied 15 times, listed once on plate 1
+        + ['<item objectid="2"/>', '<item objectid="2" printable="0"/>']  # one copy not printable
+        + ['<item objectid="3"/>'] * 3  # listed on plates 2 and 3: its third copy can't be placed
+    )
+    path = make_copies_project(
+        tmp_path / "copies.3mf", {1: "Handle", 2: "Pin", 3: "Clip"}, {1: [1], 2: [2, 3], 3: [3]}, items
+    )
+    plates, _ = parse_plates(path)
+    assert [(p.index, p.objects) for p in plates] == [
+        (1, {"Handle": 15}),
+        (2, {"Pin": 1, "Clip": 1}),
+        (3, {"Clip": 1}),
+    ]
+
+
+def test_parse_plates_counts_what_the_slice_printed(tmp_path):
+    """slice_info lists every copy the slice printed: a copy off the plate isn't there, a skipped one is
+    marked. Orca names them with labels, Bambu with the object's name; the first copy by identify_id."""
+    orca = "".join(
+        f'<object identify_id="{900 if n == 0 else 700 + n}" name="Maniglia_Portiera_grande_id_0_copy_{n}" '
+        f'skipped="{"true" if n == 14 else "false"}"/>'
+        for n in range(15)
+    )
+    bambu = '<object identify_id="5" name="Pin"/><object identify_id="6" name="Pin"/>'
+    slice_info = (
+        f'<config><plate><metadata key="index" value="1"/><metadata key="prediction" value="100"/>{orca}</plate>'
+        f'<plate><metadata key="index" value="2"/>{bambu}</plate></config>'
+    )
+    # 16 copies of the handle in the build: one sits off every plate and is never printed.
+    items = ['<item objectid="0"/>'] * 16 + ['<item objectid="2"/>'] * 2
+    path = make_copies_project(
+        tmp_path / "sliced.3mf", {0: "Maniglia Portiera grande", 2: "Pin"}, {1: [0], 2: [2]}, items, slice_info
+    )
+    plates, _ = parse_plates(path)
+    assert [(p.index, p.objects, p.print_time_seconds) for p in plates] == [
+        (1, {"Maniglia Portiera grande": 14}, 100),  # 15 printed, one skipped
+        (2, {"Pin": 2}, None),
+    ]
+
+
+def test_parse_plates_keeps_its_count_when_the_slice_names_an_unknown_object(tmp_path):
+    slice_info = (
+        '<config><plate><metadata key="index" value="1"/><object identify_id="1" name="Other"/></plate></config>'
+    )
+    items = ['<item objectid="1"/>'] * 3
+    path = make_copies_project(tmp_path / "odd.3mf", {1: "Hook"}, {1: [1]}, items, slice_info)
+    plates, _ = parse_plates(path)
+    assert [p.objects for p in plates] == [{"Hook": 3}]
 
 
 def test_parse_plates_without_model_settings(tmp_path):
@@ -166,6 +250,26 @@ class TestPlates:
         ]
         assert (first["printer_model"], first["target_model"], first["target_model_source"]) == ("P1S", "P1S", "auto")
         assert (first["materials"], first["nozzle_diameter"]) == (["PETG", "PLA"], 0.4)
+
+    async def test_plates_read_by_an_older_parser_are_read_again(self, async_client, db_session, farm):
+        """A confirmed plate whose count changes stays confirmed: every object keeps its link."""
+        for plate in await get_plates(async_client, farm["hook.3mf"]):
+            body = {"yields": [{**y, "component_code": f"c-{y['object_name'].lower()}"} for y in plate["yields"]]}
+            assert (await async_client.put(f"/api/v1/farm/plates/{plate['id']}", json=body)).status_code == 200
+        stored = (
+            await db_session.execute(select(FarmPlate).where(FarmPlate.library_file_id == farm["hook.3mf"]))
+        ).scalars()
+        for plate in stored:
+            plate.parse_version = None  # read before copies left out of model_settings counted
+            for y in plate.yields:
+                y.quantity = 1
+        await db_session.commit()
+        plates = await get_plates(async_client, farm["hook.3mf"])
+        assert [(p["status"], {y["object_name"]: y["quantity"] for y in p["yields"]}) for p in plates] == [
+            ("confirmed", {"Hook": 4, "Base": 1}),
+            ("confirmed", {"Lid": 2}),
+        ]
+        assert plates[0]["yields"][0]["component_code"] == "C-HOOK"
 
     async def test_warns_when_folder_names_another_printer(self, async_client, farm):
         hook = await get_plates(async_client, farm["hook.3mf"])
