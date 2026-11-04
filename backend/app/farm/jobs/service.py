@@ -25,6 +25,7 @@ so it doesn't hold a printer; one for a chosen printer waits in that printer's q
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -245,6 +246,21 @@ def klipper_gcode_name(sliced_name: str, plate: int) -> str:
     return f"{re.sub(r'[^A-Za-z0-9]+', '-', base).strip('-') or 'plate'}.gcode"
 
 
+class SliceNotLocal(Exception):
+    """The local copy of a sliced output isn't the current one (the NAS didn't answer the fetch)."""
+
+
+def _sha256_of(path: Path) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, plate: int) -> LibraryFile | None:
     """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once.
 
@@ -270,6 +286,9 @@ async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, p
             ):
                 return candidate
             gcode = candidate  # sliced again, or extracted before the preview: extract into the same row
+    # A cached copy the NAS couldn't refresh holds the previous slice: never stamp it with the new hash.
+    if sliced.file_hash and await asyncio.to_thread(_sha256_of, path) != sliced.file_hash:
+        raise SliceNotLocal(f"{sliced.filename}: the local copy is not the current slice")
     try:
         with zipfile.ZipFile(path) as zf:
             data = zf.read(f"Metadata/plate_{plate}.gcode")
@@ -333,11 +352,25 @@ async def _local_path(db: AsyncSession, lib_file: LibraryFile) -> Path:
 
 # Why a queued farm output waits instead of starting (``waiting_reason`` of its queue item).
 WAIT_NEW_SLICE = "3MF changed after queueing: waiting for the new slice"
+WAIT_RESLICE_FAILED = "3MF changed after queueing, and slicing it again failed: slice it again or cancel"
 WAIT_NAS_CHANGED = "3MF changed on the NAS: waiting for it to be read again"
 WAIT_NO_SOURCE = "The 3MF this was sliced from is missing or unreadable"
-WAIT_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate again"
-WAIT_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
-WAIT_REASONS = (WAIT_NEW_SLICE, WAIT_NAS_CHANGED, WAIT_NO_SOURCE, WAIT_NO_OUTPUT, WAIT_NO_GCODE)
+WAIT_SLICE_UNREADABLE = "Cannot read the new slice from the NAS: waiting for it"
+WAIT_CHECK_FAILED = "Cannot check the slice of this print: waiting"
+WAIT_REASONS = (
+    WAIT_NEW_SLICE,
+    WAIT_RESLICE_FAILED,
+    WAIT_NAS_CHANGED,
+    WAIT_NO_SOURCE,
+    WAIT_SLICE_UNREADABLE,
+    WAIT_CHECK_FAILED,
+)
+# Why it never will: the queue item fails with this ``error_message``.
+FAIL_NO_PROJECT = "The 3MF this was sliced from was removed from the library"
+FAIL_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate again"
+FAIL_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
+FAIL_PLATE_GONE = "This plate is no longer in the 3MF: queue another plate"
+FAIL_REASONS = (FAIL_NO_PROJECT, FAIL_NO_OUTPUT, FAIL_NO_GCODE, FAIL_PLATE_GONE)
 
 _reslice_asked: dict[tuple[int, str], float] = {}  # (project id, version) -> when a start asked to re-slice it
 
@@ -374,20 +407,24 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
     (asked again here when it isn't under way); one saved after the last scan is seen by a stat
     on the NAS and waits for the scan, asked now. A Klipper G-code extracted from an output sliced
     again since is extracted again, into its own row. None: it may start, or it isn't a farm output.
+    A reason in ``FAIL_REASONS`` never clears: the item should fail.
     """
     lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
     meta = (lib_file.file_metadata or {}) if lib_file else {}
     project_id = meta.get("sliced_from_library_file_id")
-    if not meta.get("used_embedded_settings") or project_id is None:
+    # Farm outputs carry the source version; the upstream slice route's outputs don't, and are left alone.
+    if not meta.get("used_embedded_settings") or project_id is None or "sliced_from_sha256" not in meta:
         return None
     output = lib_file
     if (output_id := meta.get("extracted_from_library_file_id")) is not None:
         output = await db.scalar(LibraryFile.active().where(LibraryFile.id == output_id))
         if output is None:
-            return WAIT_NO_OUTPUT
+            return FAIL_NO_OUTPUT
     state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == project_id))
-    if state is None or state.status != "ok":
-        return WAIT_NO_SOURCE
+    if state is None or await db.scalar(LibraryFile.active().where(LibraryFile.id == project_id)) is None:
+        return FAIL_NO_PROJECT
+    if state.status != "ok":
+        return WAIT_NO_SOURCE  # missing or corrupt on the NAS: saved again, it is read again
     if await _changed_on_nas(db, state):
         # Saved after the last scan: scanned again now (the 60 s settle rule holds), then re-sliced.
         from backend.app.farm.models import FarmWatchedFolder
@@ -397,18 +434,32 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
             watch.last_scan_at = None
             await db.commit()
         return WAIT_NAS_CHANGED
-    if (output.file_metadata or {}).get("sliced_from_sha256") != state.sha256:
+    out_meta = output.file_metadata or {}
+    if out_meta.get("sliced_from_sha256") != state.sha256:
+        from backend.app.farm import reslice  # imports slicing, which imports this module
+        from backend.app.farm.slicing import plate_key
+
+        plates = list((await db.execute(select(FarmPlate).where(FarmPlate.library_file_id == project_id))).scalars())
+        plate_no = plate_key(out_meta.get("sliced_plate"))  # 0: all plates, never a stored plate
+        if plate_no and plates and all(p.source_sha256 == state.sha256 for p in plates):  # this version's
+            if plate_no not in {p.plate_index for p in plates}:
+                return FAIL_PLATE_GONE  # the re-slice skips it: it would wait for good
+        if project_id in reslice._running:
+            return WAIT_NEW_SLICE
         key = (project_id, state.sha256)
         if time.monotonic() - _reslice_asked.get(key, -RESLICE_AFTER_SECONDS) >= RESLICE_AFTER_SECONDS:
-            _reslice_asked[key] = time.monotonic()
-            from backend.app.farm import reslice  # imports slicing, which imports this module
-
-            await reslice.schedule(db, [project_id])  # skipped while the scan's re-slice runs
-        return WAIT_NEW_SLICE
+            await reslice.schedule(db, [project_id])
+            _reslice_asked[key] = time.monotonic()  # only once asked: a failed schedule is tried next check
+            if project_id in reslice._running:
+                return WAIT_NEW_SLICE
+        return WAIT_RESLICE_FAILED  # failed, or skipped (e.g. excluded): asked again after a while
     if output is not lib_file and meta.get("extracted_from_hash") != output.file_hash:
-        gcode = await gcode_for_klipper(db, output, await _local_path(db, output), meta.get("plate") or 1)
+        try:
+            gcode = await gcode_for_klipper(db, output, await _local_path(db, output), meta.get("plate") or 1)
+        except SliceNotLocal:
+            return WAIT_SLICE_UNREADABLE
         if gcode is None:
-            return WAIT_NO_GCODE
+            return FAIL_NO_GCODE
         item.library_file_id = gcode.id
         await db.commit()
         logger.info("Queue item %d: G-code extracted again from the new slice of %s", item.id, output.filename)
@@ -650,7 +701,11 @@ async def dispatch_once(db: AsyncSession) -> int:
                         continue
                     send = sliced
                     if klipper and not sliced.filename.endswith(".gcode"):
-                        send = await gcode_for_klipper(db, sliced, path, plate_no)
+                        try:
+                            send = await gcode_for_klipper(db, sliced, path, plate_no)
+                        except SliceNotLocal:
+                            reasons.append(f"plate {plate.plate_index}: the sliced file can't be fetched from the NAS")
+                            continue
                         if send is None:
                             reasons.append(f"{printer['name']}: no G-code for plate {plate_no} in the sliced file")
                             continue

@@ -328,7 +328,8 @@ class PrintScheduler:
 
                     # fork (printfarm): a farm output starts only if sliced from the current version of its 3MF
                     if item.library_file_id and await self._farm_slice_waits(db, item):
-                        busy_printers.add(item.printer_id)  # the printer's next items keep their order
+                        if item.status == "pending":  # waiting: the printer's next items keep their order
+                            busy_printers.add(item.printer_id)
                         continue
 
                     # Compute AMS mapping if not already set
@@ -443,6 +444,10 @@ class PrintScheduler:
                                     db=db,
                                 )
                                 continue
+
+                        # fork (printfarm): checked before assigning, so a waiting item keeps waiting for any printer
+                        if item.library_file_id and await self._farm_slice_waits(db, item):
+                            continue
 
                         # Assign printer and start - clear waiting reason
                         item.printer_id = printer_id
@@ -1867,11 +1872,31 @@ class PrintScheduler:
         return result.scalar_one_or_none()
 
     async def _farm_slice_waits(self, db: AsyncSession, item: PrintQueueItem) -> bool:
-        """Fork (printfarm): True while the item's farm output is from an older version of its 3MF
-        (the queue shows why); a Klipper G-code is extracted again from a new slice first."""
+        """Fork (printfarm): True when the item must not start now: its farm output is from an older
+        version of its 3MF (it waits, the queue shows why) or never can be (it fails). A Klipper G-code
+        is extracted again from a new slice first."""
         from backend.app.farm.jobs import service as farm_jobs  # imports this module
 
-        reason = await farm_jobs.stale_slice_reason(db, item)
+        try:
+            # Its own session: a failed check can't leave this one, and the rest of the queue check, broken.
+            async with async_session() as check_db:
+                checked = await check_db.get(PrintQueueItem, item.id)
+                reason = await farm_jobs.stale_slice_reason(check_db, checked) if checked else None
+                if checked is not None:
+                    item.library_file_id = checked.library_file_id  # a G-code extracted again
+        except Exception:
+            logger.exception("Queue item %s: slice check failed", item.id)
+            reason = farm_jobs.WAIT_CHECK_FAILED
+        if reason in farm_jobs.FAIL_REASONS:
+            item.status = "failed"
+            item.error_message = reason
+            item.waiting_reason = None
+            item.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.warning("Queue item %s failed: %s", item.id, reason)
+            if item.printer_id:  # as _start_print does for a library file that is gone
+                await self._power_off_if_needed(db, item)
+            return True
         # Only this check's own reason is cleared: "filament_short" and the like stay.
         if item.waiting_reason != reason and (reason or item.waiting_reason in farm_jobs.WAIT_REASONS):
             item.waiting_reason = reason
