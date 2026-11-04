@@ -249,7 +249,8 @@ async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, p
     """Moonraker prints plain G-code: the plate's ``Metadata/plate_N.gcode`` from the sliced 3MF, kept once.
 
     A sliced output replaced by a new slice keeps its row, so the extracted G-code is refreshed in
-    its own row when the output's bytes change: Klipper queue items follow it like Bambu ones.
+    its own row when the output's bytes change (here, and before a queued item starts, see
+    ``stale_slice_reason``): Klipper queue items follow it like Bambu ones.
     The G-code gets the plate's picture and layer info (``klipper_gcode``); the row gets the plate's
     print time, grams and picture, which the queue shows as for a Bambu print.
     """
@@ -328,6 +329,54 @@ async def _local_path(db: AsyncSession, lib_file: LibraryFile) -> Path:
     await ensure_local(db, lib_file)
     path = Path(lib_file.file_path)
     return path if path.is_absolute() else settings.base_dir / lib_file.file_path
+
+
+# Why a queued farm output waits instead of starting (``waiting_reason`` of its queue item).
+WAIT_NEW_SLICE = "3MF changed after queueing: waiting for the new slice"
+WAIT_NO_SOURCE = "The 3MF this was sliced from is missing or unreadable"
+WAIT_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate again"
+WAIT_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
+WAIT_REASONS = (WAIT_NEW_SLICE, WAIT_NO_SOURCE, WAIT_NO_OUTPUT, WAIT_NO_GCODE)
+
+_reslice_asked: dict[tuple[int, str], float] = {}  # (project id, version) -> when a start asked to re-slice it
+
+
+async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | None:
+    """Why a queued farm output may not start: it was sliced from another version of its 3MF.
+
+    A project saved again is re-sliced in place (``farm.reslice``), so the item waits for that
+    (asked again here when it isn't under way). A Klipper G-code extracted from an output sliced
+    again since is extracted again, into its own row. None: it may start, or it isn't a farm output.
+    """
+    lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
+    meta = (lib_file.file_metadata or {}) if lib_file else {}
+    project_id = meta.get("sliced_from_library_file_id")
+    if not meta.get("used_embedded_settings") or project_id is None:
+        return None
+    output = lib_file
+    if (output_id := meta.get("extracted_from_library_file_id")) is not None:
+        output = await db.scalar(LibraryFile.active().where(LibraryFile.id == output_id))
+        if output is None:
+            return WAIT_NO_OUTPUT
+    state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == project_id))
+    if state is None or state.status != "ok":
+        return WAIT_NO_SOURCE
+    if (output.file_metadata or {}).get("sliced_from_sha256") != state.sha256:
+        key = (project_id, state.sha256)
+        if time.monotonic() - _reslice_asked.get(key, -RESLICE_AFTER_SECONDS) >= RESLICE_AFTER_SECONDS:
+            _reslice_asked[key] = time.monotonic()
+            from backend.app.farm import reslice  # imports slicing, which imports this module
+
+            await reslice.schedule(db, [project_id])  # skipped while the scan's re-slice runs
+        return WAIT_NEW_SLICE
+    if output is not lib_file and meta.get("extracted_from_hash") != output.file_hash:
+        gcode = await gcode_for_klipper(db, output, await _local_path(db, output), meta.get("plate") or 1)
+        if gcode is None:
+            return WAIT_NO_GCODE
+        item.library_file_id = gcode.id
+        await db.commit()
+        logger.info("Queue item %d: G-code extracted again from the new slice of %s", item.id, output.filename)
+    return None
 
 
 def _matching_spool(printer: dict, materials: list[str], color_hex: str, tolerance: int) -> dict | None:

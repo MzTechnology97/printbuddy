@@ -326,6 +326,11 @@ class PrintScheduler:
                             )
                             continue
 
+                    # fork (printfarm): a farm output starts only if sliced from the current version of its 3MF
+                    if item.library_file_id and await self._farm_slice_waits(db, item):
+                        busy_printers.add(item.printer_id)  # the printer's next items keep their order
+                        continue
+
                     # Compute AMS mapping if not already set
                     if not item.ams_mapping:
                         computed_mapping = await self._compute_ams_mapping_for_printer(db, item.printer_id, item)
@@ -1860,6 +1865,20 @@ class PrintScheduler:
         """Get printer by ID."""
         result = await db.execute(select(Printer).where(Printer.id == printer_id))
         return result.scalar_one_or_none()
+
+    async def _farm_slice_waits(self, db: AsyncSession, item: PrintQueueItem) -> bool:
+        """Fork (printfarm): True while the item's farm output is from an older version of its 3MF
+        (the queue shows why); a Klipper G-code is extracted again from a new slice first."""
+        from backend.app.farm.jobs import service as farm_jobs  # imports this module
+
+        reason = await farm_jobs.stale_slice_reason(db, item)
+        # Only this check's own reason is cleared: "filament_short" and the like stay.
+        if item.waiting_reason != reason and (reason or item.waiting_reason in farm_jobs.WAIT_REASONS):
+            item.waiting_reason = reason
+            await db.commit()
+            if reason:
+                logger.info("Queue item %s waits: %s", item.id, reason)
+        return reason is not None
 
     async def _block_on_filament_deficit(
         self,

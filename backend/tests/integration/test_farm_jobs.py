@@ -490,3 +490,161 @@ async def test_klipper_gcode_row_has_the_plate_time_grams_and_picture(db_session
     again = await service.gcode_for_klipper(db_session, sliced, src, 2)
     assert again.id == row.id and again.file_metadata["extracted_version"] == 2
     assert await service.gcode_for_klipper(db_session, sliced, src, 2) is again
+
+
+async def _queued_output(db_session, tmp_path, printer_factory, monkeypatch):
+    """A project at version v1, its sliced output and a queue item for it; re-slicing is recorded."""
+    import hashlib
+
+    from backend.app.api.routes import library as lib
+    from backend.app.farm import reslice
+    from backend.app.farm.models import FarmLibraryFile
+
+    monkeypatch.setattr(lib, "get_library_files_dir", lambda: tmp_path)
+    monkeypatch.setattr(service, "_reslice_asked", {})
+    asked = []
+
+    async def fake_schedule(db, project_ids):
+        asked.append(project_ids)
+
+    monkeypatch.setattr(reslice, "schedule", fake_schedule)
+    src = tmp_path / "part.gcode.3mf"
+
+    async def fake_local(db, lib_file):
+        return src
+
+    monkeypatch.setattr(service, "_local_path", fake_local)
+
+    def slice_to(output: LibraryFile, version: str, text: str) -> None:
+        """The slicer writes the output (in place, as a re-slice does) from that project version."""
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("Metadata/plate_1.gcode", text)
+        output.file_hash = hashlib.sha256(src.read_bytes()).hexdigest()
+        output.file_metadata = {
+            "used_embedded_settings": True,
+            "sliced_from_library_file_id": project.id,
+            "sliced_from_sha256": version,
+            "sliced_plate": None,
+        }
+
+    project = LibraryFile(filename="part.3mf", file_path="/nas/part.3mf", file_type="3mf", file_size=1)
+    db_session.add(project)
+    await db_session.flush()
+    state = FarmLibraryFile(watch_folder_id=1, library_file_id=project.id, path="/nas/part.3mf", mtime=1, size=1)
+    state.sha256 = "v1"
+    output = LibraryFile(filename="part.gcode.3mf", file_path=str(src), file_type="gcode", file_size=1)
+    output.source_type = "sliced"
+    slice_to(output, "v1", "; first")
+    printer = await printer_factory(name="Farm", model="A1")
+    db_session.add_all([state, output])
+    await db_session.flush()
+    item = PrintQueueItem(printer_id=printer.id, library_file_id=output.id, position=1, status="pending")
+    db_session.add(item)
+    await db_session.commit()
+    return {"project": project, "state": state, "output": output, "item": item, "asked": asked, "slice_to": slice_to}
+
+
+@pytest.mark.asyncio
+async def test_a_3mf_changed_after_queueing_waits_for_its_new_slice(db_session, tmp_path, printer_factory, monkeypatch):
+    """The owner saved a 3MF again after queueing: the old slice must not reach the printer."""
+    q = await _queued_output(db_session, tmp_path, printer_factory, monkeypatch)
+    item, state, output = q["item"], q["state"], q["output"]
+    assert await service.stale_slice_reason(db_session, item) is None  # sliced from the current version
+
+    state.sha256 = "v2"  # the scan saw the new version
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NEW_SLICE
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NEW_SLICE
+    assert q["asked"] == [[q["project"].id]]  # re-slice asked once, not at every queue check
+
+    q["slice_to"](output, "v2", "; second")  # the re-slice replaced the output in place
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) is None
+
+    state.status = "missing"
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NO_SOURCE
+
+
+@pytest.mark.asyncio
+async def test_klipper_item_gets_the_gcode_of_the_new_slice(db_session, tmp_path, printer_factory, monkeypatch):
+    """A K1 printed the old G-code: re-slicing the output left its extracted .gcode as it was."""
+    from backend.app.api.routes import library as lib
+
+    q = await _queued_output(db_session, tmp_path, printer_factory, monkeypatch)
+    item, state, output = q["item"], q["state"], q["output"]
+    gcode = await service.gcode_for_klipper(db_session, output, tmp_path / "part.gcode.3mf", 1)
+    item.library_file_id = gcode.id
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) is None
+
+    state.sha256 = "v2"  # saved again: the extracted G-code is from v1 and must wait
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_NEW_SLICE
+
+    q["slice_to"](output, "v2", "; second")
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) is None
+    assert item.library_file_id == gcode.id  # same row, new bytes
+    await db_session.refresh(gcode)
+    assert lib.to_absolute_path(gcode.file_path).read_text() == "; second"
+    assert gcode.file_metadata["sliced_from_sha256"] == "v2"
+
+
+@pytest.mark.asyncio
+async def test_files_that_are_not_farm_outputs_start_as_before(db_session, printer_factory):
+    printer = await printer_factory(name="Farm", model="A1")
+    plain = LibraryFile(filename="a.gcode.3mf", file_path="/x/a.gcode.3mf", file_type="3mf", file_size=1)
+    db_session.add(plain)
+    await db_session.flush()
+    item = PrintQueueItem(printer_id=printer.id, library_file_id=plain.id, position=1, status="pending")
+    db_session.add(item)
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) is None
+
+
+@pytest.mark.asyncio
+async def test_queue_shows_why_and_starts_once_the_slice_is_current(db_session, printer_factory, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from backend.app.services.print_scheduler import PrintScheduler
+
+    printer = await printer_factory(name="Farm", model="A1")
+    item = PrintQueueItem(printer_id=printer.id, library_file_id=1, position=1, status="pending")
+    db_session.add(item)
+    await db_session.commit()
+    scheduler = PrintScheduler()
+    reason = AsyncMock(return_value=service.WAIT_NEW_SLICE)
+    monkeypatch.setattr(service, "stale_slice_reason", reason)
+
+    assert await scheduler._farm_slice_waits(db_session, item) is True
+    assert item.waiting_reason == service.WAIT_NEW_SLICE
+    reason.return_value = None
+    assert await scheduler._farm_slice_waits(db_session, item) is False
+    assert item.waiting_reason is None
+    item.waiting_reason = "filament_short"  # another check's reason is left alone
+    assert await scheduler._farm_slice_waits(db_session, item) is False
+    assert item.waiting_reason == "filament_short"
+
+    # In the queue check, a waiting item never reaches the printer.
+    mock_item = MagicMock(
+        id=7, printer_id=1, library_file_id=1, scheduled_time=None, manual_start=False, require_previous_success=False
+    )
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [mock_item]
+    with (
+        patch("backend.app.services.print_scheduler.async_session") as session_ctx,
+        patch("backend.app.services.print_scheduler.printer_manager") as pm,
+        patch.object(scheduler, "_get_bool_setting", AsyncMock(return_value=False)),
+        patch.object(scheduler, "_is_printer_idle", MagicMock(return_value=True)),
+        patch.object(scheduler, "_check_auto_drying", AsyncMock()),
+        patch.object(scheduler, "_farm_slice_waits", AsyncMock(return_value=True)),
+        patch.object(scheduler, "_start_print", AsyncMock()) as start,
+    ):
+        pm.is_connected.return_value = True
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        session_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+        session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+        await scheduler.check_queue()
+    start.assert_not_awaited()
