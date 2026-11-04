@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, ClipboardList, ListPlus, Loader2, RefreshCw, Settings2, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
+import { AlertTriangle, ClipboardList, ImageOff, ListPlus, Loader2, RefreshCw, Settings2, X } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
@@ -55,6 +56,62 @@ export function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
   );
 }
 
+/** The plate's picture (its slice's, else the 3MF's); a click shows it large, a missing one a placeholder. */
+function PlatePreview({ plate }: { plate: FarmPlanPlate }) {
+  const { t } = useTranslation();
+  const [big, setBig] = useState(false);
+  const label = `${t('farm.plan.platePreview')} ${t('farm.plates.plate', { index: plate.plate })}`;
+  const src = farmApi.plateImageUrl(plate.plate_id);
+  // Keyed by URL: another plate in the same row gets its own try.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) {
+    return (
+      <div role="img" aria-label={`${label}: ${t('farm.plan.noPreview')}`} title={t('farm.plan.noPreview')}
+        className="w-20 h-20 shrink-0 rounded bg-bambu-dark-secondary flex items-center justify-center">
+        <ImageOff className="w-6 h-6 text-bambu-gray" />
+      </div>
+    );
+  }
+  return (
+    <>
+      <button type="button" aria-label={label} title={label} onClick={() => setBig(true)}
+        className="w-20 h-20 shrink-0 rounded bg-bambu-dark-secondary hover:ring-2 hover:ring-bambu-green">
+        <img src={src} alt="" loading="lazy" className="w-full h-full object-contain rounded" onError={() => setFailedSrc(src)} />
+      </button>
+      {big && (
+        <div role="dialog" aria-label={label} onClick={() => setBig(false)}
+          onKeyDown={(e) => e.key === 'Escape' && setBig(false)}
+          className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4">
+          <button type="button" autoFocus aria-label={t('farm.products.cancel')}
+            className="absolute top-4 right-4 p-1 rounded hover:bg-bambu-dark">
+            <X className="w-6 h-6 text-white" />
+          </button>
+          <img src={src} alt={label} className="w-full max-w-xl max-h-full object-contain rounded bg-bambu-dark" />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Slicer weight when known, else the solid-piece upper bound. */
+function Grams({ plate }: { plate: FarmPlanPlate }) {
+  const { t } = useTranslation();
+  const text = gramsText(plate, t);
+  if (!text) return null;
+  return (
+    <span className="text-xs text-white" title={plate.filament_grams ? undefined : t('farm.plan.gramsMaxHint')}>
+      {' · '}{text}
+    </span>
+  );
+}
+
+const gramsText = (plate: FarmPlanPlate, t: TFunction) =>
+  plate.filament_grams
+    ? `${Math.round(plate.filament_grams)} g`
+    : plate.filament_grams_max
+      ? t('farm.plan.gramsMax', { grams: Math.round(plate.filament_grams_max) })
+      : null;
+
 function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean }) {
   const { t } = useTranslation();
   const facts = [
@@ -62,22 +119,25 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
     plate.material,
     t('farm.plan.yield', { count: plate.yield }),
     duration(plate.print_time_seconds),
-    plate.filament_grams ? `${Math.round(plate.filament_grams)} g` : null,
   ].filter(Boolean);
   return (
-    <li className={`rounded-lg p-2 space-y-1 ${proposed ? 'bg-bambu-green/10 border border-bambu-green/40' : 'bg-bambu-dark'}`}>
-      <p className="text-sm text-white break-all">
-        {proposed && <span className="text-xs text-bambu-green mr-2">{t('farm.plan.proposed')}</span>}
-        {fileName(plate.file)} · {t('farm.plates.plate', { index: plate.plate })}
-        <span className="text-xs text-bambu-gray"> · {facts.join(' · ')}</span>
-        {!plate.sliced && <span className="text-xs text-amber-400"> · {t('farm.plan.notSliced')}</span>}
-      </p>
-      <div className="flex flex-wrap gap-1">
-        {plate.printers.length ? (
-          plate.printers.map((p) => <PrinterChip key={p.id} p={p} />)
-        ) : (
-          <span className="text-xs text-bambu-gray">{t('farm.plan.noPrinter', { model: plate.printer_model })}</span>
-        )}
+    <li className={`rounded-lg p-2 flex gap-3 ${proposed ? 'bg-bambu-green/10 border border-bambu-green/40' : 'bg-bambu-dark'}`}>
+      <PlatePreview plate={plate} />
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="text-sm text-white break-all">
+          {proposed && <span className="text-xs text-bambu-green mr-2">{t('farm.plan.proposed')}</span>}
+          {fileName(plate.file)} · {t('farm.plates.plate', { index: plate.plate })}
+          <span className="text-xs text-bambu-gray"> · {facts.join(' · ')}</span>
+          <Grams plate={plate} />
+          {!plate.sliced && <span className="text-xs text-amber-400"> · {t('farm.plan.notSliced')}</span>}
+        </p>
+        <div className="flex flex-wrap gap-1">
+          {plate.printers.length ? (
+            plate.printers.map((p) => <PrinterChip key={p.id} p={p} />)
+          ) : (
+            <span className="text-xs text-bambu-gray">{t('farm.plan.noPrinter', { model: plate.printer_model })}</span>
+          )}
+        </div>
       </div>
     </li>
   );
@@ -420,12 +480,16 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
                           resetSlots(c.code);
                         }}>
                         <option value="">{t('farm.jobs.anyPlate')}</option>
-                        {platesFor(c).map((p) => (
-                          <option key={p.plate_id} value={p.plate_id}>
-                            {fileName(p.file)} · {t('farm.plates.plate', { index: p.plate })} · {p.printer_model} · {p.material}
-                            {' · '}{t('farm.plan.yield', { count: p.yield })}
-                          </option>
-                        ))}
+                        {platesFor(c).map((p) => {
+                          const grams = gramsText(p, t);
+                          return (
+                            <option key={p.plate_id} value={p.plate_id}>
+                              {fileName(p.file)} · {t('farm.plates.plate', { index: p.plate })} · {p.printer_model} · {p.material}
+                              {' · '}{t('farm.plan.yield', { count: p.yield })}
+                              {grams ? ` · ${grams}` : ''}
+                            </option>
+                          );
+                        })}
                       </select>
                     </label>
                     {chosen[c.code] && plate ? (

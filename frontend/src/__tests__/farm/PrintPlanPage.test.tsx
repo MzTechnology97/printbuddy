@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
@@ -47,7 +47,11 @@ const plan = {
       products: [{ project_id: 65, name: 'Tartufo – Marrone', has_cover: true }],
       plates: [
         plate(1, 'A1', 2, true, [{ id: 1, name: 'A1 uno', idle: true, material_ok: true, color_ok: true }]),
-        plate(2, 'P1S', 1, false, [{ id: 3, name: 'P1S', idle: true, material_ok: true, color_ok: false }]),
+        {
+          ...plate(2, 'P1S', 1, false, [{ id: 3, name: 'P1S', idle: true, material_ok: true, color_ok: false }]),
+          filament_grams: null,
+          filament_grams_max: 412.4,
+        },
       ],
     },
     {
@@ -147,6 +151,25 @@ describe('PrintPlanPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
     expect(createdJobs).toBeUndefined();
     expect(within(dialog).getByText(/One print: 15 pieces with the proposed plate \(30 missing\)/)).toBeInTheDocument();
+    // Each plate shows its picture and its filament: the slicer's weight, else the solid upper bound.
+    const previews = within(dialog).getAllByRole('button', { name: 'Plate preview Plate 1' });
+    expect(previews.map((b) => b.querySelector('img')!.getAttribute('src'))).toEqual([
+      expect.stringContaining('/api/v1/farm/plates/1/image'),
+      expect.stringContaining('/api/v1/farm/plates/2/image'),
+    ]);
+    expect(within(dialog).getByText('· 150 g')).toBeInTheDocument();
+    expect(within(dialog).getByText('· max 412 g')).toHaveAttribute('title', expect.stringMatching(/counted solid/));
+    // A click shows it large; a missing picture leaves a placeholder.
+    await user.click(previews[0]);
+    const big = screen.getByRole('dialog', { name: 'Plate preview Plate 1' });
+    expect(within(big).getByRole('img', { name: 'Plate preview Plate 1' })).toHaveAttribute(
+      'src',
+      expect.stringContaining('/farm/plates/1/image'),
+    );
+    await user.click(within(big).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Plate preview Plate 1' })).not.toBeInTheDocument();
+    fireEvent.error(previews[1].querySelector('img')!);
+    expect(within(dialog).getByRole('img', { name: 'Plate preview Plate 1: No preview' })).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1, 2] }] }));
 
