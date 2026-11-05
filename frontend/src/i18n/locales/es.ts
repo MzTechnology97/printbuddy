@@ -4846,6 +4846,8 @@ export default {
     farmSlicingFailedDescription: 'El laminado en segundo plano o el re-laminado automático falló',
     farmFileCorrupt: 'Archivo de la granja dañado',
     farmFileCorruptDescription: 'Un archivo de impresión de la carpeta de la granja o del NAS está dañado',
+    farmLibraryProblem: 'Problema de la biblioteca',
+    farmLibraryProblemDescription: 'Un 3MF guardado en la biblioteca no funcionará (laminado, perfil, modelo de impresora, placa vacía)',
     farmPlateToClear: 'Placa por liberar',
     farmPlateToClearDescription: 'Una impresora terminó y el trabajo de la granja espera su placa',
     farmComponentUrgent: 'Componente urgente bloqueado',

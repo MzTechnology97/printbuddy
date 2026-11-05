@@ -79,6 +79,7 @@ class NotificationProviderBase(BaseModel):
     # Event triggers - Print farm
     on_farm_slicing_failed: bool = Field(default=False, description="Notify when a farm slice or re-slice fails")
     on_farm_file_corrupt: bool = Field(default=False, description="Notify when a farm/NAS print file is not intact")
+    on_farm_library_problem: bool = Field(default=False, description="Notify when a saved 3MF will not work")
     on_farm_plate_to_clear: bool = Field(default=False, description="Notify when farm work waits for a plate clear")
     on_farm_component_urgent: bool = Field(
         default=False, description="Notify when an urgent component has no free printer with its material loaded"
@@ -176,6 +177,7 @@ class NotificationProviderUpdate(BaseModel):
     # Event triggers - Print farm
     on_farm_slicing_failed: bool | None = None
     on_farm_file_corrupt: bool | None = None
+    on_farm_library_problem: bool | None = None
     on_farm_plate_to_clear: bool | None = None
     on_farm_component_urgent: bool | None = None
     on_farm_batch_to_assign: bool | None = None

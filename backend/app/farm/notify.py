@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 SLICING_FAILED = "farm_slicing_failed"
 FILE_CORRUPT = "farm_file_corrupt"
+LIBRARY_PROBLEM = "farm_library_problem"
 PLATE_TO_CLEAR = "farm_plate_to_clear"
 COMPONENT_URGENT = "farm_component_urgent"
 BATCH_TO_ASSIGN = "farm_batch_to_assign"

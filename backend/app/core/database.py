@@ -2613,6 +2613,7 @@ async def run_migrations(conn):
     for column in (
         "on_farm_slicing_failed",
         "on_farm_file_corrupt",
+        "on_farm_library_problem",
         "on_farm_plate_to_clear",
         "on_farm_component_urgent",
         "on_farm_batch_to_assign",

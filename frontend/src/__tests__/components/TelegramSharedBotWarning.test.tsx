@@ -52,6 +52,7 @@ function telegramProvider(overrides: Partial<NotificationProvider> = {}): Notifi
     on_stock_break_alert: false,
     on_farm_slicing_failed: false,
     on_farm_file_corrupt: false,
+    on_farm_library_problem: false,
     on_farm_plate_to_clear: false,
     on_farm_component_urgent: false,
     on_farm_batch_to_assign: false,

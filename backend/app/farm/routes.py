@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
+from backend.app.farm import library_problems  # its tables are created at start-up
 from backend.app.farm.library_sync import sync_external_folder
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
 from backend.app.farm.nas.routes import router as nas_router
@@ -279,6 +280,12 @@ async def put_sd_files(body: SdFilesIn, db: AsyncSession = Depends(get_db)) -> d
     bambu = {p["id"] for p in (await _sd_files(db))["printers"]}
     await printer_files.save_settings(db, body.keep_days, set(body.keep_printer_ids) & bambu)
     return await _sd_files(db)
+
+
+@router.get("/library-problems", dependencies=[_read])
+async def get_library_problems(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """3MFs of the library that will not work, by file and plate (gone once the file is fixed)."""
+    return await library_problems.list_problems(db)
 
 
 class AutoSpoolsIn(BaseModel):

@@ -209,6 +209,12 @@ DEFAULT_TEMPLATES = [
         "body_template": "{path}\n{reason}\nNon si stampa finché non viene salvato di nuovo.",
     },
     {
+        "event_type": "farm_library_problem",
+        "name": "Farm Library Problem",
+        "title_template": "Da sistemare nella libreria: {filename}",
+        "body_template": "{problems}",
+    },
+    {
         "event_type": "farm_plate_to_clear",
         "name": "Farm Plate To Clear",
         "title_template": "Piatto da liberare: {printer}",

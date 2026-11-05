@@ -208,6 +208,27 @@ describe('PrintPlanPage', () => {
     );
   });
 
+  it('shows the library problems by file, each plate with its problem', async () => {
+    server.use(
+      http.get('/api/v1/farm/library-problems', () =>
+        HttpResponse.json([
+          { id: 1, library_file_id: 16, filename: 'Maniglia.3mf', plate: 1, code: 'slice_failed',
+            message: 'slicing failed: paths of different objects overlap on the plate', since: '2026-11-05T18:51:00Z' },
+          { id: 2, library_file_id: 16, filename: 'Maniglia.3mf', plate: null, code: 'printer_model',
+            message: 'printer model X9 has no printer in the farm', since: '2026-11-05T18:52:00Z' },
+        ]),
+      ),
+    );
+    render(<PrintPlanPage />);
+    const box = (await screen.findByText('Library problems')).closest('section')!;
+    expect(within(box).getAllByText('Maniglia.3mf')).toHaveLength(1); // one entry per file
+    expect(within(box).getByText(/Plate 1: slicing failed: paths of different objects overlap/)).toBeInTheDocument();
+    expect(within(box).getByText(/printer model X9 has no printer in the farm/)).toBeInTheDocument();
+    expect(within(box).getByRole('link', { name: 'Open the plates in Products' })).toHaveAttribute(
+      'href', '/farm/products?tab=plates',
+    );
+  });
+
   it('sums up the jobs under way and sends to the queue for the rest', async () => {
     server.use(
       http.get('/api/v1/farm/board', () =>

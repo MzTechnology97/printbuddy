@@ -91,6 +91,7 @@ EVENT_VARIABLES: dict[str, list[str]] = {
     # Print farm notifications
     "farm_slicing_failed": ["filename", "plate", "color", "source", "reason", "timestamp", "app_name"],
     "farm_file_corrupt": ["filename", "path", "reason", "timestamp", "app_name"],
+    "farm_library_problem": ["filename", "problems", "timestamp", "app_name"],
     "farm_plate_to_clear": ["printer", "waiting", "timestamp", "app_name"],
     "farm_component_urgent": [
         "component",
@@ -290,6 +291,12 @@ SAMPLE_DATA: dict[str, dict[str, str]] = {
         "color": "Nero",
         "source": "Re-slice automatico",
         "reason": "Slicer sidecar did not answer",
+        "timestamp": "2024-01-15 14:30",
+        "app_name": "Printbuddy",
+    },
+    "farm_library_problem": {
+        "filename": "Maniglia.3mf",
+        "problems": "plate 1: slicing failed: paths of different objects overlap on the plate",
         "timestamp": "2024-01-15 14:30",
         "app_name": "Printbuddy",
     },

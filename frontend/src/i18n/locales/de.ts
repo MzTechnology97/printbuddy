@@ -4838,6 +4838,8 @@ export default {
     farmSlicingFailedDescription: 'Slicing im Hintergrund oder automatisches Re-Slicing fehlgeschlagen',
     farmFileCorrupt: 'Farm-Datei beschädigt',
     farmFileCorruptDescription: 'Eine Druckdatei im Farm- oder NAS-Ordner ist beschädigt',
+    farmLibraryProblem: 'Bibliotheksproblem',
+    farmLibraryProblemDescription: 'Eine in der Bibliothek gespeicherte 3MF-Datei wird nicht funktionieren (Slicing, Profil, Druckermodell, leere Platte)',
     farmPlateToClear: 'Druckplatte räumen',
     farmPlateToClearDescription: 'Ein Drucker ist fertig und Farm-Aufträge warten auf seine Platte',
     farmComponentUrgent: 'Dringendes Bauteil blockiert',

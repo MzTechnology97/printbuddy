@@ -4827,6 +4827,8 @@ export default {
     farmSlicingFailedDescription: 'O fatiamento em segundo plano ou o refatiamento automático falhou',
     farmFileCorrupt: 'Arquivo da fazenda danificado',
     farmFileCorruptDescription: 'Um arquivo de impressão na pasta da fazenda ou do NAS está danificado',
+    farmLibraryProblem: 'Problema da biblioteca',
+    farmLibraryProblemDescription: 'Um 3MF salvo na biblioteca não vai funcionar (fatiamento, perfil, modelo de impressora, placa vazia)',
     farmPlateToClear: 'Mesa a liberar',
     farmPlateToClearDescription: 'Uma impressora terminou e o trabalho da fazenda aguarda a mesa',
     farmComponentUrgent: 'Componente urgente bloqueado',
