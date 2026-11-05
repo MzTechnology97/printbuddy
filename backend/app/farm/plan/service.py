@@ -267,15 +267,15 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
     files = await component_files(db)
     plates = await candidate_plates(db, list(ours.values()), files)
     own = await product_shapes(db, {c.project_id for c in ours.values() if c.project_id is not None})
-    paths = dict(
-        (
+    states = {
+        s.library_file_id: s
+        for s in (
             await db.execute(
-                select(FarmLibraryFile.library_file_id, FarmLibraryFile.path).where(
-                    FarmLibraryFile.library_file_id.in_({p.library_file_id for p in plates})
-                )
+                select(FarmLibraryFile).where(FarmLibraryFile.library_file_id.in_({p.library_file_id for p in plates}))
             )
-        ).all()
-    )
+        ).scalars()
+    }
+    paths = {fid: s.path for fid, s in states.items()}
     shape_names = dict((await db.execute(select(FarmShape.id, FarmShape.name))).all())
     # The products using each component, colour variants included (a variant takes the component of each
     # shaped part in its colour): their names and covers help tell the piece apart from its title.
@@ -329,6 +329,8 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
                     "filament_grams": plate.filament_grams,
                     "filament_grams_max": None if plate.filament_grams else solid_grams(plate),
                     "sliced": plate.sliced_file_id is not None,
+                    "sliced_file_id": plate.sliced_file_id,  # its G-code, for the 3D view
+                    "slicer": states[plate.library_file_id].slicer if plate.library_file_id in states else None,
                     "printers": fits,
                     "score": 2 if ready else 1 if free else 0,
                 }

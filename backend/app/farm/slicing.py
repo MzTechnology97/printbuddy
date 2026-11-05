@@ -158,6 +158,7 @@ async def slice_embedded(
     plate: int | None,
     job_id: int | None = None,
     colour: str | None = None,
+    from_nas: bool = False,
 ) -> SliceResponse:
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source.
 
@@ -166,7 +167,11 @@ async def slice_embedded(
     (see ``variants``); otherwise this is the plain output.
     """
     slicer = resolve_slicer(state)
-    await ensure_local(db, lib_file)  # NAS projects are fetched into the cache now, on use
+    # NAS projects are fetched into the cache now, on use; a forced slice reads the NAS again
+    fetched = await ensure_local(db, lib_file, fresh=from_nas)
+    if from_nas and lib_file.is_external and not fetched:
+        # never the copy in the cache: it may be the very version the new slice is forced to replace
+        raise HTTPException(status_code=503, detail="NAS not reachable: the 3MF was not read again, nothing sliced")
     src = library_path(lib_file.file_path)
     raw = await asyncio.to_thread(src.read_bytes)
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
@@ -361,7 +366,7 @@ async def variant_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -
     return found
 
 
-async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None) -> bool:
+async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None, from_nas: bool = False) -> bool:
     """``ask_slicing`` for the component's colour: a missing colour fails the slice job with its reason.
 
     True when a slice was queued now (False: asked a short while ago, or the 3MF is gone).
@@ -369,8 +374,9 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
     from backend.app.farm.jobs import service as jobs
     from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
 
+    from_nas = from_nas or _queue_key(plate.library_file_id, plate.plate_index, color) in _from_nas
     if not colour_key(color):
-        return await jobs.ask_slicing(db, plate)
+        return await jobs.ask_slicing(db, plate, from_nas=from_nas)
     key = (plate.library_file_id, plate.plate_index, colour_key(color))
     if time.monotonic() - _variant_asked.get(key, -jobs.RESLICE_AFTER_SECONDS) < jobs.RESLICE_AFTER_SECONDS:
         return False
@@ -386,7 +392,13 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
             state = await task_db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == key[0]))
             try:
                 response = await slice_embedded(
-                    task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id, colour=color
+                    task_db,
+                    lib_file=task_file,
+                    state=state,
+                    plate=key[1],
+                    job_id=job_id,
+                    colour=color,
+                    from_nas=from_nas,
                 )
             except Exception as exc:
                 queue_slice_ended(key[0], name, key[1], color, state.slicer if state else None, exc)
@@ -397,6 +409,8 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
         return response.model_dump()
 
     task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    if getattr(task, "id", None):
+        _slice_jobs[_queue_key(key[0], key[1], color)] = task.id
     from backend.app.farm import job_events
 
     job_events.record(
@@ -454,6 +468,57 @@ def _queue_key(file_id: int, plate: int | None, colour: str | None) -> tuple[int
     return (file_id, plate_key(plate), colour_key(colour))
 
 
+_slice_jobs: dict[tuple[int, int, str | None], int] = {}  # queue key -> the slice_dispatch job of its last slice
+# forced slices (queue keys): read from the NAS again, retries included, until one succeeds
+_from_nas: set[tuple[int, int, str | None]] = set()
+
+
+def slice_progress(file_id: int, plate: int | None, colour: str | None) -> dict | None:
+    """How far the slicer is with this plate's queue slice (``slice_dispatch`` progress), while it runs."""
+    from backend.app.services.slice_dispatch import slice_dispatch
+
+    job_id = _slice_jobs.get(_queue_key(file_id, plate, colour))
+    job = slice_dispatch.get(job_id) if job_id else None
+    if job is None or job.status != "running":
+        return None
+    snap = job.progress or {}
+    pct = snap.get("total_percent", snap.get("plate_percent"))
+    try:
+        percent = max(0, min(100, round(float(pct)))) if pct is not None else None
+    except (TypeError, ValueError):
+        percent = None
+    return {"percent": percent, "stage": snap.get("stage")}
+
+
+async def force_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -> bool:
+    """Slice the plate again from the 3MF read fresh from the NAS, even when a slice exists.
+
+    The current slice is marked superseded at once: jobs of this plate wait for the new one and are never
+    placed with the old one meanwhile. True when the slice was asked now.
+    """
+    key = _queue_key(plate.library_file_id, plate.plate_index, color)
+    _failed.pop(key, None)
+    _forget_asked(key)
+    current = await variant_slice(db, plate, color)
+    if current is not None:
+        current.file_metadata = {
+            **(current.file_metadata or {}),
+            "superseded_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        }
+        await db.commit()
+    _from_nas.add(key)
+    if await ask_variant_slicing(db, plate, color, from_nas=True):
+        return True
+    # not asked: the 3MF is gone from the library. The job's note says so, it doesn't just wait.
+    _failed[key] = {
+        "reason": "the 3MF is no longer in the library",
+        "slicer": None,
+        "kind": "error",
+        "at": time.monotonic(),
+    }
+    return False
+
+
 def queue_slice_ended(
     file_id: int, filename: str, plate: int | None, colour: str | None, slicer: str | None, error=None
 ) -> None:
@@ -471,6 +536,7 @@ def queue_slice_ended(
     name = SLICER_NAMES.get(slicer, slicer or "an unknown slicer")
     if error is None:
         _failed.pop(key, None)
+        _from_nas.discard(key)
         job_events.record(
             "slice_done",
             f"Sliced with {name}: {where}",

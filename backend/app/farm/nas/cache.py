@@ -94,9 +94,12 @@ def evict(root: Path, limit_bytes: int) -> int:
     return freed
 
 
-async def ensure_local(db: AsyncSession, lib_file: LibraryFile) -> bool:
+async def ensure_local(db: AsyncSession, lib_file: LibraryFile, *, fresh: bool = False) -> bool:
     """Make sure a NAS file is in the cache. False when it isn't a NAS file or can't be fetched
-    (the caller then reports the file as not found, as it would anyway)."""
+    (the caller then reports the file as not found, as it would anyway).
+
+    ``fresh``: download it again from the NAS even when the cached copy looks current (a forced slice).
+    """
     try:
         active = await service.refresh_access(db)
         parts = active.parts(lib_file.file_path) if active else None
@@ -107,7 +110,7 @@ async def ensure_local(db: AsyncSession, lib_file: LibraryFile) -> bool:
             return False  # gone from the NAS or corrupt
         path = access.library_path(lib_file.file_path)
         async with _locks[str(path)]:
-            if not await asyncio.to_thread(_fresh, path, state.size, state.mtime):
+            if fresh or not await asyncio.to_thread(_fresh, path, state.size, state.mtime):
                 await access.run(_download, active, parts, path, state.mtime)
         cfg = await service.load(db)
         await asyncio.to_thread(evict, active.cache_root, cfg.cache_mb * 1024 * 1024)

@@ -76,7 +76,7 @@ CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
 RESLICE_AFTER_SECONDS = 30 * 60  # a failed slice is tried again after this
 ACTIVE_QUEUE = ("pending", "printing")
 EXTRACTED_VERSION = 2  # 2: with the plate's preview and layer info; older extractions are redone
-QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection")
+QUEUE_FLAGS = ("manual_start", "require_previous_success", "auto_off_after", "gcode_injection", "ignore_spool")
 USED_COLORS_KEY = "farm_used_colors"  # in a print's archive extra_data: {colour: samples taken while printing}
 SURE_SAMPLES = 10  # a colour picks between components only after 5 minutes of samples...
 SURE_SHARE = 0.9  # ...nearly all of them that colour
@@ -98,7 +98,7 @@ async def sliced_file(db: AsyncSession, plate: FarmPlate) -> LibraryFile | None:
     return (await _latest_slices(db, lib_file, state.sha256)).get(plate.plate_index)
 
 
-async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
+async def ask_slicing(db: AsyncSession, plate: FarmPlate, from_nas: bool = False) -> bool:
     """Slice the plate on its slicer's sidecar in the background (once; again after a while if it failed).
 
     True when a slice was queued now.
@@ -107,7 +107,7 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
     if time.monotonic() - _slicing.get(key, -RESLICE_AFTER_SECONDS) < RESLICE_AFTER_SECONDS:
         return False
     _slicing[key] = time.monotonic()
-    from backend.app.farm.slicing import queue_slice_ended, slice_embedded
+    from backend.app.farm.slicing import _queue_key, _slice_jobs, queue_slice_ended, slice_embedded
     from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
 
     lib_file = await db.get(LibraryFile, plate.library_file_id)
@@ -120,7 +120,9 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
             task_file = await task_db.get(LibraryFile, key[0])
             state = await task_db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == key[0]))
             try:
-                response = await slice_embedded(task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id)
+                response = await slice_embedded(
+                    task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id, from_nas=from_nas
+                )
             except Exception as exc:
                 queue_slice_ended(key[0], name, key[1], None, state.slicer if state else None, exc)
                 if isinstance(exc, HTTPException):
@@ -130,6 +132,8 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
         return response.model_dump()
 
     task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    if getattr(task, "id", None):  # its % on the queue board
+        _slice_jobs[_queue_key(key[0], key[1], None)] = task.id
     job_events.record(
         "slice_requested",
         f"Slice asked: {name}, plate {key[1]}",
@@ -189,6 +193,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
     files = await component_files(db)
     own = await product_shapes(db)
     jobs = []
+    forced: set[tuple[int, str | None]] = set()  # (plate, colour) sliced again once, whatever jobs share it
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
         if comp is None or comp.retired_at is not None:
@@ -224,7 +229,14 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
         db.add(job)
         jobs.append(job)
         for plate in plates:
-            if await variant_file(db, plate, comp.color) is None:
+            if req.get("force_slice"):  # asked in Accoda: a new slice from the 3MF on the NAS, never the old one
+                from backend.app.farm.slicing import colour_key, force_slice
+
+                if (plate.id, colour_key(comp.color)) not in forced:
+                    forced.add((plate.id, colour_key(comp.color)))
+                    if not await force_slice(db, plate, comp.color):
+                        job.note = f"plate {plate.plate_index}: the 3MF is no longer in the library, no new slice"
+            elif await variant_file(db, plate, comp.color) is None:
                 await ask_variant(db, plate, comp.color)
     await db.commit()
     for job in jobs:
@@ -987,7 +999,10 @@ async def dispatch_once(db: AsyncSession) -> int:
                             auto = _slot_mapping(slots, _loaded_trays(printer["id"]), color_hex, config["tolerance"])
                         else:  # no slice_info, or a spool set by hand on a Klipper: the colour check only
                             spool = _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
-                    fits = bool(mapped or auto or spool)
+                    loaded = bool(mapped or auto or spool)
+                    # ignore_spool (asked in Accoda for a chosen printer): sent and started like a fitting one
+                    overridden = not loaded and bool(options.get("ignore_spool") and job.printer_id)
+                    fits = loaded or overridden
                     if not fits and not unreadable and strict:
                         used = sorted({f.get("type") for f in slots if f.get("type")}) or plate.materials or []
                         reasons.append(f"{printer['name']}: no {job.color} {'+'.join(used)} loaded")
@@ -1044,7 +1059,15 @@ async def dispatch_once(db: AsyncSession) -> int:
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp, own)
                     # What this item prints: checked again before it starts.
                     job.queued_as = {"objects": _plate_objects(plate), "file_hash": file_hash}
-                    job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
+                    if overridden:  # the queue says the colour was not checked
+                        job.note = (
+                            f"Sent to {printer['name']} without the spool check (Accoda): "
+                            "material and colour not checked"
+                        )[:255]
+                    else:
+                        job.note = (
+                            None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
+                        )
                     busy.add(printer["id"])
                     created += 1
                     placed = True

@@ -10,6 +10,8 @@ import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { useAuth } from '../contexts/AuthContext';
 import { ScheduleOptionsPanel } from '../components/PrintModal/ScheduleOptions';
+import { ConfirmModal } from '../components/ConfirmModal';
+import { ModelViewerModal } from '../components/ModelViewerModal';
 import { DEFAULT_SCHEDULE_OPTIONS, type ScheduleOptions } from '../components/PrintModal/types';
 import {
   farmApi,
@@ -19,7 +21,7 @@ import {
   type FarmPrinterSpool,
   type FarmSdFiles,
 } from './api';
-import { BoardSummary } from './JobsBoard';
+import { BoardSummary, SlicerBadge } from './JobsBoard';
 import { PlateThumb } from './PlatesPanel';
 import { PrinterSlots } from './PrinterSlots';
 import { kitUnits, suggestPrints } from './suggest';
@@ -35,6 +37,42 @@ const STATUS_STYLE: Record<string, string> = {
 
 const duration = (s: number | null) => (s ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : null);
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+// What the plates of one component can be narrowed by, when they differ: their 3MF, its material, its slicer.
+type PlateFilter = 'file' | 'material' | 'slicer';
+type PlateFilters = Partial<Record<PlateFilter, string>>;
+const PLATE_FILTERS: PlateFilter[] = ['file', 'material', 'slicer'];
+const SLICER_NAMES: Record<string, string> = { orcaslicer: 'OrcaSlicer', bambu_studio: 'Bambu Studio' };
+const filterValue = (p: FarmPlanPlate, k: PlateFilter) => (k === 'file' ? p.file : k === 'material' ? p.material : p.slicer || '');
+const filterLabel = (k: PlateFilter, v: string) => (k === 'file' ? fileName(v) : k === 'slicer' ? SLICER_NAMES[v] ?? v : v);
+const matches = (p: FarmPlanPlate, f: PlateFilters, except?: PlateFilter) =>
+  PLATE_FILTERS.every((k) => k === except || !f[k] || filterValue(p, k) === f[k]);
+
+/** One select per way the plates differ (each lists only what the other filters leave: never an empty list). */
+function PlateFilterBar({ plates, value, onChange }: {
+  plates: FarmPlanPlate[];
+  value: PlateFilters;
+  onChange: (f: PlateFilters) => void;
+}) {
+  const { t } = useTranslation();
+  const bars = PLATE_FILTERS.map((k) => ({
+    k,
+    options: [...new Set(plates.filter((p) => matches(p, value, k)).map((p) => filterValue(p, k)).filter(Boolean))],
+  })).filter(({ k, options }) => options.length > 1 || value[k]);
+  if (!bars.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm text-white">
+      <span className="text-xs text-bambu-gray">{t('farm.jobs.filterPlates')}</span>
+      {bars.map(({ k, options }) => (
+        <select key={k} aria-label={t(`farm.jobs.filter.${k}`)} className={`${INPUT} py-1 max-w-full`}
+          value={value[k] || ''} onChange={(e) => onChange({ ...value, [k]: e.target.value || undefined })}>
+          <option value="">{t(`farm.jobs.filterAll.${k}`)}</option>
+          {options.map((v) => <option key={v} value={v}>{filterLabel(k, v)}</option>)}
+        </select>
+      ))}
+    </div>
+  );
+}
 
 export function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
   const { t } = useTranslation();
@@ -57,37 +95,34 @@ export function PrinterChip({ p }: { p: FarmPlanPlate['printers'][number] }) {
 }
 
 /** The plate's picture (its slice's, else the 3MF's); a click shows it large, a missing one a placeholder. */
+/** The plate's picture; a click opens it in 3D: its G-code when sliced, else the 3MF on that plate. */
 function PlatePreview({ plate }: { plate: FarmPlanPlate }) {
   const { t } = useTranslation();
-  const [big, setBig] = useState(false);
-  const label = `${t('farm.plan.platePreview')} ${t('farm.plates.plate', { index: plate.plate })}`;
+  const [open, setOpen] = useState(false);
+  const plateName = t('farm.plates.plate', { index: plate.plate });
+  const label = `${t(plate.sliced_file_id ? 'farm.plan.viewGcode' : 'farm.plan.view3d')} · ${plateName}`;
   const src = farmApi.plateImageUrl(plate.plate_id);
   // Keyed by URL: another plate in the same row gets its own try.
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  if (failedSrc === src) {
-    return (
-      <div role="img" aria-label={`${label}: ${t('farm.plan.noPreview')}`} title={t('farm.plan.noPreview')}
-        className="w-20 h-20 shrink-0 rounded bg-bambu-dark-secondary flex items-center justify-center">
-        <ImageOff className="w-6 h-6 text-bambu-gray" />
-      </div>
-    );
-  }
   return (
     <>
-      <button type="button" aria-label={label} title={label} onClick={() => setBig(true)}
-        className="w-20 h-20 shrink-0 rounded bg-bambu-dark-secondary hover:ring-2 hover:ring-bambu-green">
-        <img src={src} alt="" loading="lazy" className="w-full h-full object-contain rounded" onError={() => setFailedSrc(src)} />
+      <button type="button" aria-label={label} title={label} onClick={() => setOpen(true)}
+        className="w-20 h-20 shrink-0 rounded bg-bambu-dark-secondary hover:ring-2 hover:ring-bambu-green flex items-center justify-center">
+        {failedSrc === src ? (
+          <ImageOff className="w-6 h-6 text-bambu-gray" aria-label={t('farm.plan.noPreview')} />
+        ) : (
+          <img src={src} alt="" loading="lazy" className="w-full h-full object-contain rounded" onError={() => setFailedSrc(src)} />
+        )}
       </button>
-      {big && (
-        <div role="dialog" aria-label={label} onClick={() => setBig(false)}
-          onKeyDown={(e) => e.key === 'Escape' && setBig(false)}
-          className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4">
-          <button type="button" autoFocus aria-label={t('farm.products.cancel')}
-            className="absolute top-4 right-4 p-1 rounded hover:bg-bambu-dark">
-            <X className="w-6 h-6 text-white" />
-          </button>
-          <img src={src} alt={label} className="w-full max-w-xl max-h-full object-contain rounded bg-bambu-dark" />
-        </div>
+      {open && (
+        <ModelViewerModal
+          libraryFileId={plate.sliced_file_id ?? plate.library_file_id}
+          fileType="3mf"
+          title={`${fileName(plate.file)} · ${plateName}`}
+          initialTab={plate.sliced_file_id ? 'gcode' : '3d'}
+          initialPlate={plate.sliced_file_id ? undefined : plate.plate}
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   );
@@ -112,7 +147,13 @@ const gramsText = (plate: FarmPlanPlate, t: TFunction) =>
       ? t('farm.plan.gramsMax', { grams: Math.round(plate.filament_grams_max) })
       : null;
 
-function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean }) {
+/** A plate with its picture (3D on click) and its printers. With ``onPick`` the row's text picks it. */
+function PlateRow({ plate, proposed, picked = false, onPick }: {
+  plate: FarmPlanPlate;
+  proposed: boolean;
+  picked?: boolean;
+  onPick?: () => void;
+}) {
   const { t } = useTranslation();
   const facts = [
     plate.printer_model,
@@ -121,12 +162,32 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
     duration(plate.print_time_seconds),
   ].filter(Boolean);
   return (
-    <li className={`rounded-lg p-2 flex gap-3 ${proposed ? 'bg-bambu-green/10 border border-bambu-green/40' : 'bg-bambu-dark'}`}>
+    <li className={`rounded-lg p-2 flex gap-3 ${
+      picked ? 'bg-bambu-green/20 border-2 border-bambu-green'
+        : proposed ? 'bg-bambu-green/10 border border-bambu-green/40' : 'bg-bambu-dark border border-transparent'
+    }`}>
       <PlatePreview plate={plate} />
-      <div className="min-w-0 flex-1 space-y-1">
+      <div
+        className={`min-w-0 flex-1 space-y-1 ${onPick ? 'cursor-pointer rounded hover:bg-white/5' : ''}`}
+        {...(onPick ? {
+          role: 'button',
+          tabIndex: 0,
+          'aria-pressed': picked,
+          'aria-label': `${t(picked ? 'farm.jobs.platePicked' : 'farm.jobs.pickPlate')}: ${fileName(plate.file)} · ${t('farm.plates.plate', { index: plate.plate })}`,
+          onClick: onPick,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onPick();
+            }
+          },
+        } : {})}
+      >
         <p className="text-sm text-white break-all">
-          {proposed && <span className="text-xs text-bambu-green mr-2">{t('farm.plan.proposed')}</span>}
+          {picked && <span className="text-xs text-bambu-green font-semibold mr-2">✓ {t('farm.jobs.chosen')}</span>}
+          {!picked && proposed && <span className="text-xs text-bambu-green mr-2">{t('farm.plan.proposed')}</span>}
           {fileName(plate.file)} · {t('farm.plates.plate', { index: plate.plate })}
+          {plate.slicer && <span className="ml-2 align-middle"><SlicerBadge slicer={plate.slicer} /></span>}
           <span className="text-xs text-bambu-gray"> · {facts.join(' · ')}</span>
           <Grams plate={plate} />
           {!plate.sliced && <span className="text-xs text-amber-400"> · {t('farm.plan.notSliced')}</span>}
@@ -140,6 +201,44 @@ function PlateRow({ plate, proposed }: { plate: FarmPlanPlate; proposed: boolean
         </div>
       </div>
     </li>
+  );
+}
+
+/** A chosen printer waiting for its plate to be cleared: say so, and let it be marked clear from here. */
+function PlateClear({ printerId, name }: { printerId: number; name: string }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const { hasPermission } = useAuth();
+  const queryClient = useQueryClient();
+  const [confirm, setConfirm] = useState(false);
+  const status = useQuery({
+    queryKey: ['printerStatus', printerId],
+    queryFn: () => api.getPrinterStatus(printerId),
+    refetchInterval: 10_000,
+  });
+  const clear = useMutation({
+    mutationFn: () => api.clearPlate(printerId),
+    onSuccess: () => {
+      setConfirm(false);
+      showToast(t('queue.clearPlateSuccess'), 'success');
+      queryClient.invalidateQueries({ queryKey: ['printerStatus', printerId] });
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+    },
+    onError: (e: Error) => showToast(e.message || t('queue.clearPlateFailed'), 'error'),
+  });
+  if (!status.data?.awaiting_plate_clear) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-amber-400">
+      <span>{t('farm.jobs.plateToClear', { printer: name })}</span>
+      {hasPermission('printers:clear_plate') && (
+        <Button size="sm" variant="secondary" onClick={() => setConfirm(true)}>{t('farm.jobs.plateCleared')}</Button>
+      )}
+      {confirm && (
+        <ConfirmModal title={t('farm.jobs.plateClearTitle')} message={t('farm.jobs.plateClearMessage', { printer: name })}
+          confirmText={t('farm.jobs.plateCleared')} isLoading={clear.isPending}
+          onConfirm={() => clear.mutate()} onCancel={() => setConfirm(false)} />
+      )}
+    </div>
   );
 }
 
@@ -414,11 +513,27 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
   const [slots, setSlots] = useState<Record<string, Record<number, number>>>({}); // slots picked by hand
   const [amsMappings, setAmsMappings] = useState<Record<string, number[] | undefined>>({});
   const [schedule, setSchedule] = useState<ScheduleOptions>(DEFAULT_SCHEDULE_OPTIONS);
-  const platesFor = (c: FarmPlanComponent) =>
+  const [forceSlice, setForceSlice] = useState(false);
+  const [ignoreSpool, setIgnoreSpool] = useState<Record<string, boolean>>({}); // component -> sent without the spool check
+  const [confirmIgnore, setConfirmIgnore] = useState<{ code: string; printer: string } | null>(null);
+  const [filters, setFilters] = useState<Record<string, PlateFilters>>({}); // component -> what its plates are narrowed to
+  const byPrinter = (c: FarmPlanComponent) =>
     chosen[c.code] ? c.plates.filter((p) => p.printers.some((pr) => pr.id === chosen[c.code])) : c.plates;
+  // The plates the job may use: of the chosen printer, then the filters (automatic picks among these too).
+  const platesFor = (c: FarmPlanComponent) => byPrinter(c).filter((p) => matches(p, filters[c.code] || {}));
+  // Automatic on a chosen printer: only the plates whose material and colour it has loaded now (unless sent
+  // anyway). None: nothing is queued until a plate is picked, the spool loaded or "send anyway" ticked.
+  const loadedOn = (p: FarmPlanPlate, printerId: number) => {
+    const fit = p.printers.find((pr) => pr.id === printerId);
+    return !!fit && fit.material_ok !== false && fit.color_ok !== false;
+  };
+  const autoPlates = (c: FarmPlanComponent) =>
+    chosen[c.code] && !ignoreSpool[c.code] ? platesFor(c).filter((p) => loadedOn(p, chosen[c.code])) : platesFor(c);
+  const blocked = (c: FarmPlanComponent) => !chosenPlate[c.code] && autoPlates(c).length === 0;
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({}); // component -> the plates that don't fit too
   // The plate the slots are chosen for: the one picked, else the proposed one (then pinned to it).
   const slotPlate = (c: FarmPlanComponent) =>
-    platesFor(c).find((p) => p.plate_id === chosenPlate[c.code]) ?? platesFor(c)[0];
+    platesFor(c).find((p) => p.plate_id === chosenPlate[c.code]) ?? autoPlates(c)[0];
   const selected = usable.filter((c) => picked.has(c.code));
   const toggle = (code: string) => {
     const next = new Set(picked);
@@ -440,7 +555,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
           const ams = chosen[c.code] ? amsMappings[c.code] : undefined;
           const plateIds = chosenPlate[c.code]
             ? [chosenPlate[c.code]]
-            : ams ? [slotPlate(c).plate_id] : platesFor(c).map((p) => p.plate_id);
+            : ams ? [slotPlate(c).plate_id] : autoPlates(c).map((p) => p.plate_id);
           return {
             component_code: c.code,
             plate_ids: plateIds,
@@ -452,6 +567,8 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
             require_previous_success: schedule.requirePreviousSuccess || undefined,
             auto_off_after: schedule.autoOffAfter || undefined,
             gcode_injection: schedule.gcodeInjection || undefined,
+            force_slice: forceSlice || undefined,
+            ignore_spool: (chosen[c.code] && ignoreSpool[c.code]) || undefined,
           };
         }),
       ),
@@ -520,6 +637,8 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                         onChange={(e) => {
                           setChosen({ ...chosen, [c.code]: Number(e.target.value) || 0 });
                           setChosenPlate({ ...chosenPlate, [c.code]: 0 });
+                          setFilters({ ...filters, [c.code]: {} });
+                          setIgnoreSpool({ ...ignoreSpool, [c.code]: false }); // asked again for another printer
                           resetSlots(c.code);
                         }}>
                         <option value="">{t('farm.jobs.firstFree')}</option>
@@ -530,7 +649,35 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                         ))}
                       </select>
                     </label>
-                    {chosen[c.code] ? <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p> : null}
+                    {chosen[c.code] ? (
+                      <>
+                        <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p>
+                        <label className="flex items-start gap-2 text-sm text-white">
+                          <input type="checkbox" className="mt-1" checked={!!ignoreSpool[c.code]}
+                            onChange={(e) => {
+                              if (!e.target.checked) setIgnoreSpool({ ...ignoreSpool, [c.code]: false });
+                              else setConfirmIgnore({
+                                code: c.code,
+                                printer: printers.find((pr) => pr.id === chosen[c.code])?.name ?? '',
+                              });
+                            }} />
+                          <span>
+                            {t('farm.jobs.ignoreSpool')}
+                            <span className="block text-xs text-bambu-gray">{t('farm.jobs.ignoreSpoolHint')}</span>
+                          </span>
+                        </label>
+                        <PlateClear printerId={chosen[c.code]}
+                          name={printers.find((pr) => pr.id === chosen[c.code])?.name ?? ''} />
+                      </>
+                    ) : null}
+                    <PlateFilterBar plates={byPrinter(c)} value={filters[c.code] || {}}
+                      onChange={(f) => {
+                        setFilters({ ...filters, [c.code]: f });
+                        if (chosenPlate[c.code] && !byPrinter(c).some((p) => p.plate_id === chosenPlate[c.code] && matches(p, f))) {
+                          setChosenPlate({ ...chosenPlate, [c.code]: 0 });
+                          resetSlots(c.code);
+                        }
+                      }} />
                     <label className="flex flex-wrap items-center gap-2 text-sm text-white">
                       {t('farm.jobs.plate')}
                       <select className={`${INPUT} py-1 max-w-full`} value={chosenPlate[c.code] || ''}
@@ -559,12 +706,35 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                         onMappings={(m) => setSlots((prev) => ({ ...prev, [c.code]: m }))}
                         onAmsMapping={(m) => setAmsMappings((prev) => ({ ...prev, [c.code]: m }))} />
                     ) : null}
+                    {!chosenPlate[c.code] && autoPlates(c).length < platesFor(c).length && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {blocked(c) && (
+                          <span role="alert" className="text-amber-400">
+                            {t('farm.jobs.noLoadedMatch', {
+                              printer: printers.find((pr) => pr.id === chosen[c.code])?.name ?? '',
+                            })}
+                          </span>
+                        )}
+                        <button type="button" className="text-bambu-green hover:underline"
+                          onClick={() => setShowAll({ ...showAll, [c.code]: !showAll[c.code] })}>
+                          {t(showAll[c.code] ? 'farm.jobs.hideOtherPlates' : 'farm.jobs.showOtherPlates', {
+                            count: platesFor(c).length - autoPlates(c).length,
+                          })}
+                        </button>
+                      </div>
+                    )}
                     <ul className="space-y-2">
-                      {platesFor(c)
-                        .filter((p) => !chosenPlate[c.code] || p.plate_id === chosenPlate[c.code])
-                        .map((p, i) => (
-                          <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
-                        ))}
+                      {/* a click picks a plate, a click on the picked one goes back to automatic; automatic on a
+                          chosen printer lists what fits its loaded spools, the rest on demand */}
+                      {(chosenPlate[c.code] || showAll[c.code] ? platesFor(c) : autoPlates(c)).map((p, i) => (
+                        <PlateRow key={p.plate_id} plate={p}
+                          proposed={!chosenPlate[c.code] && i === 0 && p.score > 0 && autoPlates(c).includes(p)}
+                          picked={chosenPlate[c.code] === p.plate_id}
+                          onPick={() => {
+                            setChosenPlate({ ...chosenPlate, [c.code]: chosenPlate[c.code] === p.plate_id ? 0 : p.plate_id });
+                            resetSlots(c.code);
+                          }} />
+                      ))}
                     </ul>
                   </>
                 )}
@@ -581,12 +751,30 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                 dateFormat={settings.data?.date_format || 'system'} timeFormat={settings.data?.time_format || 'system'}
                 canControlPrinter={hasPermission('printers:control')} showStagger={false}
                 hasGcodeSnippets={!!settings.data?.gcode_snippets} />
+              <label className="flex items-start gap-2 text-sm text-white">
+                <input type="checkbox" className="mt-1" checked={forceSlice} onChange={(e) => setForceSlice(e.target.checked)} />
+                <span>
+                  {t('farm.jobs.forceSlice')}
+                  <span className="block text-xs text-bambu-gray">{t('farm.jobs.forceSliceHint')}</span>
+                </span>
+              </label>
             </section>
           )}
         </div>
+        {confirmIgnore && (
+          <ConfirmModal title={t('farm.jobs.ignoreSpoolTitle')}
+            message={t('farm.jobs.ignoreSpoolMessage', { printer: confirmIgnore.printer })}
+            confirmText={t('farm.jobs.ignoreSpoolConfirm')} variant="warning"
+            onConfirm={() => {
+              setIgnoreSpool({ ...ignoreSpool, [confirmIgnore.code]: true });
+              setConfirmIgnore(null);
+            }}
+            onCancel={() => setConfirmIgnore(null)} />
+        )}
         <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>
-          <Button disabled={!selected.length || create.isPending || (schedule.scheduleType === 'scheduled' && !scheduledTime)}
+          <Button disabled={!selected.length || create.isPending || selected.some(blocked)
+            || (schedule.scheduleType === 'scheduled' && !scheduledTime)}
             onClick={() => create.mutate()}>
             {create.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : t('farm.jobs.confirm', { count: selected.length })}
           </Button>

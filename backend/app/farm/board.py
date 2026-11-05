@@ -292,8 +292,33 @@ async def board(
     out: dict = {"history_total": len(history)}
     shown = [pair for members in groups.values() for pair in members]
     contexts = iter(await _contexts(db, shown))
+    progress = await _slice_progress(db, [job for job, _ in shown if job is not None and job.status == "waiting"])
     for name, members in groups.items():
-        out[name] = [_row(job, item, *next(contexts)[:5]) for job, item in members]
+        out[name] = [
+            {**_row(job, item, *next(contexts)[:5]), "slice_progress": progress.get(job.id) if job else None}
+            for job, item in members
+        ]
+    return out
+
+
+async def _slice_progress(db: AsyncSession, jobs: list[FarmPrintJob]) -> dict[int, dict]:
+    """The slicer's progress for waiting jobs whose plate is being sliced now (one query for their plates)."""
+    from backend.app.farm.slicing import slice_progress
+
+    ids = {pid for job in jobs for pid in job.plate_ids or []}
+    if not ids:
+        return {}
+    plates = {p.id: p for p in (await db.execute(select(FarmPlate).where(FarmPlate.id.in_(ids)))).scalars()}
+    out = {}
+    for job in jobs:
+        running = []
+        for pid in job.plate_ids or []:
+            plate = plates.get(pid)
+            now = slice_progress(plate.library_file_id, plate.plate_index, job.color) if plate else None
+            if now:
+                running.append(now)
+        if running:  # the furthest one: the plate the job will most likely get
+            out[job.id] = max(running, key=lambda p: p["percent"] or 0)
     return out
 
 
@@ -534,15 +559,14 @@ async def _slice_again(db: AsyncSession, job: FarmPrintJob, slicing, *, force: b
         plate = await db.get(FarmPlate, plate_id)
         if plate is None:
             continue
+        if force:  # the 3MF read again from the NAS; the old slice is never used meanwhile
+            asked += await slicing.force_slice(db, plate, job.color)
+            continue
         key = slicing._queue_key(plate.library_file_id, plate.plate_index, job.color)
         slicing._failed.pop(key, None)
         slicing._forget_asked(key)
-        current = await slicing.variant_slice(db, plate, job.color)
-        if current is not None and not force:
+        if await slicing.variant_slice(db, plate, job.color) is not None:
             continue  # already sliced: nothing to retry for this plate
-        if current is not None:  # forced: not used any more, the job waits for the new slice (#113)
-            current.file_metadata = {**(current.file_metadata or {}), "superseded_at": _now().isoformat()}
-            await db.commit()
         if await slicing.ask_variant_slicing(db, plate, job.color):
             asked += 1
     return asked
