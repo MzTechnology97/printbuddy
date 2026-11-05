@@ -18,6 +18,7 @@ import logging
 from datetime import datetime, timezone
 
 UNKNOWN_REASON = "Reason not reported by the printer"
+logger = logging.getLogger(__name__)
 _TECHNICAL_MAX = 20  # lines kept from an upload's log
 
 _captured: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("queue_failure_log", default=None)
@@ -145,3 +146,16 @@ def printer_failure(status: str, data: dict) -> tuple[str, dict]:
         "phase": "printing",
         **{k: v for k, v in detail.items() if v not in (None, [], {})},
     }
+
+
+def safe_printer_failure(status: str, data: dict) -> tuple[str, dict]:
+    """``printer_failure`` that never raises: a payload of an unexpected shape gives the unknown reason.
+
+    ``on_print_complete`` calls it before closing the queue item and the archive: a reason that can't be
+    read must never leave them "printing".
+    """
+    try:
+        return printer_failure(status, data)
+    except Exception:  # best effort: any odd field in the printer's payload
+        logger.debug("Failure reason of a %s print not readable from %r", status, data, exc_info=True)
+        return UNKNOWN_REASON, {"phase": "printing", "code": "unknown"}

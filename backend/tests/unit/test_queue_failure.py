@@ -96,6 +96,19 @@ def test_a_failure_the_printer_did_not_explain_is_never_empty(data):
     assert (reason, detail["code"]) == (qf.UNKNOWN_REASON, "unknown")
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"hms_errors": ["0300_8004", 5]},  # not dicts
+        {"hms_errors": [], "raw_data": "garbage"},  # raw_data not a dict
+        {"raw_data": {"print_stats": "error", "webhooks": None}},  # Klipper objects of the wrong shape
+    ],
+)
+def test_a_payload_of_an_odd_shape_never_raises(data):
+    reason, detail = qf.safe_printer_failure("failed", data)
+    assert (reason, detail) == (qf.UNKNOWN_REASON, {"phase": "printing", "code": "unknown"})
+
+
 def test_mark_failed_without_a_reason_says_so():
     item = SimpleNamespace()
     qf.mark_failed(item, None, "upload", technical=[])

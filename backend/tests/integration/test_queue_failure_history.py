@@ -171,6 +171,16 @@ async def test_a_failure_without_a_reason_is_never_empty(queued_file, db_session
     assert (item.error_message, item.failure_detail["code"]) == (queue_failure.UNKNOWN_REASON, "unknown")
 
 
+@pytest.mark.asyncio
+async def test_an_odd_payload_still_closes_the_item_as_failed(queued_file, db_session):
+    """A reason that can't be read must not leave the item "printing" (nor skip what follows)."""
+    queued_file.status = "printing"
+    await db_session.commit()
+    item = await complete(queued_file, {"status": "failed", "hms_errors": ["0300_8004", 5], "raw_data": "garbage"})
+    assert (item.status, item.error_message) == ("failed", queue_failure.UNKNOWN_REASON)
+    assert item.failure_detail == {"phase": "printing", "code": "unknown"}
+
+
 # ---------------------------------------------------------------- cancelled by someone
 
 

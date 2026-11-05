@@ -2367,7 +2367,8 @@ class PrintScheduler:
         pre_gcode_file = getattr(pre_status, "gcode_file", None) if pre_status else None
 
         # Start the print with AMS mapping, plate_id and print options
-        with queue_failure.capture_logged_errors() as start_log:  # fork: why the printer refused it, if it did
+        # fork: what start_print itself logs (Moonraker's HTTP errors); Bambu's MQTT replies come later, elsewhere
+        with queue_failure.capture_logged_errors() as start_log:
             started = printer_manager.start_print(
                 item.printer_id,
                 remote_filename,
