@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import defusedxml.ElementTree as ET
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -35,6 +35,7 @@ from backend.app.schemas.print_queue import (
 )
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
 from backend.app.services.notification_service import notification_service
+from backend.app.services.queue_failure import requester
 from backend.app.utils.printer_models import normalize_printer_model, normalize_printer_model_id
 from backend.app.utils.threemf_tools import extract_filament_usage_from_3mf
 
@@ -213,6 +214,8 @@ def _enrich_response(item: PrintQueueItem) -> PrintQueueItemResponse:
         "started_at": item.started_at,
         "completed_at": item.completed_at,
         "error_message": item.error_message,
+        "failure_detail": item.failure_detail,
+        "dispatch_attempts": item.dispatch_attempts or 0,
         "created_at": item.created_at,
         # User tracking (Issue #206)
         "created_by_id": item.created_by_id,
@@ -1056,6 +1059,7 @@ async def reorder_queue(
 @router.post("/{item_id}/cancel")
 async def cancel_queue_item(
     item_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     auth_result: tuple[User | None, bool] = Depends(
         require_ownership_permission(
@@ -1082,6 +1086,7 @@ async def cancel_queue_item(
 
     item.status = "cancelled"
     item.completed_at = datetime.now(timezone.utc)
+    item.failure_detail = {"phase": "dispatch", **requester(user, request)}  # fork: who, from where
     await db.commit()
 
     logger.info("Cancelled queue item %s", item_id)
@@ -1091,8 +1096,9 @@ async def cancel_queue_item(
 @router.post("/{item_id}/stop")
 async def stop_queue_item(
     item_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    _: User | None = RequirePermissionIfAuthEnabled(Permission.QUEUE_UPDATE_ALL),
+    user: User | None = RequirePermissionIfAuthEnabled(Permission.QUEUE_UPDATE_ALL),
 ):
     """Stop an actively printing queue item."""
     import asyncio
@@ -1137,6 +1143,8 @@ async def stop_queue_item(
     item.status = "cancelled"
     item.completed_at = datetime.now(timezone.utc)
     item.error_message = "Stopped by user" if stop_sent else "Stopped by user (printer was offline)"
+    progress = getattr(printer_manager.get_status(printer_id), "progress", None)
+    item.failure_detail = {"phase": "printing", "progress": progress, **requester(user, request)}  # fork
     await db.commit()
 
     # Get smart plug info if auto-off is enabled

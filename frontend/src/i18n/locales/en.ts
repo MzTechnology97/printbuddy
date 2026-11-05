@@ -955,6 +955,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: 'Technical details',
+      unknown: 'Reason not reported by the printer',
+      phase: {
+        dispatch: 'Before sending',
+        upload: 'Upload to the printer',
+        start: 'Print start',
+        printing: 'While printing',
+      },
+      progress: 'at {{progress}}%',
+      layer: 'layer {{layer}}',
+      layerOf: 'layer {{layer}} of {{total}}',
+      by: 'by {{name}}',
+      via: {
+        panel: 'from the panel',
+        api: 'via API (Seller Hub, MCP)',
+      },
+      attempts: 'start attempts: {{n}}',
+    },
     title: 'Print Queue',
     subtitle: 'Schedule and manage your print jobs',
     addToQueue: 'Add to Queue',

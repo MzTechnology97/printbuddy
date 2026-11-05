@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
+from backend.app.farm.columns import add_columns
 
 
 class PrintQueueItem(Base):
@@ -107,6 +108,8 @@ class PrintQueueItem(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # fork: where it failed and what the printer or the upload said (services.queue_failure)
+    failure_detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -129,3 +132,5 @@ from backend.app.models.print_batch import PrintBatch  # noqa: E402
 from backend.app.models.printer import Printer  # noqa: E402
 from backend.app.models.project import Project  # noqa: E402
 from backend.app.models.user import User  # noqa: E402
+
+add_columns("print_queue", {"failure_detail": "JSON"})  # fork

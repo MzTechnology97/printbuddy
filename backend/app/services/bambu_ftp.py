@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import ftplib  # nosec B402
 import logging
 import os
@@ -995,6 +996,7 @@ async def upload_file_async(
     loop = asyncio.get_event_loop()
     is_a1 = printer_model in BambuFTPClient.A1_MODELS if printer_model else False
 
+    # fork: the threads run in this context, so the queue history sees what they log (services.queue_failure)
     def _upload(force_prot_c: bool = False) -> bool:
         mode_str = "prot_c" if force_prot_c else "prot_p"
         logger.info(
@@ -1026,10 +1028,14 @@ async def upload_file_async(
         if cached_mode:
             # Use cached mode
             force_prot_c = cached_mode == "prot_c"
-            return await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(force_prot_c)), timeout=timeout)
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, contextvars.copy_context().run, _upload, force_prot_c), timeout=timeout
+            )
 
         # No cached mode - try prot_p first
-        result = await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(False)), timeout=timeout)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, contextvars.copy_context().run, _upload, False), timeout=timeout
+        )
 
         if result:
             return True
@@ -1037,7 +1043,9 @@ async def upload_file_async(
         # Upload failed - for A1 models, try prot_c fallback
         if is_a1:
             logger.info("FTP upload failed with prot_p for A1 model, trying prot_c fallback...")
-            result = await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(True)), timeout=timeout)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, contextvars.copy_context().run, _upload, True), timeout=timeout
+            )
             return result
 
         return False

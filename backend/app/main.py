@@ -4315,8 +4315,12 @@ async def on_print_complete(printer_id: int, data: dict):
                 queue_status = normalize_queue_status(data.get("status", "completed"))
                 item.status = queue_status
                 item.completed_at = datetime.now(timezone.utc)
-                if queue_status == "failed" and not item.error_message:
-                    item.error_message = _format_hms_error_summary(data.get("hms_errors") or [])
+                if queue_status in ("failed", "cancelled") and not item.error_message:
+                    # fork: the printer's reason (HMS, Klipper's message...) and where it stopped, never empty
+                    from backend.app.services.queue_failure import safe_printer_failure
+
+                    item.error_message, detail = safe_printer_failure(queue_status, data)
+                    item.failure_detail = item.failure_detail or detail
 
                 # Bump usage counters on the source library file so admins can
                 # sort by "last printed" and (eventually) auto-purge stale
@@ -4658,7 +4662,14 @@ async def on_print_complete(printer_id: int, data: dict):
             hms_errors = data.get("hms_errors", []) if status == "failed" else None
             if hms_errors:
                 logger.info("[ARCHIVE] HMS errors at failure: %s", hms_errors)
-            failure_reason = derive_failure_reason(status, hms_errors)
+            try:
+                failure_reason = derive_failure_reason(status, hms_errors)
+            except Exception:  # fork: an odd payload must not leave the archive "printing"
+                failure_reason = None
+            if failure_reason is None and status == "failed":  # fork: Klipper's message, other HMS, or "not reported"
+                from backend.app.services.queue_failure import safe_printer_failure
+
+                failure_reason = safe_printer_failure(status, data)[0][:100]  # print_log_entries keeps 100
             if failure_reason:
                 logger.info("[ARCHIVE] failure_reason=%r (status=%s)", failure_reason, status)
             elif status == "failed" and hms_errors:

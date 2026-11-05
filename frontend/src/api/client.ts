@@ -1917,6 +1917,18 @@ export interface DiscoveredTasmotaDevice {
 }
 
 // Print Queue types
+// fork: why a queue item failed or was stopped (backend services/queue_failure.py)
+export interface QueueFailureDetail {
+  phase?: 'dispatch' | 'upload' | 'start' | 'printing';
+  code?: string;
+  progress?: number;
+  layer?: number;
+  total_layers?: number;
+  by?: string | null;
+  via?: 'panel' | 'api';
+  technical?: string[];
+}
+
 export interface PrintQueueItem {
   id: number;
   printer_id: number | null;  // null = unassigned
@@ -1952,6 +1964,9 @@ export interface PrintQueueItem {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  // fork: where it failed and what the printer or the upload said
+  failure_detail?: QueueFailureDetail | null;
+  dispatch_attempts?: number;
   created_at: string;
   archive_name?: string | null;
   archive_thumbnail?: string | null;

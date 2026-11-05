@@ -955,6 +955,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: '技术详情',
+      unknown: '打印机未报告原因',
+      phase: {
+        dispatch: '发送前',
+        upload: '上传到打印机',
+        start: '开始打印',
+        printing: '打印过程中',
+      },
+      progress: '进度 {{progress}}%',
+      layer: '第 {{layer}} 层',
+      layerOf: '第 {{layer}} 层，共 {{total}} 层',
+      by: '由 {{name}}',
+      via: {
+        panel: '来自面板',
+        api: '通过 API (Seller Hub, MCP)',
+      },
+      attempts: '启动尝试次数：{{n}}',
+    },
     filamentShort: {
       rowBadge: '所分配料盘的耀丝不足',
       rowTooltip: '调度程序已标记该项。点击播放查看各插槽的赤字并决定是否仍要打印。',
