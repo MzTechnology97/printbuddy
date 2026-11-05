@@ -135,6 +135,24 @@ async def test_colours_of_the_lines_in_use_are_added_once(db_session):
 
 
 @pytest.mark.asyncio
+async def test_the_slicers_own_catalogue_does_not_count(db_session):
+    """Bambu Studio's catalogue lists every vendor it ships: only the user's own filaments say what is in use."""
+    db_session.add(
+        LocalPreset(
+            name="SUNLU Silk PLA @BBL X1C",
+            preset_type="filament",
+            filament_vendor="SUNLU",
+            source=brand_colors.SYSTEM_SOURCE,
+            setting="{}",
+        )
+    )
+    await db_session.commit()
+    await presets(db_session, ("IEMAI ABS @K1", "IEMAI"))
+    result = await brand_colors.sync(db_session, FakeClient())
+    assert result["added_by_brand"] == {"IEMAI": 2}
+
+
+@pytest.mark.asyncio
 async def test_a_colour_deleted_by_hand_does_not_come_back(db_session):
     await presets(db_session, *MINE)
     await brand_colors.sync(db_session, FakeClient())

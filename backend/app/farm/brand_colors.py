@@ -1,7 +1,7 @@
 """The colours of the filament lines in use, from the Open Filament Database, in the colour catalog (fork).
 
-The brands and lines come from the filament presets (``local_presets``: the slicers' filaments imported
-every night, and any imported by hand). For each brand the Open Filament Database knows, only the lines the
+The brands and lines come from the user's filament presets (``local_presets``: the PC slicers' filaments
+imported every night, and any imported by hand; not the slicer's own catalogue). For each brand the Open Filament Database knows, only the lines the
 presets use are taken: a line comes in when its words (besides the material) are all in a preset's name,
 so "Marble PLA" comes with "Sunlu-Marble PLA" and "PA6-CF" with "Sunlu PA6-CF"; the plain line of a material
 in use ("PLA") comes too. Each colour is added with manufacturer, line as material, colour name and hex, at
@@ -31,6 +31,7 @@ from backend.app.core import database
 from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
+from backend.app.farm.slicer_filaments import SOURCES as SLICER_SOURCES
 from backend.app.models.color_catalog import ColorCatalogEntry
 from backend.app.models.local_preset import LocalPreset
 from backend.app.services.open_filament_database import (
@@ -54,6 +55,10 @@ NOT_BRANDS = {"", "generic", "default", "custom", "unknown", "orcaslicer", "bamb
 _SUFFIXES = ("filaments", "filament", "tech", "3d", "lab")  # "eSUN 3D" = "Esun", "QIDI Tech" = "Qidi"
 _HEX = re.compile(r"^#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
 _READ_ERRORS = (OpenFilamentDatabaseError, ValueError)  # ValueError: a name the client refuses as a path
+
+# The slicer's own catalogue (thousands of profiles of every vendor it ships) says nothing about what is in
+# use: only the user's filaments count (from the PC's slicers, or imported by hand).
+SYSTEM_SOURCE = SLICER_SOURCES["bambu/system"]
 
 _lock = asyncio.Lock()  # one run at a time: the hourly check and a run by hand never insert twice
 _background: asyncio.Task | None = None
@@ -125,7 +130,9 @@ def line_in_use(material: str, line: str, presets: list[set[str]]) -> bool:
 async def presets_by_vendor(db: AsyncSession) -> dict[str, list[set[str]]]:
     rows = await db.execute(
         select(LocalPreset.filament_vendor, LocalPreset.name, LocalPreset.filament_type).where(
-            LocalPreset.preset_type == "filament", LocalPreset.filament_vendor.is_not(None)
+            LocalPreset.preset_type == "filament",
+            LocalPreset.filament_vendor.is_not(None),
+            LocalPreset.source != SYSTEM_SOURCE,
         )
     )
     out: dict[str, list[set[str]]] = {}
