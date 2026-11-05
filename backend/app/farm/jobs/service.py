@@ -68,6 +68,8 @@ from backend.app.services.printer_providers.factory import normalize_provider
 
 logger = logging.getLogger(__name__)
 
+from backend.app.farm import job_events  # noqa: E402  fork: the queue page's timeline
+
 TICK_SECONDS = 30
 HISTORY_EVERY_SECONDS = 10 * 60  # Klipper prints done while Printbuddy was off
 CLEANUP_EVERY_SECONDS = 24 * 3600  # old queue files on the printers
@@ -127,7 +129,14 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
         queue_slice_ended(key[0], name, key[1], None, state.slicer if state else None)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    job_events.record(
+        "slice_requested",
+        f"Slice asked: {name}, plate {key[1]}",
+        file_id=key[0],
+        plate=key[1],
+        detail={"slice_job": getattr(task, "id", None), "file": name},
+    )
     return True
 
 
@@ -218,6 +227,14 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             if await variant_file(db, plate, comp.color) is None:
                 await ask_variant(db, plate, comp.color)
     await db.commit()
+    for job in jobs:
+        job_events.record(
+            "created",
+            f"{job.component_code}: {job.expected_pieces} pieces, {len(job.plate_ids)} plate(s) to choose from",
+            job_id=job.id,
+            printer_id=job.printer_id,
+            detail={"plate_ids": job.plate_ids, "colour": job.color, "options": job.queue_options},
+        )
     return jobs
 
 
@@ -894,6 +911,7 @@ async def dispatch_once(db: AsyncSession) -> int:
     )
     if not jobs:
         return 0
+    notes_before = {job.id: job.note for job in jobs}
     config = await plan.load_config(db)
     resolver = await PrinterModelResolver.load(db)
     printers_by_id = {
@@ -1033,12 +1051,36 @@ async def dispatch_once(db: AsyncSession) -> int:
                     logger.info(
                         "Farm job %d: %s queued on %s (plate %d)", job.id, job.component_code, printer["name"], plate.id
                     )
+                    job_events.record(
+                        "queued",
+                        f"In the queue of {printer['name']}"
+                        + ("" if fits else f": load the {job.color} spool, then start it by hand"),
+                        job_id=job.id,
+                        queue_item_id=item.id,
+                        printer_id=printer["id"],
+                        level=None if fits else "warning",
+                        detail={
+                            "plate_id": plate.id,
+                            "plate": plate_no,
+                            "file": send.filename,
+                            "library_file_id": send.id,
+                            "file_hash": file_hash,
+                            "manual_start": item.manual_start,
+                            "ams_mapping": ams,
+                            "filament_overrides": overrides,
+                            "chosen_printer": options.get("printer_id") or job.printer_id,
+                        },
+                    )
                     break
                 if placed:
                     break
         if not placed:
             fallback = "Chosen printer is not active" if job.printer_id else "No free printer of a matching model"
             job.note = ("; ".join(dict.fromkeys(reasons)) or fallback)[:255]
+    for job in jobs:  # what each job waits for, only when it changed (not every tick)
+        if job.status == "waiting" and job.note and job.note != notes_before.get(job.id):
+            failed = any(w in job.note for w in ("failed", "not reachable", "timed out", "can't", "No reference"))
+            job_events.record("waiting", job.note, job_id=job.id, level="warning" if failed else None)
     await db.commit()
     return created
 
@@ -1051,6 +1093,8 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob, who: dict | None = Non
         item = await db.get(PrintQueueItem, job.queue_item_id)
         if item is not None and item.status == "printing":
             raise HTTPException(409, "Already printing: stop it from the printer or the queue")
+        if item is not None and item.status == "pending" and item.dispatching_at is not None:
+            raise HTTPException(409, "Being sent to the printer right now: try again in a minute")
         if item is not None and item.status == "pending":
             item.status = "cancelled"
             item.completed_at = datetime.now(timezone.utc)
@@ -1058,6 +1102,7 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob, who: dict | None = Non
             item.failure_detail = {"phase": "dispatch", **(who or {})}
     job.status = "cancelled"
     await db.commit()
+    job_events.record("cancelled", "Cancelled", job_id=job.id, queue_item_id=job.queue_item_id, detail=who)
 
 
 async def _guarded(db: AsyncSession, what: str, step) -> None:
@@ -1114,6 +1159,7 @@ class FarmJobDispatcher:
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)
+                        await _guarded(db, "job events clean-up", job_events.cleanup)
             except asyncio.CancelledError:
                 break
             except Exception:  # pragma: no cover - defensive, keep the loop alive

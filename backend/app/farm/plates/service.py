@@ -251,6 +251,8 @@ async def _latest_slices(
         meta = out.file_metadata or {}
         if "extracted_from_library_file_id" in meta:
             continue  # a Klipper .gcode taken out of an output, not an output itself
+        if meta.get("superseded_at"):
+            continue  # a new slice was forced (queue board): the job waits for it, never prints this one
         if (
             meta.get("sliced_from_library_file_id") == lib_file.id
             and meta.get("sliced_from_sha256") == sha256

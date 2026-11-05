@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   DndContext,
   closestCenter,
@@ -51,11 +51,13 @@ import {
   ChevronDown,
   ChevronRight,
   List,
+  ListChecks,
   GanttChart,
   Code,
   Snail,
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
+import { JobsBoard } from '../farm/JobsBoard';
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import type { PrintQueueItem, PrintQueueBulkUpdate, Permission } from '../api/client';
 import { Card } from '../components/Card';
@@ -755,8 +757,11 @@ export function QueuePage() {
   const [historyCollapsed, setHistoryCollapsed] = useState(() => {
     return localStorage.getItem('queue.historyCollapsed') !== 'false';
   });
-  const [viewMode, setViewMode] = useState<'list' | 'timeline'>(() => {
-    return (localStorage.getItem('queue.viewMode') as 'list' | 'timeline') || 'list';
+  const [searchParams] = useSearchParams();
+  const [viewMode, setViewMode] = useState<'jobs' | 'list' | 'timeline'>(() => {
+    const asked = searchParams.get('view'); // fork: "What to print" links to ?view=jobs
+    const view = asked || localStorage.getItem('queue.viewMode');
+    return view === 'list' || view === 'timeline' ? view : 'jobs';
   });
   const [historyOffset, setHistoryOffset] = useState(0);
   const [loadedHistoryItems, setLoadedHistoryItems] = useState<PrintQueueItem[]>([]);
@@ -1265,16 +1270,28 @@ export function QueuePage() {
 
       {/* View Mode Toggle + SJF */}
       <div className="flex items-center gap-3 mb-6">
-        <div className="hidden sm:flex items-center border border-bambu-dark-tertiary rounded-lg overflow-hidden">
+        <div className="flex items-center border border-bambu-dark-tertiary rounded-lg overflow-hidden" role="tablist">
           <button
-            className={`p-2 transition-colors ${viewMode === 'list' ? 'bg-bambu-green text-white' : 'bg-bambu-dark text-bambu-gray hover:text-white'}`}
+            role="tab"
+            aria-selected={viewMode === 'jobs'}
+            className={`px-3 py-2 text-sm flex items-center gap-1 transition-colors ${viewMode === 'jobs' ? 'bg-bambu-green text-white' : 'bg-bambu-dark text-bambu-gray hover:text-white'}`}
+            onClick={() => setViewMode('jobs')}
+          >
+            <ListChecks className="w-4 h-4" /> {t('farm.board.tab')}
+          </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === 'list'}
+            className={`px-3 py-2 text-sm flex items-center gap-1 transition-colors ${viewMode === 'list' ? 'bg-bambu-green text-white' : 'bg-bambu-dark text-bambu-gray hover:text-white'}`}
             onClick={() => setViewMode('list')}
             title={t('queue.timeline.listView')}
           >
-            <List className="w-4 h-4" />
+            <List className="w-4 h-4" /> <span className="hidden sm:inline">{t('farm.board.orderTab')}</span>
           </button>
           <button
-            className={`p-2 transition-colors ${viewMode === 'timeline' ? 'bg-bambu-green text-white' : 'bg-bambu-dark text-bambu-gray hover:text-white'}`}
+            role="tab"
+            aria-selected={viewMode === 'timeline'}
+            className={`hidden sm:flex p-2 transition-colors ${viewMode === 'timeline' ? 'bg-bambu-green text-white' : 'bg-bambu-dark text-bambu-gray hover:text-white'}`}
             onClick={() => setViewMode('timeline')}
             title={t('queue.timeline.timelineView')}
           >
@@ -1299,7 +1316,9 @@ export function QueuePage() {
         </button>
       </div>
 
-      {isLoading ? (
+      {viewMode === 'jobs' ? (
+        <JobsBoard printerId={filterPrinter} />
+      ) : isLoading ? (
         <div className="text-center py-12 text-bambu-gray">{t('common.loading')}</div>
       ) : (queue?.length || 0) === 0 && historyItems.length === 0 ? (
         <Card className="p-12 text-center border-dashed">

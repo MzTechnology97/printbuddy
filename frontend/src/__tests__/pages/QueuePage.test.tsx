@@ -147,6 +147,23 @@ describe('QueuePage', () => {
     );
   });
 
+  // fork: the Jobs board is the first tab and the default; the queue order is one click away
+  it('opens on the Jobs board, with the queue order as a tab', async () => {
+    vi.mocked(localStorage.getItem).mockImplementation(() => null);
+    server.use(
+      http.get('/api/v1/farm/board', () =>
+        HttpResponse.json({ problems: [], printing: [], waiting: [], history: [], history_total: 0 }),
+      ),
+      http.get('/api/v1/farm/jobs', () => HttpResponse.json([])),
+    );
+    const user = userEvent.setup();
+    render(<QueuePage />);
+    expect(await screen.findByText('Nothing to fix.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Jobs/ })).toHaveAttribute('aria-selected', 'true');
+    await user.click(screen.getByRole('tab', { name: /Queue order/ }));
+    expect(screen.queryByText('Nothing to fix.')).not.toBeInTheDocument();
+  });
+
   describe('rendering', () => {
     it('renders the page title', async () => {
       render(<QueuePage />);

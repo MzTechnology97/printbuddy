@@ -396,7 +396,17 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
         queue_slice_ended(key[0], name, key[1], color, state.slicer if state else None)
         return response.model_dump()
 
-    await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    from backend.app.farm import job_events
+
+    job_events.record(
+        "slice_requested",
+        f"Slice asked: {name}, plate {key[1]} in {color}",
+        file_id=key[0],
+        plate=key[1],
+        colour=key[2],
+        detail={"slice_job": getattr(task, "id", None), "file": name, "colour": color},
+    )
     return True
 
 
@@ -453,8 +463,22 @@ def queue_slice_ended(
     """
     notify.slicing_done(file_id, filename, plate, colour, notify.QUEUE_SLICE, error)
     key = _queue_key(file_id, plate, colour)
+    from backend.app.farm import job_events
+
+    asked = _asked_at(key)
+    took = round(time.monotonic() - asked) if asked is not None else None
+    where = f"{filename}, plate {key[1]}" + (f" in {colour}" if colour else "")
+    name = SLICER_NAMES.get(slicer, slicer or "an unknown slicer")
     if error is None:
         _failed.pop(key, None)
+        job_events.record(
+            "slice_done",
+            f"Sliced with {name}: {where}",
+            file_id=file_id,
+            plate=key[1],
+            colour=key[2],
+            detail={"slicer": slicer, "seconds": took, "file": filename},
+        )
         return
     reason = str(getattr(error, "detail", None) or f"{type(error).__name__}: {error}")
     kind = failure_kind(error)
@@ -468,6 +492,22 @@ def queue_slice_ended(
         reason,
     )
     _failed[key] = {"reason": explain(reason)[:200], "slicer": slicer, "kind": kind, "at": time.monotonic()}
+    job_events.record(
+        "slice_failed",
+        f"{name} failed on {where}: {explain(reason)}",
+        file_id=file_id,
+        plate=key[1],
+        colour=key[2],
+        detail={
+            "slicer": slicer,
+            "kind": kind,
+            "seconds": took,
+            "file": filename,
+            "error": reason,  # the slicer's whole answer, for the debug details
+            "error_type": type(error).__name__,
+            "cause": repr(error.__cause__) if error.__cause__ else None,
+        },
+    )
 
 
 async def _answers(db: AsyncSession, slicer: str) -> bool:
