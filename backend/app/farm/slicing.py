@@ -19,6 +19,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -354,7 +355,10 @@ async def variant_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -
                 variant = colour_key(color)
         except HTTPException:
             return None
-    return (await _latest_slices(db, lib_file, state.sha256, variant)).get(plate.plate_index)
+    found = (await _latest_slices(db, lib_file, state.sha256, variant)).get(plate.plate_index)
+    if found is not None:  # sliced, by the queue or another way (re-slice, by hand): no failure to tell any more
+        _failed.pop(_queue_key(plate.library_file_id, plate.plate_index, color), None)
+    return found
 
 
 async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None) -> bool:
@@ -400,8 +404,23 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
 
 SLICER_NAMES = {SLICER_ORCA: "OrcaSlicer", SLICER_BAMBU: "Bambu Studio"}
 EARLY_RETRY_SECONDS = 60  # a sidecar back after "not reachable": sliced again at most this often
+PROBE_TIMEOUT_SECONDS = 2.0  # /health of a sidecar: short, the dispatcher waits for it
+PROBE_BACKOFF_SECONDS = (60, 300)  # after a failed probe: 60 s, doubling up to 5 minutes
 _failed: dict[tuple[int, int, str | None], dict] = {}  # (file, plate, colour) -> the last queue slice that failed
-_health: dict[str, tuple[float, bool]] = {}  # sidecar url -> (when checked, it answered): one /health per tick
+_health: dict[str, tuple[float, bool, float]] = {}  # sidecar url -> (next probe, answered, wait after a failure)
+
+
+def failure_kind(error: BaseException) -> str:
+    """``unreachable``: the sidecar couldn't be connected to (refused, no route, connect timeout). ``timeout``: it
+    took the request but didn't answer in time, and may still be slicing it. ``error``: anything else, its own."""
+    seen: BaseException | None = error
+    while seen is not None:
+        if isinstance(seen, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return "unreachable"
+        if isinstance(seen, httpx.TimeoutException):
+            return "timeout"
+        seen = seen.__cause__
+    return "error"
 
 
 def _queue_key(file_id: int, plate: int | None, colour: str | None) -> tuple[int, int, str | None]:
@@ -413,8 +432,7 @@ def queue_slice_ended(
 ) -> None:
     """A slice asked for the queue ended (also notified, ``notify.slicing_done``).
 
-    A failure is logged and kept for the job's note, with whether the sidecar couldn't be reached at
-    all (``SlicerApiUnavailableError``); a success forgets it.
+    A failure is logged and kept for the job's note, with its kind (``failure_kind``); a success forgets it.
     """
     notify.slicing_done(file_id, filename, plate, colour, notify.QUEUE_SLICE, error)
     key = _queue_key(file_id, plate, colour)
@@ -422,36 +440,43 @@ def queue_slice_ended(
         _failed.pop(key, None)
         return
     reason = str(getattr(error, "detail", None) or f"{type(error).__name__}: {error}")
-    unreachable = isinstance(error, SlicerApiUnavailableError) or isinstance(error.__cause__, SlicerApiUnavailableError)
+    kind = failure_kind(error)
     logger.warning(
         "Farm slice of %s plate %s%s on %s failed%s: %s",
         filename,
         key[1],
         f" ({colour})" if colour else "",
         SLICER_NAMES.get(slicer, slicer or "an unknown slicer"),
-        " (slicer not reachable)" if unreachable else "",
+        {"unreachable": " (slicer not reachable)", "timeout": " (timed out)"}.get(kind, ""),
         reason,
     )
-    _failed[key] = {"reason": reason[:200], "slicer": slicer, "unreachable": unreachable, "at": time.monotonic()}
+    _failed[key] = {"reason": reason[:200], "slicer": slicer, "kind": kind, "at": time.monotonic()}
 
 
 async def _answers(db: AsyncSession, slicer: str) -> bool:
-    """Whether the slicer's sidecar answers its /health now (checked at most once per dispatcher tick)."""
+    """Whether the slicer's sidecar answers its /health now.
+
+    One short probe per sidecar per dispatcher tick, however many jobs wait on it; after a failed probe
+    the next one waits ``PROBE_BACKOFF_SECONDS`` (doubling), so a host that doesn't answer at all doesn't
+    slow every tick down.
+    """
     from backend.app.farm.jobs.service import TICK_SECONDS
 
     url = await sidecar_url(db, slicer)
-    checked = _health.get(url)
-    if checked is not None and time.monotonic() - checked[0] < TICK_SECONDS:
-        return checked[1]
+    next_at, ok, wait = _health.get(url, (0.0, False, 0.0))
+    if time.monotonic() < next_at:
+        return ok
     service = SlicerApiService(url)
     try:
-        await service.health()
+        await asyncio.wait_for(service.health(), PROBE_TIMEOUT_SECONDS)
         ok = True
-    except Exception:  # unreachable, or any answer but a good one
+    except Exception:  # refused, no answer in time, or any answer but a good one
         ok = False
     finally:
         await service.close()
-    _health[url] = (time.monotonic(), ok)
+    first, most = PROBE_BACKOFF_SECONDS
+    wait = 0.0 if ok else min(most, wait * 2 if wait else first)
+    _health[url] = (time.monotonic() + (wait or TICK_SECONDS), ok, wait)
     return ok
 
 
@@ -482,7 +507,7 @@ async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None
     failed = _failed.get(key)
     if (
         failed is not None
-        and failed["unreachable"]
+        and failed["kind"] == "unreachable"
         and failed["slicer"]
         and time.monotonic() - failed["at"] >= EARLY_RETRY_SECONDS
         and await _answers(db, failed["slicer"])
@@ -497,7 +522,9 @@ async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None
     asked = _asked_at(key)
     left = RESLICE_AFTER_SECONDS - (time.monotonic() - asked) if asked is not None else 0
     at = f"{datetime.now(timezone.utc) + timedelta(seconds=max(0, left)):%H:%M} UTC"
-    if failed["unreachable"]:
+    if failed["kind"] == "unreachable":
         name = SLICER_NAMES.get(failed["slicer"], failed["slicer"] or "slicer")
         return f"{where}: {name} not reachable, sliced again as soon as it answers (at the latest at {at})"
+    if failed["kind"] == "timeout":
+        return f"{where}: slicing timed out ({failed['reason']}), trying again at {at}"
     return f"{where}: slicing failed ({failed['reason']}), trying again at {at}"

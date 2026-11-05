@@ -5,10 +5,12 @@ The sidecars were refusing connections and two jobs kept saying "is being sliced
 with nothing in the log. No slicer is contacted: the slice and the /health call are stubbed. Data is made up.
 """
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +21,13 @@ from backend.app.models.library import LibraryFile
 from backend.app.services.slicer_api import SlicerApiService, SlicerApiUnavailableError, SlicerInputError
 
 REFUSED = "Slicer sidecar unreachable: [Errno 111] Connection refused"
+
+
+def refused() -> SlicerApiUnavailableError:
+    """What slicer_api raises when the sidecar refuses the connection."""
+    error = SlicerApiUnavailableError(REFUSED)
+    error.__cause__ = httpx.ConnectError("[Errno 111] Connection refused")
+    return error
 
 
 @pytest.fixture
@@ -78,7 +87,7 @@ def a_minute_later(key) -> None:
 async def test_unreachable_slicer_is_named_logged_and_tried_again_once_it_answers(
     db_session, project, monkeypatch, caplog
 ):
-    slice_raises(monkeypatch, 502, REFUSED, SlicerApiUnavailableError(REFUSED))
+    slice_raises(monkeypatch, 502, REFUSED, refused())
     plate = project.plate
     being_sliced = f"plate 2 of file {plate.library_file_id} is being sliced"
     assert await slicing.queue_slice_note(db_session, plate, "Nero") == being_sliced
@@ -98,7 +107,7 @@ async def test_unreachable_slicer_is_named_logged_and_tried_again_once_it_answer
     assert len(project.queued) == 1 and project.health.await_count == 1
 
     project.health.side_effect, project.health.return_value = None, {"status": "ok"}
-    slicing._health.clear()  # the next dispatcher tick
+    slicing._health.clear()  # the next probe, after the wait that follows a failed one
     assert await slicing.queue_slice_note(db_session, plate, "Nero") == being_sliced
     assert len(project.queued) == 2  # sliced again now, not in 30 minutes
 
@@ -122,7 +131,7 @@ async def test_a_slicer_error_says_what_and_waits_as_before(db_session, project,
 
 @pytest.mark.asyncio
 async def test_a_slice_that_works_clears_the_failure(db_session, project, monkeypatch):
-    slice_raises(monkeypatch, 502, REFUSED, SlicerApiUnavailableError(REFUSED))
+    slice_raises(monkeypatch, 502, REFUSED, refused())
     plate = project.plate
     await slicing.queue_slice_note(db_session, plate, "Nero")
     await run_slice(project)
@@ -135,4 +144,77 @@ async def test_a_slice_that_works_clears_the_failure(db_session, project, monkey
     a_minute_later((plate.library_file_id, 2, "nero"))
     await slicing.queue_slice_note(db_session, plate, "Nero")  # back: asked again
     assert await project.queued[-1](2) == {"library_file_id": 9}
+    assert slicing._failed == {}
+
+
+@pytest.mark.asyncio
+async def test_a_slice_that_timed_out_is_not_called_unreachable(db_session, project, monkeypatch, caplog):
+    """The sidecar took the request and didn't answer in time: it may still be slicing it, no early retry."""
+    timed_out = SlicerApiUnavailableError("Slicer sidecar unreachable: ReadTimeout")
+    timed_out.__cause__ = httpx.ReadTimeout("timed out")
+    slice_raises(monkeypatch, 502, "Slicer sidecar unreachable: ReadTimeout", timed_out)
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, "Nero")
+    with caplog.at_level(logging.WARNING, logger="backend.app.farm.slicing"):
+        await run_slice(project)
+    assert "on OrcaSlicer failed (timed out)" in caplog.text
+
+    a_minute_later((plate.library_file_id, 2, "nero"))
+    note = await slicing.queue_slice_note(db_session, plate, "Nero")
+    assert "slicing timed out (Slicer sidecar unreachable: ReadTimeout), trying again at " in note
+    assert "not reachable" not in note
+    assert project.health.await_count == 0 and len(project.queued) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_short_probe_per_slicer_however_many_jobs_wait(db_session, project, monkeypatch):
+    slice_raises(monkeypatch, 502, REFUSED, refused())
+    plates = [project.plate, SimpleNamespace(library_file_id=project.plate.library_file_id, plate_index=3)]
+    for plate in plates:
+        await slicing.queue_slice_note(db_session, plate, "Nero")
+        await run_slice(project)
+        a_minute_later((plate.library_file_id, plate.plate_index, "nero"))
+
+    for plate in plates:  # one dispatcher tick, two jobs on the same sidecar
+        assert "not reachable" in await slicing.queue_slice_note(db_session, plate, "Nero")
+    assert project.health.await_count == 1
+    for plate in plates:  # the next ticks: after a failed probe the next one waits a minute, then more
+        await slicing.queue_slice_note(db_session, plate, "Nero")
+    assert project.health.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_hangs_is_cut_short(db_session, project, monkeypatch):
+    """A host that doesn't answer at all costs the dispatcher the short probe timeout, not the client's 10 s."""
+    slice_raises(monkeypatch, 502, REFUSED, refused())
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, "Nero")
+    await run_slice(project)
+    a_minute_later((plate.library_file_id, 2, "nero"))
+
+    async def hangs():
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(SlicerApiService, "health", lambda self: hangs())
+    monkeypatch.setattr(slicing, "PROBE_TIMEOUT_SECONDS", 0.05)
+    note = await asyncio.wait_for(slicing.queue_slice_note(db_session, plate, "Nero"), 1)
+    assert "not reachable" in note
+
+
+@pytest.mark.asyncio
+async def test_a_slice_found_another_way_clears_the_failure(db_session, project, monkeypatch):
+    """Re-sliced automatically or by hand: the job no longer says the slice failed."""
+    from backend.app.farm.plates import service as plates
+
+    slice_raises(monkeypatch, 400, "Plate 2 has no objects", SlicerInputError("Plate 2 has no objects"))
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, None)
+    await run_slice(project)
+    assert slicing._failed
+
+    async def sliced(db, lib_file, sha256, colour=None):
+        return {2: SimpleNamespace(id=9)}
+
+    monkeypatch.setattr(plates, "_latest_slices", sliced)
+    assert (await slicing.variant_slice(db_session, plate, None)).id == 9
     assert slicing._failed == {}
