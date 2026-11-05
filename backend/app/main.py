@@ -75,6 +75,10 @@ from backend.app.core.config import APP_VERSION, settings as app_settings
 from backend.app.core.database import async_session, engine, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.farm import routes as farm_routes  # fork: printfarm
+from backend.app.farm.brand_colors import (
+    brand_colour_scheduler,  # fork: brand colours in the colour catalog
+    router as farm_brand_colors_router,  # fork
+)
 from backend.app.farm.jobs.service import farm_job_dispatcher, record_excluded_at_end  # fork: printfarm Accoda
 from backend.app.farm.library_sync import farm_library_scheduler  # fork: printfarm
 from backend.app.farm.nas.cache import NasCacheMiddleware  # fork: printfarm
@@ -6051,6 +6055,7 @@ async def lifespan(app: FastAPI):
     await library_trash_service.start_scheduler()
     farm_library_scheduler.start()  # fork: periodic sync of watched NAS folders
     farm_job_dispatcher.start()  # fork: places Accoda jobs on free printers
+    brand_colour_scheduler.start()  # fork: colours of the filament brands in use
     telegram_bot.start()  # fork: Telegram providers that take commands (long polling)
 
     # Start the archive auto-purge sweeper (#1008 follow-up)
@@ -6104,6 +6109,7 @@ async def lifespan(app: FastAPI):
     library_trash_service.stop_scheduler()
     farm_library_scheduler.stop()
     farm_job_dispatcher.stop()
+    brand_colour_scheduler.stop()
     await telegram_bot.stop()
     archive_purge_service.stop_scheduler()
     obico_detection_service.stop()
@@ -6614,6 +6620,7 @@ app.include_router(open_filament_database.router, prefix=app_settings.api_prefix
 app.include_router(metrics.router, prefix=app_settings.api_prefix)
 app.include_router(virtual_printers.router, prefix=app_settings.api_prefix)
 app.include_router(farm_routes.router, prefix=app_settings.api_prefix)  # fork: printfarm
+app.include_router(farm_brand_colors_router, prefix=app_settings.api_prefix)  # fork: brand colours
 app.add_middleware(NasCacheMiddleware)  # fork: NAS files are fetched into the cache on use
 
 
