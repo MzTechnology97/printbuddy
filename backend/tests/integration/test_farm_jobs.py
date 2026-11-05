@@ -539,7 +539,7 @@ async def test_job_unchanged_since_queueing_starts_as_before(async_client, db_se
 
     job, item = await _queued_job(async_client, db_session, farm)
     file_hash = hashlib.sha256(farm["sliced_path"].read_bytes()).hexdigest()
-    assert job.queued_as == {"plate_sha256": None, "objects": {"sopra": 15}, "file_hash": file_hash}
+    assert job.queued_as == {"objects": {"sopra": 15}, "file_hash": file_hash}
     assert await queue_check(test_engine) == [(item.id, item.library_file_id)]
 
 
@@ -600,3 +600,57 @@ async def test_job_queued_before_the_snapshot_compares_its_pieces(async_client, 
     plate.yields[0].quantity = 20
     await db_session.commit()
     assert await service.stale_slice_reason(db_session, item) == service.FAIL_PLATE_CHANGED
+
+
+@pytest.mark.asyncio
+async def test_objects_only_renamed_are_told_apart(async_client, db_session, farm):
+    job, item = await _queued_job(async_client, db_session, farm)
+    plate = await db_session.get(FarmPlate, job.plate_id)
+    plate.yields[0].object_name = "sopra v2"  # same quantity, another name
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.FAIL_PLATE_RENAMED
+
+
+@pytest.mark.asyncio
+async def test_unreadable_file_waits_and_then_starts(async_client, db_session, farm, test_engine):
+    """NAS down and no cache copy (or the cache evicted it): the job waits, it doesn't fail."""
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    _, item = await _queued_job(async_client, db_session, farm)
+    queued = farm["sliced_path"].read_bytes()
+    farm["sliced_path"].unlink()
+    assert await queue_check(test_engine) == []
+    await db_session.refresh(item)
+    assert (item.status, item.waiting_reason) == ("pending", service.WAIT_FILE_UNREADABLE)
+
+    farm["sliced_path"].write_bytes(queued)  # back in the cache
+    assert await queue_check(test_engine) == [(item.id, item.library_file_id)]
+
+
+@pytest.mark.asyncio
+async def test_old_cache_copy_the_nas_cannot_confirm_waits(async_client, db_session, farm, monkeypatch):
+    """A different local copy only fails once the NAS answered: before, it may just be an old copy."""
+    from unittest.mock import AsyncMock
+
+    from backend.app.farm.nas import cache
+
+    _, item = await _queued_job(async_client, db_session, farm)
+    sliced = await db_session.get(LibraryFile, item.library_file_id)
+    sliced.is_external = True
+    await db_session.commit()
+    with zipfile.ZipFile(farm["sliced_path"], "w") as zf:
+        zf.writestr("Metadata/plate_2.gcode", "G28 ; another slice")
+    nas_up = AsyncMock(return_value=False)
+    monkeypatch.setattr(cache, "ensure_local", nas_up)
+    assert await service.stale_slice_reason(db_session, item) == service.WAIT_FILE_UNREADABLE
+    nas_up.return_value = True  # the NAS answered: this is the file it has
+    assert await service.stale_slice_reason(db_session, item) == service.FAIL_FILE_CHANGED
+
+
+@pytest.mark.asyncio
+async def test_no_queue_item_without_the_fingerprint(async_client, db_session, farm):
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    farm["sliced_path"].unlink()  # the slice can't be read now
+    assert await service.dispatch_once(db_session) == 0
+    assert (await db_session.execute(select(PrintQueueItem))).first() is None
+    assert "the sliced file can't be read now" in (await db_session.get(FarmPrintJob, job["id"])).note

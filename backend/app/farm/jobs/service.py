@@ -361,6 +361,7 @@ WAIT_NAS_CHANGED = "3MF changed on the NAS: waiting for it to be read again"
 WAIT_NO_SOURCE = "The 3MF this was sliced from is missing or unreadable"
 WAIT_SLICE_UNREADABLE = "Cannot read the new slice from the NAS: waiting for it"
 WAIT_CHECK_FAILED = "Cannot check the slice of this print: waiting"
+WAIT_FILE_UNREADABLE = "Cannot read the file to print (NAS or cache): waiting for it"
 WAIT_REASONS = (
     WAIT_NEW_SLICE,
     WAIT_RESLICE_FAILED,
@@ -368,6 +369,7 @@ WAIT_REASONS = (
     WAIT_NO_SOURCE,
     WAIT_SLICE_UNREADABLE,
     WAIT_CHECK_FAILED,
+    WAIT_FILE_UNREADABLE,
 )
 # Why it never will: the queue item fails with this ``error_message``.
 FAIL_NO_PROJECT = "The 3MF this was sliced from was removed from the library"
@@ -375,10 +377,20 @@ FAIL_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate
 FAIL_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
 FAIL_PLATE_GONE = "This plate is no longer in the 3MF: queue another plate"
 FAIL_PLATE_CHANGED = "The 3MF changed after queueing: this plate prints other pieces now. Queue it again"
+FAIL_PLATE_RENAMED = "The 3MF changed after queueing: this plate's objects were renamed. Check it and queue it again"
 FAIL_FILE_CHANGED = "The file to print changed after queueing: queue the plate again"
-FAIL_REASONS = (FAIL_NO_PROJECT, FAIL_NO_OUTPUT, FAIL_NO_GCODE, FAIL_PLATE_GONE, FAIL_PLATE_CHANGED, FAIL_FILE_CHANGED)
+FAIL_REASONS = (
+    FAIL_NO_PROJECT,
+    FAIL_NO_OUTPUT,
+    FAIL_NO_GCODE,
+    FAIL_PLATE_GONE,
+    FAIL_PLATE_CHANGED,
+    FAIL_PLATE_RENAMED,
+    FAIL_FILE_CHANGED,
+)
 
 _reslice_asked: dict[tuple[int, str], float] = {}  # (project id, version) -> when a start asked to re-slice it
+_sha_cache: dict[tuple[str, int, int], str] = {}  # (path, mtime_ns, size) -> sha256: not read again every tick
 
 
 async def fail_queued(db: AsyncSession, item: PrintQueueItem, reason: str) -> None:
@@ -392,18 +404,22 @@ async def fail_queued(db: AsyncSession, item: PrintQueueItem, reason: str) -> No
 
 
 async def fail_queued_jobs(db: AsyncSession, plate_ids: set[int], reason: str) -> None:
-    """Farm jobs of these plates still waiting in the queue fail now (``plates.refresh_plates``), not at their start."""
+    """Farm jobs of these plates still waiting in the queue fail now (``plates.refresh_plates``), not at their start.
+
+    ``reason``, unless the job's own check says more (its objects only renamed).
+    """
     if not plate_ids:
         return
     rows = await db.execute(
-        select(PrintQueueItem)
+        select(PrintQueueItem, FarmPrintJob)
         .join(FarmPrintJob, FarmPrintJob.queue_item_id == PrintQueueItem.id)
         .where(
             FarmPrintJob.status == "queued", FarmPrintJob.plate_id.in_(plate_ids), PrintQueueItem.status == "pending"
         )
     )
-    for item in rows.scalars().all():
-        await fail_queued(db, item, reason)
+    for item, job in rows.all():
+        own = await job_change_reason(db, job) if reason == FAIL_PLATE_CHANGED else None
+        await fail_queued(db, item, own or reason)
 
 
 def _plate_objects(plate: FarmPlate) -> dict[str, int]:
@@ -416,21 +432,49 @@ async def job_change_reason(db: AsyncSession, job: FarmPrintJob) -> str | None:
     if plate is None:
         return FAIL_PLATE_GONE
     if job.queued_as is not None:
-        changed = _plate_objects(plate) != job.queued_as.get("objects")
-    else:  # queued before ``queued_as``: the pieces of its component it was queued for
-        comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))
-        changed = comp is not None and _pieces(plate, comp, await product_shapes(db)) != job.pieces
+        now, then = _plate_objects(plate), job.queued_as.get("objects") or {}
+        if now == then:
+            return None
+        # The same quantities under other names: renamed in the slicer, maybe the same pieces, still checked by hand.
+        return FAIL_PLATE_RENAMED if sorted(now.values()) == sorted(then.values()) else FAIL_PLATE_CHANGED
+    # Queued before ``queued_as``: only the pieces of its component, and not at all when the component is gone.
+    comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))
+    changed = comp is not None and _pieces(plate, comp, await product_shapes(db)) != job.pieces
     return FAIL_PLATE_CHANGED if changed else None
 
 
+def _cached_sha(path: Path) -> str | None:
+    """sha256 of a file, read again only when its path, mtime or size change. None: unreadable."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if key not in _sha_cache:
+        if (sha := _sha256_of(path)) is None:
+            return None
+        if len(_sha_cache) > 512:  # one entry per queued file version: never more than a few
+            _sha_cache.clear()
+        _sha_cache[key] = sha
+    return _sha_cache[key]
+
+
 async def _file_sha(db: AsyncSession, lib_file: LibraryFile) -> str | None:
-    return await asyncio.to_thread(_sha256_of, await _local_path(db, lib_file))
+    """sha256 of the local copy of a file to print (a NAS file is fetched into the cache first). None: unreadable."""
+    return await asyncio.to_thread(_cached_sha, await _local_path(db, lib_file))
 
 
-async def _sends(db: AsyncSession, job: FarmPrintJob | None, lib_file: LibraryFile) -> None:
-    """The job now sends this file: a new slice of the same pieces (checked before), from the current 3MF."""
-    if job is not None and job.queued_as is not None:
-        job.queued_as = {**job.queued_as, "file_hash": await _file_sha(db, lib_file)}
+async def _sends(db: AsyncSession, job: FarmPrintJob | None, lib_file: LibraryFile) -> bool:
+    """The job now sends this file: a new slice of the same pieces (checked before), from the current 3MF.
+
+    False when it can't be read now: the item waits, still on what it was queued with.
+    """
+    if job is None or job.queued_as is None:
+        return True
+    if (sha := await _file_sha(db, lib_file)) is None:
+        return False
+    job.queued_as = {**job.queued_as, "file_hash": sha}
+    return True
 
 
 async def _changed_on_nas(db: AsyncSession, state: FarmLibraryFile) -> bool:
@@ -475,10 +519,25 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
         return reason
     reason = await _slice_reason(db, item, job)
     if reason is None and job is not None and (want := (job.queued_as or {}).get("file_hash")):
-        sent = await db.get(LibraryFile, item.library_file_id)
-        if sent is None or await _file_sha(db, sent) != want:
-            return FAIL_FILE_CHANGED  # e.g. written over on the NAS: never sent in place of what was queued
+        return await _file_reason(db, item, want)
     return reason
+
+
+async def _file_reason(db: AsyncSession, item: PrintQueueItem, want: str) -> str | None:
+    """The file the item sends must be the one queued: read and different fails, not readable now waits."""
+    from backend.app.farm.nas.cache import ensure_local
+
+    sent = await db.get(LibraryFile, item.library_file_id)
+    if sent is None:
+        return FAIL_NO_OUTPUT
+    have = await _file_sha(db, sent)
+    if have is None:
+        return WAIT_FILE_UNREADABLE  # NAS down and no cache copy, or the cache evicted it: it comes back
+    if have == want:
+        return None
+    if sent.is_external and not await ensure_local(db, sent):
+        return WAIT_FILE_UNREADABLE  # an old cache copy the NAS couldn't confirm: no proof it changed
+    return FAIL_FILE_CHANGED  # e.g. written over on the NAS: never sent in place of what was queued
 
 
 async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJob | None) -> str | None:
@@ -518,8 +577,9 @@ async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJo
             if plate is not None and plate.source_sha256 != state.sha256:
                 return WAIT_NEW_SLICE  # the job's pieces are checked on the new version's plates, not read yet
             if output is lib_file:
+                if not await _sends(db, job, newer):
+                    return WAIT_FILE_UNREADABLE
                 item.library_file_id = newer.id
-                await _sends(db, job, newer)
                 await db.commit()
                 logger.info("Queue item %d: moved to the new slice %s", item.id, newer.filename)
                 return None
@@ -533,8 +593,9 @@ async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJo
             return WAIT_SLICE_UNREADABLE
         if gcode is None:
             return FAIL_NO_GCODE
+        if not await _sends(db, job, gcode):
+            return WAIT_FILE_UNREADABLE
         item.library_file_id = gcode.id
-        await _sends(db, job, gcode)
         await db.commit()
         logger.info("Queue item %d: G-code extracted again from the new slice of %s", item.id, output.filename)
     return None
@@ -932,6 +993,10 @@ async def dispatch_once(db: AsyncSession) -> int:
                             for f in slots
                         ]
                     )
+                    # Its fingerprint, or no queue item: without it the start couldn't check what it sends.
+                    if (file_hash := await _file_sha(db, send)) is None:
+                        reasons.append(f"plate {plate.plate_index}: the sliced file can't be read now")
+                        continue
                     position = (await db.scalar(select(func.max(PrintQueueItem.position)))) or 0
                     item = PrintQueueItem(
                         printer_id=printer["id"],
@@ -953,11 +1018,8 @@ async def dispatch_once(db: AsyncSession) -> int:
                     await db.flush()
                     job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp, own)
-                    job.queued_as = {  # what this item prints: checked again before it starts
-                        "plate_sha256": plate.source_sha256,
-                        "objects": _plate_objects(plate),
-                        "file_hash": await _file_sha(db, send),
-                    }
+                    # What this item prints: checked again before it starts.
+                    job.queued_as = {"objects": _plate_objects(plate), "file_hash": file_hash}
                     job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
                     busy.add(printer["id"])
                     created += 1

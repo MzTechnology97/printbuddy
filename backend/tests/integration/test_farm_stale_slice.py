@@ -404,7 +404,7 @@ async def test_a_kept_slice_moves_to_the_new_one_only_with_the_same_pieces(db_se
     sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()  # noqa: E731
     job = FarmPrintJob(component_code="C-0001", plate_ids=[plate.id], expected_pieces=4, status="queued")
     job.queue_item_id, job.plate_id, job.pieces = q.item.id, plate.id, 4
-    job.queued_as = {"plate_sha256": "v1", "objects": {"part": 4}, "file_hash": sha(q.src)}
+    job.queued_as = {"objects": {"part": 4}, "file_hash": sha(q.src)}
     new_src = tmp_path / "part - 1a2b3c4d.gcode.3mf"
     with zipfile.ZipFile(new_src, "w") as zf:
         zf.writestr("Metadata/plate_1.gcode", "; second")

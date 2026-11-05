@@ -43,7 +43,7 @@ class FarmPrintJob(Base):
     printed_pieces: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # What the print dialog sets on the upstream queue item: ams_mapping, scheduled_time (ISO, UTC), manual_start...
     queue_options: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # What the queue item was made to print (``service.dispatch_once``): {"plate_sha256", "objects": {name: qty},
+    # What the queue item was made to print (``service.dispatch_once``): {"objects": {name: qty},
     # "file_hash": sha256 of the file it sends}; checked before it starts. NULL: queued before it was kept
     queued_as: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # A print outside the queue: "archive:<id>" or "klipper:<printer id>:<Moonraker job id>"
