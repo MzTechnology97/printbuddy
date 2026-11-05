@@ -218,3 +218,28 @@ def test_brand_from_the_profile_name(profile, brand):
 
 def test_cf_is_not_added_twice():
     assert auto_spools.material_of("PETG-CF", "IEMAI PETG-CF CF @ H2D 0.4 nozzle") == "PETG-CF"
+
+
+@pytest.mark.parametrize(
+    ("hex_", "profile", "name"),
+    [
+        ("404040", None, "grigio scuro"),  # was "marrone scuro", the nearest hue in the table
+        ("161616", None, "nero"),
+        ("8a8a8a", None, "grigio"),
+        ("a7a9aa", None, "grigio chiaro"),
+        ("ffffff", None, "bianco"),
+        ("c0c0c0", "Bambu PLA Basic-Silver @BBL P1S", "grigio"),  # the profile names it
+        ("000000", "Bambu ABS-GF Black E3D", "nero"),
+        ("82573e", "Jayo Wood PLA @K1", "marrone"),  # a real brown, by the table
+        ("ff00ff", None, None),  # not a farm colour
+    ],
+)
+def test_colour_names(hex_, profile, name):
+    from backend.app.farm.plan.service import DEFAULT_COLORS
+
+    assert auto_spools.colour_name(hex_, profile, DEFAULT_COLORS, 80) == name
+
+
+def test_pbt_glued_to_pro_is_pbt():
+    assert auto_spools.material_of("PETG", "CC3D-PBTPro @X1C") == "PBT"
+    assert auto_spools.brand_from_name("CC3D-PBTPro @X1C") == "CC3D"

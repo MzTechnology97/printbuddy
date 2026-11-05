@@ -71,6 +71,10 @@ def _real(brand: str | None) -> str | None:
 _MATERIALS = ("PCTG", "PETG", "PBT", "PLA", "ABS", "ASA", "TPU", "PA12", "PA6", "PA", "PC", "PET", "PP", "PVA", "HIPS")
 
 
+# After a material: a separator, the end, or "Pro" glued to it ("CC3D-PBTPro").
+_END = r"(?=PRO|[^A-Z0-9]|$)"
+
+
 def material_of(filament_type: str | None, profile: str | None) -> str | None:
     """The material, from the profile's name when it says more than ``filament_type`` (PBT, -CF, -GF).
 
@@ -78,11 +82,11 @@ def material_of(filament_type: str | None, profile: str | None) -> str | None:
     """
     name = (profile or "").upper().split("@")[0]
     ftype = (filament_type or "").upper()
-    if ftype and re.search(rf"\b{re.escape(ftype)}\b", name):
+    if ftype and re.search(rf"\b{re.escape(ftype)}{_END}", name):
         more = re.search(rf"\b{re.escape(ftype)}[-\s]?(CF|GF)\b", name)
         return f"{ftype}-{more.group(1)}" if more and not ftype.endswith(("-CF", "-GF")) else ftype
     for mat in _MATERIALS:
-        found = re.search(rf"\b{mat}(?:[-\s]?(CF|GF))?\b", name)
+        found = re.search(rf"\b{mat}(?:[-\s]?(CF|GF))?{_END}", name)
         if found:
             return f"{mat}-{found.group(1)}" if found.group(1) else mat
     return ftype or None
@@ -91,7 +95,7 @@ def material_of(filament_type: str | None, profile: str | None) -> str | None:
 def brand_from_name(profile: str | None) -> str | None:
     """The brand the owner wrote before the material in the profile's name ("CC3D PBT-PRO @X2D" -> "CC3D")."""
     name = (profile or "").split("@")[0]
-    found = re.search(rf"\b(?:{'|'.join(_MATERIALS)})\b", name.upper())
+    found = re.search(rf"\b(?:{'|'.join(_MATERIALS)}){_END}", name.upper())
     brand = name[: found.start()].strip(" -_()") if found else ""
     return brand if len(brand) > 1 else None
 
@@ -103,10 +107,31 @@ def _slot(cfg: dict, name: str, slot: int) -> str | None:
     return None
 
 
-def _colour_name(hex_: str, colours: dict[str, str], tolerance: float) -> str | None:
-    """The farm's name for this colour (its colour table, as for the colour variants), or None."""
+# Colour words in a profile's name, in English or Italian -> the farm's name.
+_WORDS = {
+    "black": "nero", "nero": "nero", "white": "bianco", "bianco": "bianco",
+    "silver": "grigio", "grey": "grigio", "gray": "grigio", "grigio": "grigio", "argento": "grigio",
+    "red": "rosso", "rosso": "rosso", "blue": "blu", "blu": "blu", "green": "verde", "verde": "verde",
+    "yellow": "giallo", "giallo": "giallo", "orange": "arancio", "arancio": "arancio",
+    "brown": "marrone", "marrone": "marrone", "beige": "beige",
+}  # fmt: skip
+# Neutrals by lightness (0-1), never by the nearest hue: a dark grey is not "dark brown".
+_NEUTRALS = ((0.15, "nero"), (0.35, "grigio scuro"), (0.65, "grigio"), (0.85, "grigio chiaro"), (1.01, "bianco"))
+NEUTRAL_CHROMA = 30  # largest max-min of R, G, B for a grey
+
+
+def colour_name(hex_: str, profile: str | None, colours: dict[str, str], tolerance: float) -> str | None:
+    """The colour's name: the one in the profile's name if any; a grey by its lightness; otherwise the
+    nearest of the farm's colour table within its tolerance (as for the colour variants), or None."""
     from backend.app.farm.plan.service import color_distance
 
+    for word in re.findall(r"[a-z]+", (profile or "").lower()):
+        if word in _WORDS:
+            return _WORDS[word]
+    rgb = [int(hex_[i : i + 2], 16) for i in (0, 2, 4)]
+    if max(rgb) - min(rgb) <= NEUTRAL_CHROMA:
+        light = (max(rgb) + min(rgb)) / 510
+        return next(name for top, name in _NEUTRALS if light < top)
     near = sorted((color_distance(h, hex_), name) for name, h in colours.items() if len(h) == 6)
     return near[0][1] if near and near[0][0] <= tolerance else None
 
@@ -186,7 +211,7 @@ async def plan(db: AsyncSession) -> list[dict]:
             hex_ = (_slot(cfg, "filament_colour", slot) or "").lstrip("#")[:6].lower()
             if not material or not re.fullmatch(r"[0-9a-f]{6}", hex_):
                 continue
-            colour = _colour_name(hex_, config["colors"], config["tolerance"])
+            colour = colour_name(hex_, profile, config["colors"], config["tolerance"])
             if colour is None:
                 continue  # a colour the farm does not name: no spool with a made-up colour
             preset = presets.get(profile or "")
@@ -211,15 +236,14 @@ async def plan(db: AsyncSession) -> list[dict]:
                 )
             ):
                 continue
-            ref = config["colors"][colour]
-            if _has_spool(spools, brand, material, colour, ref, config["tolerance"]):
+            if _has_spool(spools, brand, material, colour, hex_, config["tolerance"]):
                 continue  # Inventory has it already
             wanted[key] = {
                 "key": key,
                 "brand": brand,
                 "material": material,
                 "color_name": colour.capitalize(),
-                "rgba": f"{ref.upper()}FF",
+                "rgba": f"{hex_.upper()}FF",
                 "slicer_filament": str(preset.id) if preset else None,
                 "slicer_filament_name": profile,
                 "from": f"{lib_file.filename} plate {plate.plate_index}",
