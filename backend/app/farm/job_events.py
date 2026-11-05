@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import JSON, DateTime, Integer, String, delete, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -57,6 +58,8 @@ class FarmJobEvent(Base):
 
 _pending: list[dict] = []
 _task: asyncio.Task | None = None
+_lock: asyncio.Lock | None = None  # the writer and timeline() flush: never the same batch twice
+_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _now() -> datetime:
@@ -133,30 +136,65 @@ async def _writer() -> None:
         await flush()
 
 
-async def flush() -> int:
-    """Write what is pending; on a failure it stays pending for the next try. Returns how many were written."""
-    if not _pending:
-        return 0
-    batch = list(_pending)
-    try:
-        from backend.app.farm.jobs.models import FarmPrintJob
+def _flush_lock() -> asyncio.Lock:
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock, _lock_loop = asyncio.Lock(), loop
+    return _lock
 
-        async with database.async_session() as db:
-            items = {e["queue_item_id"] for e in batch if e["queue_item_id"] and not e["job_id"]}
-            owner: dict[int, int] = {}
-            if items:
-                rows = await db.execute(
-                    select(FarmPrintJob.queue_item_id, FarmPrintJob.id).where(FarmPrintJob.queue_item_id.in_(items))
-                )
-                owner = dict(rows.all())
-            for e in batch:
-                db.add(FarmJobEvent(**{**e, "job_id": e["job_id"] or owner.get(e["queue_item_id"])}))
-            await db.commit()
-    except Exception as exc:
-        logger.debug("Job events not written yet (%d pending): %s", len(_pending), exc)
-        return 0
-    del _pending[: len(batch)]
-    return len(batch)
+
+def _transient(exc: Exception) -> bool:
+    """The database is busy (or not there): try again later. Anything else is the event's own fault."""
+    return isinstance(exc, OperationalError) or "locked" in str(exc).lower()
+
+
+async def _write(batch: list[dict]) -> None:
+    from backend.app.farm.jobs.models import FarmPrintJob
+
+    async with database.async_session() as db:
+        items = {e["queue_item_id"] for e in batch if e.get("queue_item_id") and not e.get("job_id")}
+        owner: dict[int, int] = {}
+        if items:
+            rows = await db.execute(
+                select(FarmPrintJob.queue_item_id, FarmPrintJob.id).where(FarmPrintJob.queue_item_id.in_(items))
+            )
+            owner = dict(rows.all())
+        for e in batch:
+            db.add(FarmJobEvent(**{**e, "job_id": e.get("job_id") or owner.get(e.get("queue_item_id"))}))
+        await db.commit()
+
+
+async def flush() -> int:
+    """Write what is pending, one flush at a time. Returns how many were written.
+
+    The database busy: everything stays pending for the next try. An event the database refuses
+    (a bad value) is dropped with a warning, so it never holds up the others.
+    """
+    async with _flush_lock():
+        if not _pending:
+            return 0
+        batch = list(_pending)
+        try:
+            await _write(batch)
+        except Exception as exc:
+            if _transient(exc):
+                logger.debug("Job events not written yet (%d pending): %s", len(_pending), exc)
+                return 0
+            written = 0
+            for n, e in enumerate(batch):  # find the bad one(s): each on its own
+                try:
+                    await _write([e])
+                    written += 1
+                except Exception as one:
+                    if _transient(one):
+                        del _pending[:n]
+                        return written
+                    logger.warning("Job event dropped (%s): %s", type(one).__name__, e.get("phase"))
+            del _pending[: len(batch)]
+            return written
+        del _pending[: len(batch)]
+        return len(batch)
 
 
 async def stop() -> None:

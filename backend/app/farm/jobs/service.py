@@ -1093,6 +1093,8 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob, who: dict | None = Non
         item = await db.get(PrintQueueItem, job.queue_item_id)
         if item is not None and item.status == "printing":
             raise HTTPException(409, "Already printing: stop it from the printer or the queue")
+        if item is not None and item.status == "pending" and item.dispatching_at is not None:
+            raise HTTPException(409, "Being sent to the printer right now: try again in a minute")
         if item is not None and item.status == "pending":
             item.status = "cancelled"
             item.completed_at = datetime.now(timezone.utc)

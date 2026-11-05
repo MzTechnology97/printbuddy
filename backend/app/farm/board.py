@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,13 +35,48 @@ from backend.app.models.printer import Printer
 router = APIRouter(prefix="/farm/board", tags=["farm"])
 _read = Depends(require_permission_if_auth_enabled(Permission.QUEUE_READ))
 _act = Depends(require_permission_if_auth_enabled(Permission.QUEUE_CREATE))
+# a forced slice cancels the job's queue item: the same permission as cancelling the job
+_delete = Depends(require_permission_if_auth_enabled(Permission.QUEUE_DELETE_ALL))
 
 PROBLEM_HOURS = 24  # a print that failed stays in "problems" this long, then it is history
 RECENT_DAYS = 2  # cancelled jobs without a queue item shown in the history
 TERMINAL = ("completed", "failed", "cancelled", "skipped")
 # A waiting job's note that says something went wrong (from the dispatcher and the slicing notes)
 _TROUBLE = re.compile(r"failed|not reachable|timed out|can't|No reference|changed|deleted|renamed", re.I)
-_SECRET = re.compile(r"(access[_ ]?code|password|token|secret|api[_-]?key)(['\"]?\s*[:=]\s*)\S+", re.I)
+_SECRETS = (
+    # key = value, key: "value with spaces", "key": "value" (JSON)
+    (
+        re.compile(
+            r"(access[_ ]?code|password|passwd|pwd|token|secret|api[_-]?key|auth[_-]?key)"
+            r"(['\"]?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+            re.I,
+        ),
+        r"\1\2***",
+    ),
+    (re.compile(r"(authorization['\"]?\s*[:=]\s*['\"]?)(?:(bearer|basic|token)\s+)?[^\s'\",;]+", re.I), r"\1\2 ***"),
+    (re.compile(r"(\bbearer\s+)[A-Za-z0-9._~+/=-]+", re.I), r"\1***"),
+    (re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", re.I), r"\1***:***@"),  # user:pass@host
+    (re.compile(r"(/bot)\d+:[A-Za-z0-9_-]+"), r"\1***"),  # a Telegram bot token in a URL
+    (re.compile(r"(\bPASS\s+)\S+"), r"\1***"),  # the FTP login in an upload log
+)
+
+
+_SECRET_KEY = re.compile(
+    r"^(access[_ ]?code|password|passwd|pwd|token|secret|api[_-]?key|auth[_-]?key|authorization)$", re.I
+)
+
+
+def _mask(value):
+    """Secrets masked in a text, or in every text of a detail (dicts and lists walked)."""
+    if isinstance(value, str):
+        for pattern, repl in _SECRETS:
+            value = pattern.sub(repl, value)
+        return value.replace("  ***", " ***")
+    if isinstance(value, dict):
+        return {k: "***" if v and _SECRET_KEY.search(str(k)) else _mask(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask(v) for v in value]
+    return value
 
 
 def _now() -> datetime:
@@ -157,29 +192,54 @@ def _row(job, item, printer, comp, archive, sliced, state) -> dict:
     }
 
 
-async def _context(db: AsyncSession, job: FarmPrintJob | None, item: PrintQueueItem | None) -> tuple:
-    printer_id = (item.printer_id if item is not None else None) or (job.printer_id if job is not None else None)
-    printer = await db.get(Printer, printer_id) if printer_id else None
-    comp = (
-        await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))
-        if job is not None and job.component_code
-        else None
-    )
-    archive = await db.get(PrintArchive, item.archive_id) if item is not None and item.archive_id else None
-    sliced = await db.get(LibraryFile, item.library_file_id) if item is not None and item.library_file_id else None
-    plate_id = (job.plate_id or (job.plate_ids or [None])[0]) if job is not None else None
-    plate = await db.get(FarmPlate, plate_id) if plate_id else None
-    state = (
-        await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == plate.library_file_id))
-        if plate is not None
-        else None
-    )
-    return printer, comp, archive, sliced, state, plate
+def _printer_id(job: FarmPrintJob | None, item: PrintQueueItem | None) -> int | None:
+    return (item.printer_id if item is not None else None) or (job.printer_id if job is not None else None)
+
+
+def _plate_id(job: FarmPrintJob | None) -> int | None:
+    return (job.plate_id or (job.plate_ids or [None])[0]) if job is not None else None
+
+
+async def _contexts(db: AsyncSession, pairs: list) -> list[tuple]:
+    """Printer, component, archive, sliced file, project state and plate of each (job, item): six IN queries."""
+
+    async def by(model, column, keys) -> dict:
+        keys = {k for k in keys if k}
+        if not keys:
+            return {}
+        rows = (await db.execute(select(model).where(column.in_(keys)))).scalars()
+        return {getattr(r, column.key): r for r in rows}
+
+    items = [item for _, item in pairs if item is not None]
+    jobs = [job for job, _ in pairs if job is not None]
+    printers = await by(Printer, Printer.id, (_printer_id(j, i) for j, i in pairs))
+    comps = await by(FarmComponent, FarmComponent.code, (j.component_code for j in jobs))
+    archives = await by(PrintArchive, PrintArchive.id, (i.archive_id for i in items))
+    files = await by(LibraryFile, LibraryFile.id, (i.library_file_id for i in items))
+    plates = await by(FarmPlate, FarmPlate.id, (_plate_id(j) for j in jobs))
+    states = await by(FarmLibraryFile, FarmLibraryFile.library_file_id, (p.library_file_id for p in plates.values()))
+    out = []
+    for job, item in pairs:
+        plate = plates.get(_plate_id(job))
+        out.append(
+            (
+                printers.get(_printer_id(job, item)),
+                comps.get(job.component_code) if job is not None else None,
+                archives.get(item.archive_id) if item is not None else None,
+                files.get(item.library_file_id) if item is not None else None,
+                states.get(plate.library_file_id) if plate is not None else None,
+                plate,
+            )
+        )
+    return out
 
 
 @router.get("", dependencies=[_read])
 async def board(
-    printer_id: int | None = None, history_offset: int = 0, history_limit: int = 30, db: AsyncSession = Depends(get_db)
+    printer_id: int | None = None,
+    history_offset: int = Query(0, ge=0),
+    history_limit: int = Query(30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     recent = _now() - timedelta(days=RECENT_DAYS)
     pairs: list[tuple[FarmPrintJob | None, PrintQueueItem | None]] = []
@@ -230,8 +290,10 @@ async def board(
     history = sorted(groups["history"], key=ended, reverse=True)
     groups["history"] = history[history_offset : history_offset + history_limit]
     out: dict = {"history_total": len(history)}
+    shown = [pair for members in groups.values() for pair in members]
+    contexts = iter(await _contexts(db, shown))
     for name, members in groups.items():
-        out[name] = [_row(job, item, *(await _context(db, job, item))[:5]) for job, item in members]
+        out[name] = [_row(job, item, *next(contexts)[:5]) for job, item in members]
     return out
 
 
@@ -256,9 +318,9 @@ def _event_dict(e: FarmJobEvent) -> dict:
         "at": e.at,
         "phase": e.phase,
         "level": e.level,
-        "message": e.message,
+        "message": _mask(e.message),
         "printer_id": e.printer_id,
-        "detail": e.detail,
+        "detail": _mask(e.detail),  # upload logs, failure details: what the printer or the NAS answered
     }
 
 
@@ -299,13 +361,13 @@ def _log_lines(needles: list[str], limit: int = 150) -> list[str]:
             lines = [ln.rstrip() for ln in fh if any(n in ln for n in needles)]
     except OSError:
         return []
-    return [_SECRET.sub(r"\1\2***", ln)[:1000] for ln in lines[-limit:]]
+    return [_mask(ln)[:1000] for ln in lines[-limit:]]
 
 
 @router.get("/{key}", dependencies=[_read])
 async def detail(key: str, db: AsyncSession = Depends(get_db)) -> dict:
     job, item = await _find(db, key)
-    printer, comp, archive, sliced, state, plate = await _context(db, job, item)
+    printer, comp, archive, sliced, state, plate = (await _contexts(db, [(job, item)]))[0]
     row = _row(job, item, printer, comp, archive, sliced, state)
     technical = {
         "job": None
@@ -389,7 +451,7 @@ async def detail(key: str, db: AsyncSession = Depends(get_db)) -> dict:
     return {
         "row": row,
         "events": await timeline(db, job, item),
-        "technical": technical,
+        "technical": _mask(technical),
         "log": _log_lines(needles),
     }
 
@@ -417,18 +479,22 @@ async def retry_slice(key: str, request: Request, db: AsyncSession = Depends(get
     return {"asked": asked}
 
 
-@router.post("/{key}/reslice", dependencies=[_act])
+@router.post("/{key}/reslice", dependencies=[_delete])
 async def reslice(key: str, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
     """Slice the job's plates again from the 3MF, even when a slice exists (a wrong or broken one).
 
     A job already queued, or whose print failed, goes back to waiting: it is sent again with the new slice.
     A slice used by another queued print is never overwritten: the new one is saved beside it (#104).
+    The current slice is marked superseded at once, so the job waits for the new one and is never placed
+    again with the old one while the new one is being made.
     """
     from backend.app.farm import slicing
 
     job, item = await _farm_job(db, key)
     if item is not None and item.status == "printing":
         raise HTTPException(409, "Printing now: stop it first")
+    if item is not None and item.status == "pending" and item.dispatching_at is not None:
+        raise HTTPException(409, "Being sent to the printer right now: try again in a minute")
     if item is not None and item.status == "pending":
         item.status = "cancelled"
         item.completed_at = datetime.now(timezone.utc)
@@ -471,8 +537,12 @@ async def _slice_again(db: AsyncSession, job: FarmPrintJob, slicing, *, force: b
         key = slicing._queue_key(plate.library_file_id, plate.plate_index, job.color)
         slicing._failed.pop(key, None)
         slicing._forget_asked(key)
-        if not force and await slicing.variant_slice(db, plate, job.color) is not None:
+        current = await slicing.variant_slice(db, plate, job.color)
+        if current is not None and not force:
             continue  # already sliced: nothing to retry for this plate
+        if current is not None:  # forced: not used any more, the job waits for the new slice (#113)
+            current.file_metadata = {**(current.file_metadata or {}), "superseded_at": _now().isoformat()}
+            await db.commit()
         if await slicing.ask_variant_slicing(db, plate, job.color):
             asked += 1
     return asked

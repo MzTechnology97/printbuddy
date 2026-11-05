@@ -1,15 +1,18 @@
 """Printfarm (fork): the queue page's Jobs board and the per-job event log. No printer or slicer is contacted."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from backend.app.farm import job_events
+from backend.app.farm import job_events, slicing
+from backend.app.farm.board import _mask
 from backend.app.farm.job_events import FarmJobEvent
 from backend.app.farm.jobs.models import FarmPrintJob
-from backend.app.farm.models import FarmLibraryFile  # noqa: F401  (its table in the test database)
+from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
@@ -232,10 +235,157 @@ async def test_requeue_and_reslice(async_client, db_session, printer_factory):
         # Printing: no new slice under it.
         assert (await async_client.post(f"/api/v1/farm/board/job:{jobs['printing'].id}/reslice")).status_code == 409
         # Forced even when a slice exists; a plain retry then has nothing to ask.
-        with patch("backend.app.farm.slicing.variant_slice", AsyncMock(return_value=object())):
+        with patch("backend.app.farm.slicing.variant_slice", AsyncMock(return_value=SimpleNamespace(file_metadata={}))):
             key = f"job:{jobs['waiting'].id}"
             assert (await async_client.post(f"/api/v1/farm/board/{key}/reslice")).json() == {"asked": 1}
             assert (await async_client.post(f"/api/v1/farm/board/{key}/retry-slice")).json() == {"asked": 0}
     await job_events.flush()
     actions = (await db_session.execute(select(FarmJobEvent).where(FarmJobEvent.phase == "action"))).scalars().all()
     assert len(actions) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_forced_slice_is_waited_for_never_the_old_one_printed(async_client, db_session, printer_factory):
+    _, plate, _, _ = await make(db_session, printer_factory)
+    project = await db_session.get(LibraryFile, plate.library_file_id)
+    db_session.add(
+        FarmLibraryFile(watch_folder_id=1, library_file_id=project.id, path="/nas/M.3mf", mtime=1, size=1, sha256="v1")
+    )
+    old = LibraryFile(
+        filename="Maniglia - plate 2.gcode.3mf",
+        file_path="/x/old.gcode.3mf",
+        file_type="gcode",
+        file_size=10,
+        source_type="sliced",
+        file_metadata={"sliced_from_library_file_id": project.id, "sliced_from_sha256": "v1", "sliced_plate": 2},
+    )
+    job = FarmPrintJob(component_code="C-0085", color=None, plate_ids=[plate.id], expected_pieces=8, status="waiting")
+    db_session.add_all([old, job])
+    await db_session.commit()
+    assert (await slicing.variant_slice(db_session, plate, None)).id == old.id
+    with patch("backend.app.farm.slicing.ask_variant_slicing", AsyncMock(return_value=True)):
+        r = await async_client.post(f"/api/v1/farm/board/job:{job.id}/reslice")
+    assert r.json() == {"asked": 1}
+    # Until the new slice is saved the plate has none: the dispatcher waits, it never places the old one.
+    await db_session.refresh(old)
+    assert old.file_metadata["superseded_at"]
+    assert await slicing.variant_slice(db_session, plate, None) is None
+
+
+@pytest.mark.asyncio
+async def test_never_cancelled_while_being_sent(async_client, db_session, printer_factory):
+    printer, _, jobs, _ = await make(db_session, printer_factory)
+    sending = PrintQueueItem(printer_id=printer.id, position=9, status="pending", dispatching_at=now())
+    db_session.add(sending)
+    await db_session.flush()
+    job = jobs["waiting"]
+    job.status, job.queue_item_id = "queued", sending.id
+    await db_session.commit()
+    assert (await async_client.post(f"/api/v1/farm/board/job:{job.id}/reslice")).status_code == 409
+    assert (await async_client.delete(f"/api/v1/farm/jobs/{job.id}")).status_code == 409
+    await db_session.refresh(sending)
+    assert sending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_forcing_a_slice_needs_the_permission_to_cancel(async_client, db_session, printer_factory):
+    _, _, jobs, _ = await make(db_session, printer_factory)
+    await async_client.post(
+        "/api/v1/auth/setup",
+        json={"auth_enabled": True, "admin_username": "boardadmin", "admin_password": "AdminPass1!"},
+    )
+    admin = (
+        await async_client.post("/api/v1/auth/login", json={"username": "boardadmin", "password": "AdminPass1!"})
+    ).json()["access_token"]
+    groups = (await async_client.get("/api/v1/groups/", headers={"Authorization": f"Bearer {admin}"})).json()
+    operators = next(g for g in groups if g["name"] == "Operators")  # queue:create, not queue:delete_all
+    await async_client.post(
+        "/api/v1/users/",
+        headers={"Authorization": f"Bearer {admin}"},
+        json={"username": "boardop", "password": "Operatorpass1!", "group_ids": [operators["id"]]},
+    )
+    op = (
+        await async_client.post("/api/v1/auth/login", json={"username": "boardop", "password": "Operatorpass1!"})
+    ).json()["access_token"]
+    key = f"job:{jobs['waiting'].id}"
+    with patch("backend.app.farm.slicing.ask_variant_slicing", AsyncMock(return_value=False)):
+        forced = await async_client.post(f"/api/v1/farm/board/{key}/reslice", headers={"Authorization": f"Bearer {op}"})
+        retried = await async_client.post(
+            f"/api/v1/farm/board/{key}/retry-slice", headers={"Authorization": f"Bearer {op}"}
+        )
+    assert forced.status_code == 403
+    assert retried.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_one_flush_at_a_time_and_a_bad_event_is_dropped(db_session):
+    for n in range(5):
+        job_events.record("created", f"job {n}", job_id=n + 1)
+    # The writer and a timeline flush at the same moment: every event once, none lost.
+    assert sum(await asyncio.gather(job_events.flush(), job_events.flush())) == 5
+    assert len((await db_session.execute(select(FarmJobEvent))).scalars().all()) == 5
+    # An event the database refuses is dropped with a warning; the others are written.
+    job_events.record("created", "good one", job_id=10)
+    job_events._pending.append({**job_events._pending[0], "no_such_column": 1})
+    job_events.record("created", "good two", job_id=11)
+    assert await job_events.flush() == 2
+    assert job_events._pending == []
+
+
+def test_secrets_are_masked():
+    assert _mask("Authorization: Bearer abc.def-123") == "Authorization: Bearer ***"
+    assert _mask("sent with bearer eyJhbGciOi.x.y") == "sent with bearer ***"
+    assert _mask("ftp://bblp:12345678@192.0.2.1/model.3mf") == "ftp://***:***@192.0.2.1/model.3mf"
+    assert _mask("POST https://api.telegram.org/bot123456:AA-bc_d/sendMessage") == (
+        "POST https://api.telegram.org/bot***/sendMessage"
+    )
+    assert _mask('password="with some spaces" next') == "password=*** next"
+    assert _mask('{"api_key": "k e y", "plate": 2}') == '{"api_key": ***, "plate": 2}'
+    assert _mask({"log": ["access_code=12345678"], "token": "abc", "plate": 2}) == {
+        "log": ["access_code=***"],
+        "token": "***",
+        "plate": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_event_details_are_masked_on_the_way_out(async_client, db_session, printer_factory):
+    _, _, jobs, _ = await make(db_session, printer_factory)
+    job = jobs["failed"]
+    job_events.record(
+        "upload_failed",
+        "FTP 530 for ftp://bblp:secretcode@printer/x",
+        queue_item_id=job.queue_item_id,
+        detail={"log": ["USER bblp", "PASS secretcode", "Authorization: Bearer tok3n"], "password": "p w"},
+    )
+    got = (await async_client.get(f"/api/v1/farm/board/job:{job.id}")).json()
+    text = str(got)
+    assert "secretcode" not in text and "tok3n" not in text and "p w" not in text
+
+
+@pytest.mark.asyncio
+async def test_the_board_query_count_does_not_grow_with_rows(async_client, db_session, printer_factory):
+    _, plate, _, _ = await make(db_session, printer_factory)
+    engine = db_session.bind.sync_engine
+    count = {"n": 0}
+
+    def counter(*_):
+        count["n"] += 1
+
+    async def queries() -> int:
+        count["n"] = 0
+        event.listen(engine, "before_cursor_execute", counter)
+        try:
+            assert (await async_client.get("/api/v1/farm/board")).status_code == 200
+        finally:
+            event.remove(engine, "before_cursor_execute", counter)
+        return count["n"]
+
+    before = await queries()
+    db_session.add_all(
+        FarmPrintJob(component_code=f"C-09{n}", plate_ids=[plate.id], expected_pieces=1, status="waiting")
+        for n in range(10)
+    )
+    await db_session.commit()
+    assert await queries() == before
+    assert (await async_client.get("/api/v1/farm/board?history_limit=500")).status_code == 422
