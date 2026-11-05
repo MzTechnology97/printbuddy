@@ -273,6 +273,52 @@ async def test_a_forced_slice_is_waited_for_never_the_old_one_printed(async_clie
 
 
 @pytest.mark.asyncio
+async def test_a_forced_slice_reads_the_3mf_from_the_nas(db_session, printer_factory):
+    _, plate, _, _ = await make(db_session, printer_factory)
+    runs = []
+
+    async def enqueue(**kw):
+        runs.append(kw["run"])
+        return SimpleNamespace(id=77)
+
+    sliced = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {}))
+    with (
+        patch("backend.app.services.slice_dispatch.slice_dispatch.enqueue", enqueue),
+        patch("backend.app.farm.slicing.slice_embedded", sliced),
+    ):
+        assert await slicing.force_slice(db_session, plate, None)
+        await runs[0](77)
+    assert sliced.await_args.kwargs["from_nas"] is True
+    assert slicing._slice_jobs[slicing._queue_key(plate.library_file_id, plate.plate_index, None)] == 77
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_job_shows_how_far_its_slice_is(async_client, db_session, printer_factory):
+    from backend.app.services.slice_dispatch import SliceJob, slice_dispatch
+
+    _, plate, jobs, _ = await make(db_session, printer_factory)
+    key = slicing._queue_key(plate.library_file_id, plate.plate_index, "Nero")
+    slice_dispatch._jobs[9001] = SliceJob(
+        id=9001,
+        kind="library_file",
+        source_id=plate.library_file_id,
+        source_name="M",
+        status="running",
+        progress={"total_percent": 42.4, "stage": "Generating G-code"},
+    )
+    slicing._slice_jobs[key] = 9001
+    try:
+        board = (await async_client.get("/api/v1/farm/board")).json()
+    finally:
+        slice_dispatch._jobs.pop(9001, None)
+        slicing._slice_jobs.pop(key, None)
+    row = next(r for r in board["waiting"] if r["job_id"] == jobs["waiting"].id)
+    assert row["slice_progress"] == {"percent": 42, "stage": "Generating G-code"}
+    printing = next(r for r in board["printing"] if r["job_id"] == jobs["printing"].id)
+    assert printing["slice_progress"] is None
+
+
+@pytest.mark.asyncio
 async def test_never_cancelled_while_being_sent(async_client, db_session, printer_factory):
     printer, _, jobs, _ = await make(db_session, printer_factory)
     sending = PrintQueueItem(printer_id=printer.id, position=9, status="pending", dispatching_at=now())

@@ -154,6 +154,10 @@ export interface FarmPlanPlate {
   /** Solid-piece estimate, set only while the plate has no slicer weight. */
   filament_grams_max?: number | null;
   sliced: boolean;
+  /** The plate's sliced output (its G-code), when sliced. */
+  sliced_file_id?: number | null;
+  /** The slicer the 3MF was made with (detected, or set by hand). */
+  slicer?: string | null;
   score: number;
   printers: {
     id: number;
@@ -237,6 +241,10 @@ export interface FarmJobIn {
   require_previous_success?: boolean;
   auto_off_after?: boolean;
   gcode_injection?: boolean;
+  /** Slice the plates again from the 3MF on the NAS before queuing (never the old slice). */
+  force_slice?: boolean;
+  /** With a chosen printer: send it even without the spool loaded; it starts by itself when the printer is free. */
+  ignore_spool?: boolean;
 }
 
 export interface FarmPrinterSpool {
@@ -355,6 +363,8 @@ export interface FarmBoardRow {
   status_text: string | null;
   failure_phase: string | null;
   slicer: string | null;
+  /** While the plate is being sliced: the slicer's progress. */
+  slice_progress?: { percent: number | null; stage: string | null } | null;
   file: string | null;
   library_file_id: number | null;
   manual_start: boolean;

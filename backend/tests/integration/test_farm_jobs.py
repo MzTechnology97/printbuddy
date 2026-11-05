@@ -6,6 +6,7 @@ No printer is contacted: the live printer snapshot, slicing and file reads are s
 import hashlib
 import json
 import zipfile
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -198,6 +199,42 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
     # No black spool loaded: queued anyway, started by hand after loading it.
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_two, True, None)
     assert "Load the Nero spool on A1 due" in job.note
+
+
+@pytest.mark.asyncio
+async def test_chosen_printer_can_get_it_without_the_spool_and_start_it_alone(async_client, db_session, farm):
+    a1_two = farm["printers"][1]
+    farm["snapshot"][1].update(loaded=[])  # free, nothing loaded
+    r = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {
+                    "component_code": farm["code"],
+                    "plate_ids": farm["plates"],
+                    "printer_id": a1_two,
+                    "ignore_spool": True,
+                }
+            ]
+        },
+    )
+    assert r.status_code == 200, r.text
+    item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
+    job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
+    # Asked in Accoda: no colour check, it starts by itself when the printer is free.
+    assert (item.printer_id, item.manual_start, job.note) == (a1_two, False, None)
+
+
+@pytest.mark.asyncio
+async def test_accoda_can_force_a_new_slice_before_queuing(async_client, db_session, farm):
+    forced = AsyncMock(return_value=True)
+    with patch("backend.app.farm.slicing.force_slice", forced):
+        r = await async_client.post(
+            f"{API}/jobs",
+            json={"jobs": [{"component_code": farm["code"], "plate_ids": farm["plates"], "force_slice": True}]},
+        )
+    assert r.status_code == 200, r.text
+    assert sorted(call.args[1].id for call in forced.await_args_list) == sorted(farm["plates"])
 
     # A printer of a model without a plate is refused.
     bad = await async_client.post(

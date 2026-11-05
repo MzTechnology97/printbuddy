@@ -298,6 +298,10 @@ class TestNasCache:
         await db_session.refresh(lib_file)
         assert await cache.ensure_local(db_session, lib_file)
         assert Path(lib_file.file_path).read_bytes() == (share / SUB / "Box" / "box.3mf").read_bytes()
+        # A forced slice reads the NAS again, even when the cached copy looks current.
+        reads = sum(op == "read" for op, _ in FakeRemote.calls)
+        assert await cache.ensure_local(db_session, lib_file, fresh=True)
+        assert sum(op == "read" for op, _ in FakeRemote.calls) == reads + 1
 
     async def test_refused_connection_is_retried(self, async_client, db_session, share):
         await configure(async_client)
@@ -441,7 +445,6 @@ class TestNasSlicing:
 
 @pytest.mark.integration
 class TestNasUpload:
-
     async def test_a_plate_gone_from_the_project_is_not_resliced(self, async_client, db_session, share, sidecar):
         """Saved again with fewer plates: the output of a vanished plate is left alone, not re-sliced."""
         import asyncio

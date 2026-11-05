@@ -2,13 +2,23 @@
  * Printfarm (fork): "What to print" page. All data is made up.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
 import { AccodaSummary, PrintPlanPage } from '../../farm/PrintPlanPage';
+
+// The 3D viewer itself (three.js) is not drawn here: what it is opened on is what counts.
+vi.mock('../../components/ModelViewerModal', () => ({
+  ModelViewerModal: (p: { title: string; libraryFileId: number; initialTab?: string; initialPlate?: number; onClose: () => void }) => (
+    <div role="dialog" aria-label={`3D ${p.title}`} data-file={p.libraryFileId} data-tab={p.initialTab}
+      data-plate={p.initialPlate ?? ''}>
+      <button type="button" onClick={p.onClose}>Close 3D</button>
+    </div>
+  ),
+}));
 
 const plate = (id: number, model: string, score: number, sliced: boolean, printers: object[]) => ({
   plate_id: id,
@@ -46,7 +56,11 @@ const plan = {
       missing: 30,
       products: [{ project_id: 65, name: 'Tartufo – Marrone', has_cover: true }],
       plates: [
-        plate(1, 'A1', 2, true, [{ id: 1, name: 'A1 uno', idle: true, material_ok: true, color_ok: true }]),
+        {
+          ...plate(1, 'A1', 2, true, [{ id: 1, name: 'A1 uno', idle: true, material_ok: true, color_ok: true }]),
+          sliced_file_id: 41,
+          slicer: 'orcaslicer',
+        },
         {
           ...plate(2, 'P1S', 1, false, [{ id: 3, name: 'P1S', idle: true, material_ok: true, color_ok: false }]),
           filament_grams: null,
@@ -145,25 +159,29 @@ describe('PrintPlanPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
     expect(createdJobs).toBeUndefined();
     expect(within(dialog).getByText(/One print: 15 pieces with the proposed plate \(30 missing\)/)).toBeInTheDocument();
-    // Each plate shows its picture and its filament: the slicer's weight, else the solid upper bound.
-    const previews = within(dialog).getAllByRole('button', { name: 'Plate preview Plate 1' });
+    // Each plate shows its picture, the slicer of its 3MF and its filament: the slicer's weight, else the
+    // solid upper bound.
+    const previews = within(dialog).getAllByRole('button', { name: /in 3D · Plate 1/ });
     expect(previews.map((b) => b.querySelector('img')!.getAttribute('src'))).toEqual([
       expect.stringContaining('/api/v1/farm/plates/1/image'),
       expect.stringContaining('/api/v1/farm/plates/2/image'),
     ]);
+    expect(within(dialog).getAllByAltText('OrcaSlicer')).toHaveLength(1);
     expect(within(dialog).getByText('· 150 g')).toBeInTheDocument();
     expect(within(dialog).getByText('· max 412 g')).toHaveAttribute('title', expect.stringMatching(/counted solid/));
-    // A click shows it large; a missing picture leaves a placeholder.
+    // A click opens it in 3D: the G-code of a sliced plate, else the 3MF on that plate.
+    expect(previews[0]).toHaveAccessibleName('See the G-code in 3D · Plate 1');
     await user.click(previews[0]);
-    const big = screen.getByRole('dialog', { name: 'Plate preview Plate 1' });
-    expect(within(big).getByRole('img', { name: 'Plate preview Plate 1' })).toHaveAttribute(
-      'src',
-      expect.stringContaining('/farm/plates/1/image'),
-    );
-    await user.click(within(big).getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('dialog', { name: 'Plate preview Plate 1' })).not.toBeInTheDocument();
+    const gcode = screen.getByRole('dialog', { name: /^3D A1-truffle\.3mf/ });
+    expect([gcode.dataset.file, gcode.dataset.tab, gcode.dataset.plate]).toEqual(['41', 'gcode', '']);
+    await user.click(within(gcode).getByRole('button', { name: 'Close 3D' }));
+    await user.click(previews[1]);
+    const model = screen.getByRole('dialog', { name: /^3D P1S-truffle\.3mf/ });
+    expect([model.dataset.file, model.dataset.tab, model.dataset.plate]).toEqual(['2', '3d', '1']);
+    await user.click(within(model).getByRole('button', { name: 'Close 3D' }));
+    // A missing picture leaves a placeholder; the 3D view still opens from it.
     fireEvent.error(previews[1].querySelector('img')!);
-    expect(within(dialog).getByRole('img', { name: 'Plate preview Plate 1: No preview' })).toBeInTheDocument();
+    expect(within(previews[1]).getByLabelText('No preview')).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1, 2] }] }));
 
@@ -172,17 +190,27 @@ describe('PrintPlanPage', () => {
     const again = await screen.findByRole('dialog', { name: 'Queue: summary' });
     await user.selectOptions(within(again).getByLabelText('Printer'), 'P1S · free');
     expect(within(again).queryByText(/A1-truffle\.3mf/)).not.toBeInTheDocument();
+    // Automatic: the P1S has not the colour loaded, so no plate is listed and nothing can be queued...
+    expect(within(again).getByRole('alert')).toHaveTextContent('No plate fits what is loaded on P1S now');
+    expect(within(again).queryByRole('button', { name: /Print this plate/ })).not.toBeInTheDocument();
+    expect(within(again).getByRole('button', { name: 'Confirm and queue 1 print' })).toBeDisabled();
+    // ...until the plate is picked by hand (it then waits to be started by hand) or sent anyway.
+    await user.click(within(again).getByRole('button', { name: 'Show 1 plate that does not fit what is loaded' }));
+    await user.click(within(again).getByRole('button', { name: /Print this plate: P1S-truffle/ }));
     await user.click(within(again).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() =>
       expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [2], printer_id: 3 }] }),
     );
 
-    // A chosen 3MF goes alone.
+    // A chosen 3MF goes alone; a new slice can be forced before it is queued.
     await user.click(within(first).getByRole('button', { name: /Queue/ }));
     const third = await screen.findByRole('dialog', { name: 'Queue: summary' });
     await user.selectOptions(within(third).getByLabelText('3MF and plate'), '1');
+    await user.click(within(third).getByRole('checkbox', { name: /Force a new slice/ }));
     await user.click(within(third).getByRole('button', { name: 'Confirm and queue 1 print' }));
-    await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1] }] }));
+    await waitFor(() =>
+      expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1], force_slice: true }] }),
+    );
 
     // The component without plates can't be selected.
     expect(screen.getByLabelText('Select C-0004')).toBeDisabled();
@@ -325,6 +353,60 @@ describe('PrintPlanPage', () => {
     await waitFor(() =>
       expect(createdJobs).toEqual({
         jobs: [{ component_code: 'C-0121', plate_ids: [1], printer_id: 1, ams_mapping: [0], manual_start: true }],
+      }),
+    );
+  });
+
+  it('narrows the plates by their 3MF, and the job only gets those', async () => {
+    const user = userEvent.setup();
+    render(<AccodaSummary components={[plan.components[0]]} byHand onClose={() => undefined} onDone={() => undefined} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    // Both plates are PLA: no material filter; two 3MFs: a 3MF filter.
+    expect(within(dialog).queryByLabelText('Filter by material')).not.toBeInTheDocument();
+    await user.selectOptions(within(dialog).getByLabelText('Filter by 3MF'), 'Stampa 3D/Truffle/P1S-truffle.3mf');
+    expect(within(dialog).queryByRole('button', { name: /Print this plate: A1-truffle/ })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /Print this plate: P1S-truffle/ })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [2] }] }));
+  });
+
+  it('picks a plate with a click, sends it without the spool and marks the plate clear', async () => {
+    let cleared: string | undefined;
+    server.use(
+      http.get('/api/v1/farm/plates/:id/filaments', ({ params }) =>
+        HttpResponse.json({ plate_id: Number(params.id), sliced: true, filaments: [] }),
+      ),
+      http.get('/api/v1/printers/1/status', () =>
+        HttpResponse.json({ connected: true, state: 'FINISH', awaiting_plate_clear: true, ams: [], vt_tray: [] }),
+      ),
+      http.get('/api/v1/spool-assignments', () => HttpResponse.json([])),
+      http.post('/api/v1/printers/:id/clear-plate', ({ params }) => {
+        cleared = String(params.id);
+        return HttpResponse.json({ success: true, message: 'ok' });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AccodaSummary components={[plan.components[0]]} byHand onClose={() => undefined} onDone={() => undefined} />);
+    const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+    await user.selectOptions(within(dialog).getByLabelText('Printer'), 'A1 uno · free');
+    // The row picks the plate; a second click goes back to automatic.
+    const row = within(dialog).getByRole('button', { name: /Print this plate: A1-truffle\.3mf · Plate 1/ });
+    await user.click(row);
+    expect(row).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByText(/✓ Chosen/)).toBeInTheDocument();
+    // The printer waits for its plate: marked clear from here, after a confirmation.
+    expect(await within(dialog).findByText('A1 uno is waiting for its plate to be cleared.')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Plate cleared' }));
+    expect(cleared).toBeUndefined();
+    const buttons = screen.getAllByRole('button', { name: 'Plate cleared' });
+    await user.click(buttons[buttons.length - 1]); // the confirmation's
+    await waitFor(() => expect(cleared).toBe('1'));
+    // No spool loaded: sent anyway, it starts by itself when free.
+    await user.click(within(dialog).getByRole('checkbox', { name: /Send it even without the spool loaded/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
+    await waitFor(() =>
+      expect(createdJobs).toEqual({
+        jobs: [{ component_code: 'C-0121', plate_ids: [1], printer_id: 1, ignore_spool: true }],
       }),
     );
   });

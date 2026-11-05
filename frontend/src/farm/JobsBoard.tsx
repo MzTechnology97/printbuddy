@@ -282,7 +282,9 @@ function Row({ row }: { row: FarmBoardRow }) {
         <span className="basis-full sm:basis-auto sm:ml-auto text-xs break-words">
           {row.group === 'printing' && row.printer_id ? <Progress printerId={row.printer_id} /> : (
             <span className={row.group === 'problems' ? 'text-red-300' : 'text-bambu-gray'}>
-              {row.status_text || t(`farm.board.phase.${row.phase}`, { defaultValue: row.phase })}
+              {row.slice_progress
+                ? t('farm.board.slicingNow', { percent: row.slice_progress.percent ?? '…' })
+                : row.status_text || t(`farm.board.phase.${row.phase}`, { defaultValue: row.phase })}
             </span>
           )}
         </span>

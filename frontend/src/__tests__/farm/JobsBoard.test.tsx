@@ -38,6 +38,10 @@ const failed = row({
   key: 'job:3', job_id: 3, queue_item_id: 6, group: 'problems', phase: 'failed', level: 'error', printer: 'A1 uno',
   status_text: 'FTP 550', failure_phase: 'upload', actions: ['reslice', 'requeue'],
 });
+const slicing = row({
+  key: 'job:9', job_id: 9, group: 'waiting', phase: 'slicing', status_text: 'plate 1 being sliced',
+  slice_progress: { percent: 37, stage: 'Generating G-code' },
+});
 const manual = row({
   key: 'item:7', job_id: null, queue_item_id: 7, title: 'Regalo.gcode.3mf', group: 'waiting', phase: 'queued',
   printer_id: 1, printer: 'A1 uno', source: 'queue', manual_start: true, actions: ['start', 'cancel_item'],
@@ -63,8 +67,8 @@ describe('JobsBoard', () => {
     copied.length = 0;
     server.use(
       http.get('/api/v1/farm/board', () =>
-        HttpResponse.json({ problems: [sliceFailed, failed], printing: [printing], waiting: [manual], history: [done],
-          history_total: 1 }),
+        HttpResponse.json({ problems: [sliceFailed, failed], printing: [printing], waiting: [manual, slicing],
+          history: [done], history_total: 1 }),
       ),
       http.get('/api/v1/farm/board/:key', ({ params }) => {
         const all = [sliceFailed, printing, failed, manual, done];
@@ -96,6 +100,8 @@ describe('JobsBoard', () => {
     expect(within(printingGroup).getByAltText('OrcaSlicer')).toHaveAttribute('src', expect.stringContaining('orcaslicer.png'));
     expect(await within(printingGroup).findByText(/42% · layer 10\/80/)).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Waiting' })).toHaveTextContent('Regalo.gcode.3mf');
+    // A plate being sliced: the slicer's progress.
+    expect(screen.getByText('Slicing: 37%')).toBeInTheDocument();
     // The history stays closed until asked.
     expect(screen.queryByText('Vecchio.3mf')).not.toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: /History/ }));

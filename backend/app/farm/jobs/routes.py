@@ -38,6 +38,9 @@ class JobIn(BaseModel):
     require_previous_success: bool = False
     auto_off_after: bool = False
     gcode_injection: bool = False
+    force_slice: bool = False  # slice its plates again from the 3MF on the NAS before it is queued
+    # a chosen printer gets it even without the colour loaded, and it starts by itself when the printer is free
+    ignore_spool: bool = False
 
 
 class JobsIn(BaseModel):

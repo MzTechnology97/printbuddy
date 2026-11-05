@@ -22,6 +22,9 @@ interface ModelViewerModalProps {
   // externally — so the preview modal's slice action matches the file row's
   // Cog (in-app Printbuddy SliceModal) when the slicer API is enabled.
   onSliceWithPrintbuddy?: () => void;
+  /** Fork: open on this tab (a plate's G-code) and this plate (a project's plate). */
+  initialTab?: ViewTab;
+  initialPlate?: number;
 }
 
 interface Capabilities {
@@ -32,7 +35,7 @@ interface Capabilities {
   filament_colors: string[];
 }
 
-export function ModelViewerModal({ archiveId, libraryFileId, title, fileType, onClose, onSliceWithPrintbuddy }: ModelViewerModalProps) {
+export function ModelViewerModal({ archiveId, libraryFileId, title, fileType, onClose, onSliceWithPrintbuddy, initialTab, initialPlate }: ModelViewerModalProps) {
   const { t } = useTranslation();
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
   const preferredSlicer: SlicerType = settings?.preferred_slicer || 'bambu_studio';
@@ -78,7 +81,7 @@ export function ModelViewerModal({ archiveId, libraryFileId, title, fileType, on
         build_volume: { x: 256, y: 256, z: 256 },
         filament_colors: [],
       });
-      setActiveTab(hasModel ? '3d' : hasGcode ? 'gcode' : null);
+      setActiveTab(initialTab && (initialTab === '3d' ? hasModel : hasGcode) ? initialTab : hasModel ? '3d' : hasGcode ? 'gcode' : null);
       setLoading(false);
       return;
     }
@@ -107,11 +110,11 @@ export function ModelViewerModal({ archiveId, libraryFileId, title, fileType, on
         setActiveTab('3d');
         setLoading(false);
       });
-  }, [archiveId, fileType, isLibrary]);
+  }, [archiveId, fileType, isLibrary, initialTab]);
 
   useEffect(() => {
     setPlatesLoading(true);
-    setSelectedPlateId(null);
+    setSelectedPlateId(initialPlate ?? null);
     setPlatePage(0);
 
     if (isLibrary) {
@@ -138,7 +141,7 @@ export function ModelViewerModal({ archiveId, libraryFileId, title, fileType, on
       .then((data) => setPlatesData(data))
       .catch(() => setPlatesData(null))
       .finally(() => setPlatesLoading(false));
-  }, [archiveId, fileType, isLibrary, libraryFileId]);
+  }, [archiveId, fileType, isLibrary, libraryFileId, initialPlate]);
 
   const plates = useMemo(() => platesData?.plates ?? [], [platesData]);
   const hasMultiplePlates = (platesData?.is_multi_plate ?? false) && plates.length > 1;
