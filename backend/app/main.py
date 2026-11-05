@@ -75,6 +75,7 @@ from backend.app.core.config import APP_VERSION, settings as app_settings
 from backend.app.core.database import async_session, engine, init_db
 from backend.app.core.websocket import ws_manager
 from backend.app.farm import routes as farm_routes  # fork: printfarm
+from backend.app.farm.board import router as farm_board_router  # fork: the queue page's Jobs board
 from backend.app.farm.brand_colors import (
     brand_colour_scheduler,  # fork: brand colours in the colour catalog
     router as farm_brand_colors_router,  # fork
@@ -4343,6 +4344,17 @@ async def on_print_complete(printer_id: int, data: dict):
                 queue_item_id = item.id
                 queue_auto_off = item.auto_off_after
                 logger.info("Updated queue item %s status to %s", item.id, queue_status)
+                from backend.app.farm import job_events  # fork: the queue page's timeline
+
+                job_events.record(
+                    {"failed": "failed", "cancelled": "cancelled"}.get(queue_status, "finished"),
+                    item.error_message if queue_status in ("failed", "cancelled") else "Print finished",
+                    queue_item_id=item.id,
+                    printer_id=item.printer_id,
+                    archive_id=item.archive_id,
+                    level="warning" if queue_status == "cancelled" else None,
+                    detail={"status": queue_status, "failure": item.failure_detail, "print": subtask_name},
+                )
 
         await run_with_retry(_update_queue_status, label="queue status update")
 
@@ -6109,6 +6121,9 @@ async def lifespan(app: FastAPI):
     library_trash_service.stop_scheduler()
     farm_library_scheduler.stop()
     farm_job_dispatcher.stop()
+    from backend.app.farm import job_events  # fork: what is still pending is written
+
+    await job_events.stop()
     brand_colour_scheduler.stop()
     await telegram_bot.stop()
     archive_purge_service.stop_scheduler()
@@ -6620,6 +6635,7 @@ app.include_router(open_filament_database.router, prefix=app_settings.api_prefix
 app.include_router(metrics.router, prefix=app_settings.api_prefix)
 app.include_router(virtual_printers.router, prefix=app_settings.api_prefix)
 app.include_router(farm_routes.router, prefix=app_settings.api_prefix)  # fork: printfarm
+app.include_router(farm_board_router, prefix=app_settings.api_prefix)  # fork: Jobs board
 app.include_router(farm_brand_colors_router, prefix=app_settings.api_prefix)  # fork: brand colours
 app.add_middleware(NasCacheMiddleware)  # fork: NAS files are fetched into the cache on use
 

@@ -61,6 +61,16 @@ def mark_failed(item, reason: str | None, phase: str, **detail) -> None:
         **({} if reason else {"code": "unknown"}),
         **{k: v for k, v in detail.items() if v not in (None, [], {})},
     }
+    from backend.app.farm import job_events  # fork: the queue page's timeline
+
+    job_events.record(
+        {"upload": "upload_failed", "start": "start_failed", "printing": "failed"}.get(phase, "dispatch_failed"),
+        item.error_message,
+        queue_item_id=getattr(item, "id", None),
+        printer_id=getattr(item, "printer_id", None),
+        archive_id=getattr(item, "archive_id", None),
+        detail=item.failure_detail,
+    )
 
 
 def requester(user, request) -> dict:

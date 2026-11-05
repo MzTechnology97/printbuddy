@@ -13,7 +13,10 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.core.config import settings
 from backend.app.core.database import async_session, run_with_retry
-from backend.app.farm import printer_files as farm_printer_files  # fork: printfarm
+from backend.app.farm import (
+    job_events as farm_job_events,  # fork: the queue page's timeline
+    printer_files as farm_printer_files,  # fork: printfarm
+)
 from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
@@ -2260,6 +2263,19 @@ class PrintScheduler:
 
         upload_error: Exception | None = None
         upload_log: list[str] = []
+        upload_started = time.monotonic()
+        farm_job_events.record(  # fork: the queue page's timeline
+            "upload_started",
+            f"Sending {remote_filename} to {printer.name}",
+            queue_item_id=item.id,
+            printer_id=item.printer_id,
+            detail={
+                "remote_path": remote_path,
+                "provider": provider,
+                "size": file_path.stat().st_size if file_path and file_path.exists() else None,
+                "plate": item.plate_id,
+            },
+        )
         try:
             with queue_failure.capture_logged_errors() as upload_log:  # the FTP/HTTP errors, for the history
                 uploaded = await self._upload_file_for_provider(
@@ -2285,6 +2301,14 @@ class PrintScheduler:
         # Clean up injected temp file after upload attempt
         if injected_path and injected_path.exists():
             injected_path.unlink(missing_ok=True)
+        if uploaded:
+            farm_job_events.record(
+                "upload_done",
+                f"Sent to {printer.name} in {time.monotonic() - upload_started:.1f} s",
+                queue_item_id=item.id,
+                printer_id=item.printer_id,
+                detail={"seconds": round(time.monotonic() - upload_started, 1), "log": upload_log},
+            )
 
         if not uploaded:
             # fork: the error the upload really hit (FTP code, HTTP status...), not only the generic advice
@@ -2387,6 +2411,13 @@ class PrintScheduler:
             item.dispatching_at = None
             await db.commit()
             logger.info("Queue item %s: Print started successfully - %s", item.id, filename)
+            farm_job_events.record(
+                "started",
+                f"Start command accepted by {printer.name}",
+                queue_item_id=item.id,
+                printer_id=item.printer_id,
+                detail={"file": remote_filename, "plate": item.plate_id, "ams_mapping": ams_mapping, "log": start_log},
+            )
 
             # Register the local 3MF in the cover-cache so /cover skips FTP
             # (#1166 follow-up). file_path was resolved earlier from either the

@@ -75,24 +75,18 @@ const plan = {
 describe('PrintPlanPage', () => {
   let savedSettings: unknown;
   let createdJobs: unknown;
-  let cancelled: string | undefined;
   let jobs: object[];
   let savedSpool: unknown;
 
   beforeEach(() => {
     savedSettings = undefined;
     createdJobs = undefined;
-    cancelled = undefined;
     jobs = [];
     server.use(
       http.get('/api/v1/farm/jobs', () => HttpResponse.json(jobs)),
       http.post('/api/v1/farm/jobs', async ({ request }) => {
         createdJobs = await request.json();
         return HttpResponse.json([{ id: 1 }]);
-      }),
-      http.delete('/api/v1/farm/jobs/:id', ({ params }) => {
-        cancelled = String(params.id);
-        return HttpResponse.json({ id: Number(params.id), state: 'cancelled' });
       }),
       http.get('/api/v1/farm/plan', () => HttpResponse.json(plan)),
       http.get('/api/v1/farm/printer-spools', () =>
@@ -214,88 +208,16 @@ describe('PrintPlanPage', () => {
     );
   });
 
-  it('lists jobs with their state and cancels a waiting one', async () => {
-    jobs = [
-      { id: 7, component_code: 'C-0121', color: 'Marrone', state: 'waiting', note: 'A1 uno: no Marrone PLA loaded',
-        plate_ids: [1], plate_id: null, printer_id: null, printer: null, queue_item_id: null, pieces: 15,
-        created_at: '' },
-      { id: 8, component_code: 'C-0121', color: 'Marrone', state: 'pending', note: null, plate_ids: [1], plate_id: 1,
-        printer_id: 1, printer: 'A1 due', queue_item_id: 3, pieces: 15, created_at: '' },
-      { id: 11, component_code: 'C-0121', color: 'Nero', component_color: 'Marrone', color_from_printer: true,
-        state: 'printing', note: null, plate_ids: [1], plate_id: 1, printer_id: 1, printer: 'A1 uno', queue_item_id: 4,
-        pieces: 15, created_at: '' },
-    ];
-    const user = userEvent.setup();
-    render(<PrintPlanPage />);
-    expect(await screen.findByText('waiting for a printer')).toBeInTheDocument();
-    expect(screen.getByText('A1 uno: no Marrone PLA loaded')).toBeInTheDocument();
-    expect(screen.getByText('in the queue (confirm the plate is clear)')).toBeInTheDocument();
-    // The printer fed another colour than the component: the batch says so.
-    expect(screen.getByText('(printed in this colour: the component is Marrone)')).toBeInTheDocument();
-    await user.click(screen.getAllByRole('button', { name: 'Cancel' })[0]);
-    await waitFor(() => expect(cancelled).toBe('7'));
-  });
-
-  it('asks what a print outside the queue printed, with the proposal from its name', async () => {
-    const assigned: unknown[] = [];
+  it('sums up the jobs under way and sends to the queue for the rest', async () => {
     server.use(
-      http.get('/api/v1/farm/products', () =>
-        HttpResponse.json({
-          generated_at: '',
-          products: [
-            { project_id: 4, name: 'Gancio', skus: [], asins: [], updated_at: '',
-              parts: [{ component_code: 'C-0200', name: 'Gancio', quantity: 1, plates: [] }] },
-            { project_id: 5, name: 'Tartufo', skus: [], asins: [], updated_at: '',
-              parts: [
-                { component_code: 'C-0121', name: 'Sopra', quantity: 1, plates: [] },
-                { component_code: 'C-0122', name: 'Sotto', quantity: 1, plates: [] },
-              ] },
-          ],
-        }),
+      http.get('/api/v1/farm/board', () =>
+        HttpResponse.json({ problems: [{ key: 'job:7' }], printing: [], waiting: [{ key: 'job:8' }], history: [],
+          history_total: 0 }),
       ),
-      http.post('/api/v1/farm/jobs/:id/assign', async ({ params, request }) => {
-        assigned.push({ id: params.id, ...((await request.json()) as object) });
-        return HttpResponse.json([]);
-      }),
     );
-    const outsideJob = { component_code: '', color: null, state: 'to_assign', note: null, plate_ids: [],
-      plate_id: null, printer_id: 1, printer: 'A1 uno', queue_item_id: null, pieces: 0, created_at: '',
-      finished_at: '2026-01-01T10:00:00', outside_queue: true };
-    jobs = [
-      { ...outsideJob, id: 9, print_name: 'Sopra plate 2.3mf',
-        proposal: [{ component_code: 'C-0121', name: 'Sopra', pieces: 15, color: 'Nero', plate_id: 1 }] },
-      { ...outsideJob, id: 10, print_name: 'Regalo.3mf', proposal: null },
-      { ...outsideJob, id: 12, print_name: 'Sopra__abcdef12.3mf',
-        proposal: [
-          { component_code: 'C-0121', name: 'Sopra', pieces: 15, color: 'Nero', plate_id: 1, alternative: true },
-          { component_code: 'C-0122', name: 'Sotto', pieces: 15, color: 'Nero', plate_id: 1, alternative: true },
-        ] },
-    ];
-    const user = userEvent.setup();
     render(<PrintPlanPage />);
-    expect(await screen.findByText('3 prints outside the queue to assign')).toBeInTheDocument();
-    // Alternatives: the product is chosen, but no pieces are filled in.
-    expect(
-      screen.getByText('It is one of these, not all: C-0121 Sopra ×15 / C-0122 Sotto ×15. Say which, with its pieces.'),
-    ).toBeInTheDocument();
-    expect(screen.getByText('From its name it looks like: C-0121 Sopra ×15')).toBeInTheDocument();
-    // The proposed product is chosen, with the proposed pieces; the user adds the bottoms.
-    await waitFor(() => expect(screen.getAllByLabelText('Pieces C-0121')).toHaveLength(2));
-    expect(screen.getAllByLabelText('Pieces C-0121')[0]).toHaveValue(15);
-    expect(screen.getAllByLabelText('Pieces C-0121')[1]).toHaveValue(null);
-    await user.type(screen.getAllByLabelText('Pieces C-0122')[0], '14');
-    await user.click(screen.getAllByRole('button', { name: 'Save the pieces' })[0]);
-    await user.click(screen.getAllByRole('button', { name: 'Not production' })[1]);
-    await waitFor(() =>
-      expect(assigned).toEqual([
-        { id: '9', parts: [{ component_code: 'C-0121', pieces: 15 }, { component_code: 'C-0122', pieces: 14 }] },
-        { id: '10', not_production: true },
-      ]),
-    );
-    // Nothing proposed: the product is the user's pick, and nothing can be saved before it.
-    expect(screen.getAllByRole('button', { name: 'Save the pieces' })[1]).toBeDisabled();
-    await user.selectOptions(screen.getByLabelText('Product of Regalo.3mf'), 'Gancio');
-    expect(screen.getAllByLabelText('Pieces C-0200')[0]).toHaveValue(null);
+    expect(await screen.findByText('1 job under way')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Follow them in the Queue →' })).toHaveAttribute('href', '/queue?view=jobs');
   });
 
   it('sets the spool loaded on a Klipper printer without CFS', async () => {
