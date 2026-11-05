@@ -1088,7 +1088,7 @@ class FarmJobDispatcher:
         notify.cancel_pending()
 
     async def _loop(self) -> None:
-        from backend.app.farm import alerts, printer_files
+        from backend.app.farm import alerts, printer_files, slicer_filaments
         from backend.app.farm.jobs import outside
 
         last_cleanup = 0.0
@@ -1106,6 +1106,8 @@ class FarmJobDispatcher:
                     if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
                         last_history = time.monotonic()
                         await _guarded(db, "Klipper history", outside.scan_klipper_history)
+                        # cheap when nothing changed: the slicer server's export is read only when new
+                        await _guarded(db, "slicer filaments", slicer_filaments.sync)
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)
