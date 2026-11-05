@@ -515,6 +515,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
   const [schedule, setSchedule] = useState<ScheduleOptions>(DEFAULT_SCHEDULE_OPTIONS);
   const [forceSlice, setForceSlice] = useState(false);
   const [ignoreSpool, setIgnoreSpool] = useState<Record<string, boolean>>({}); // component -> sent without the spool check
+  const [confirmIgnore, setConfirmIgnore] = useState<{ code: string; printer: string } | null>(null);
   const [filters, setFilters] = useState<Record<string, PlateFilters>>({}); // component -> what its plates are narrowed to
   const byPrinter = (c: FarmPlanComponent) =>
     chosen[c.code] ? c.plates.filter((p) => p.printers.some((pr) => pr.id === chosen[c.code])) : c.plates;
@@ -637,6 +638,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                           setChosen({ ...chosen, [c.code]: Number(e.target.value) || 0 });
                           setChosenPlate({ ...chosenPlate, [c.code]: 0 });
                           setFilters({ ...filters, [c.code]: {} });
+                          setIgnoreSpool({ ...ignoreSpool, [c.code]: false }); // asked again for another printer
                           resetSlots(c.code);
                         }}>
                         <option value="">{t('farm.jobs.firstFree')}</option>
@@ -652,7 +654,13 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
                         <p className="text-xs text-bambu-gray">{t('farm.jobs.chosenHint')}</p>
                         <label className="flex items-start gap-2 text-sm text-white">
                           <input type="checkbox" className="mt-1" checked={!!ignoreSpool[c.code]}
-                            onChange={(e) => setIgnoreSpool({ ...ignoreSpool, [c.code]: e.target.checked })} />
+                            onChange={(e) => {
+                              if (!e.target.checked) setIgnoreSpool({ ...ignoreSpool, [c.code]: false });
+                              else setConfirmIgnore({
+                                code: c.code,
+                                printer: printers.find((pr) => pr.id === chosen[c.code])?.name ?? '',
+                              });
+                            }} />
                           <span>
                             {t('farm.jobs.ignoreSpool')}
                             <span className="block text-xs text-bambu-gray">{t('farm.jobs.ignoreSpoolHint')}</span>
@@ -753,6 +761,16 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
             </section>
           )}
         </div>
+        {confirmIgnore && (
+          <ConfirmModal title={t('farm.jobs.ignoreSpoolTitle')}
+            message={t('farm.jobs.ignoreSpoolMessage', { printer: confirmIgnore.printer })}
+            confirmText={t('farm.jobs.ignoreSpoolConfirm')} variant="warning"
+            onConfirm={() => {
+              setIgnoreSpool({ ...ignoreSpool, [confirmIgnore.code]: true });
+              setConfirmIgnore(null);
+            }}
+            onCancel={() => setConfirmIgnore(null)} />
+        )}
         <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>
           <Button disabled={!selected.length || create.isPending || selected.some(blocked)

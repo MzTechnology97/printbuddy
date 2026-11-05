@@ -168,7 +168,10 @@ async def slice_embedded(
     """
     slicer = resolve_slicer(state)
     # NAS projects are fetched into the cache now, on use; a forced slice reads the NAS again
-    await ensure_local(db, lib_file, fresh=from_nas)
+    fetched = await ensure_local(db, lib_file, fresh=from_nas)
+    if from_nas and lib_file.is_external and not fetched:
+        # never the copy in the cache: it may be the very version the new slice is forced to replace
+        raise HTTPException(status_code=503, detail="NAS not reachable: the 3MF was not read again, nothing sliced")
     src = library_path(lib_file.file_path)
     raw = await asyncio.to_thread(src.read_bytes)
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
@@ -371,6 +374,7 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
     from backend.app.farm.jobs import service as jobs
     from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
 
+    from_nas = from_nas or _queue_key(plate.library_file_id, plate.plate_index, color) in _from_nas
     if not colour_key(color):
         return await jobs.ask_slicing(db, plate, from_nas=from_nas)
     key = (plate.library_file_id, plate.plate_index, colour_key(color))
@@ -465,6 +469,8 @@ def _queue_key(file_id: int, plate: int | None, colour: str | None) -> tuple[int
 
 
 _slice_jobs: dict[tuple[int, int, str | None], int] = {}  # queue key -> the slice_dispatch job of its last slice
+# forced slices (queue keys): read from the NAS again, retries included, until one succeeds
+_from_nas: set[tuple[int, int, str | None]] = set()
 
 
 def slice_progress(file_id: int, plate: int | None, colour: str | None) -> dict | None:
@@ -500,7 +506,17 @@ async def force_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -> 
             "superseded_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
         await db.commit()
-    return await ask_variant_slicing(db, plate, color, from_nas=True)
+    _from_nas.add(key)
+    if await ask_variant_slicing(db, plate, color, from_nas=True):
+        return True
+    # not asked: the 3MF is gone from the library. The job's note says so, it doesn't just wait.
+    _failed[key] = {
+        "reason": "the 3MF is no longer in the library",
+        "slicer": None,
+        "kind": "error",
+        "at": time.monotonic(),
+    }
+    return False
 
 
 def queue_slice_ended(
@@ -520,6 +536,7 @@ def queue_slice_ended(
     name = SLICER_NAMES.get(slicer, slicer or "an unknown slicer")
     if error is None:
         _failed.pop(key, None)
+        _from_nas.discard(key)
         job_events.record(
             "slice_done",
             f"Sliced with {name}: {where}",

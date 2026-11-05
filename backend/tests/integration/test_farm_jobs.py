@@ -200,6 +200,17 @@ async def test_chosen_printer_gets_the_job_now_even_if_busy(async_client, db_ses
     assert (item.printer_id, item.manual_start, item.filament_overrides) == (a1_two, True, None)
     assert "Load the Nero spool on A1 due" in job.note
 
+    # A printer of a model without a plate is refused.
+    bad = await async_client.post(
+        f"{API}/jobs",
+        json={
+            "jobs": [
+                {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "printer_id": farm["printers"][2]}
+            ]
+        },
+    )
+    assert bad.status_code == 422
+
 
 @pytest.mark.asyncio
 async def test_chosen_printer_can_get_it_without_the_spool_and_start_it_alone(async_client, db_session, farm):
@@ -221,8 +232,9 @@ async def test_chosen_printer_can_get_it_without_the_spool_and_start_it_alone(as
     assert r.status_code == 200, r.text
     item = (await db_session.execute(select(PrintQueueItem))).scalar_one()
     job = await db_session.get(FarmPrintJob, r.json()[0]["id"])
-    # Asked in Accoda: no colour check, it starts by itself when the printer is free.
-    assert (item.printer_id, item.manual_start, job.note) == (a1_two, False, None)
+    # Asked in Accoda: no colour check, it starts by itself when the printer is free; the queue says so.
+    assert (item.printer_id, item.manual_start) == (a1_two, False)
+    assert "without the spool check" in job.note and "A1 due" in job.note
 
 
 @pytest.mark.asyncio
@@ -236,16 +248,18 @@ async def test_accoda_can_force_a_new_slice_before_queuing(async_client, db_sess
     assert r.status_code == 200, r.text
     assert sorted(call.args[1].id for call in forced.await_args_list) == sorted(farm["plates"])
 
-    # A printer of a model without a plate is refused.
-    bad = await async_client.post(
-        f"{API}/jobs",
-        json={
-            "jobs": [
-                {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "printer_id": farm["printers"][2]}
-            ]
-        },
-    )
-    assert bad.status_code == 422
+    # Two jobs on the same plates in one request: each plate is sliced again once, not twice.
+    forced.reset_mock()
+    job = {"component_code": farm["code"], "plate_ids": farm["plates"], "force_slice": True}
+    with patch("backend.app.farm.slicing.force_slice", forced):
+        assert (await async_client.post(f"{API}/jobs", json={"jobs": [job, job]})).status_code == 200
+    assert sorted(call.args[1].id for call in forced.await_args_list) == sorted(farm["plates"])
+
+    # The 3MF gone: the job says why it waits.
+    with patch("backend.app.farm.slicing.force_slice", AsyncMock(return_value=False)):
+        r = await async_client.post(f"{API}/jobs", json={"jobs": [job]})
+    note = (await db_session.get(FarmPrintJob, r.json()[0]["id"])).note
+    assert "no longer in the library" in note
 
 
 @pytest.mark.asyncio

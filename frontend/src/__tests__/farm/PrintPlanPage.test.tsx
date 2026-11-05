@@ -401,8 +401,13 @@ describe('PrintPlanPage', () => {
     const buttons = screen.getAllByRole('button', { name: 'Plate cleared' });
     await user.click(buttons[buttons.length - 1]); // the confirmation's
     await waitFor(() => expect(cleared).toBe('1'));
-    // No spool loaded: sent anyway, it starts by itself when free.
-    await user.click(within(dialog).getByRole('checkbox', { name: /Send it even without the spool loaded/ }));
+    // No spool loaded: sent anyway after a confirmation naming the printer; it starts by itself when free.
+    const anyway = within(dialog).getByRole('checkbox', { name: /Send it even without the spool loaded/ });
+    await user.click(anyway);
+    expect(screen.getByText(/goes to A1 uno and starts by itself.*material and colour are not checked/)).toBeInTheDocument();
+    expect(anyway).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Send it anyway' }));
+    expect(anyway).toBeChecked();
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() =>
       expect(createdJobs).toEqual({

@@ -193,6 +193,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
     files = await component_files(db)
     own = await product_shapes(db)
     jobs = []
+    forced: set[tuple[int, str | None]] = set()  # (plate, colour) sliced again once, whatever jobs share it
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
         if comp is None or comp.retired_at is not None:
@@ -229,9 +230,12 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
         jobs.append(job)
         for plate in plates:
             if req.get("force_slice"):  # asked in Accoda: a new slice from the 3MF on the NAS, never the old one
-                from backend.app.farm.slicing import force_slice
+                from backend.app.farm.slicing import colour_key, force_slice
 
-                await force_slice(db, plate, comp.color)
+                if (plate.id, colour_key(comp.color)) not in forced:
+                    forced.add((plate.id, colour_key(comp.color)))
+                    if not await force_slice(db, plate, comp.color):
+                        job.note = f"plate {plate.plate_index}: the 3MF is no longer in the library, no new slice"
             elif await variant_file(db, plate, comp.color) is None:
                 await ask_variant(db, plate, comp.color)
     await db.commit()
@@ -995,8 +999,10 @@ async def dispatch_once(db: AsyncSession) -> int:
                             auto = _slot_mapping(slots, _loaded_trays(printer["id"]), color_hex, config["tolerance"])
                         else:  # no slice_info, or a spool set by hand on a Klipper: the colour check only
                             spool = _matching_spool(printer, plate.materials or [], color_hex, config["tolerance"])
+                    loaded = bool(mapped or auto or spool)
                     # ignore_spool (asked in Accoda for a chosen printer): sent and started like a fitting one
-                    fits = bool(mapped or auto or spool) or bool(options.get("ignore_spool") and job.printer_id)
+                    overridden = not loaded and bool(options.get("ignore_spool") and job.printer_id)
+                    fits = loaded or overridden
                     if not fits and not unreadable and strict:
                         used = sorted({f.get("type") for f in slots if f.get("type")}) or plate.materials or []
                         reasons.append(f"{printer['name']}: no {job.color} {'+'.join(used)} loaded")
@@ -1053,7 +1059,15 @@ async def dispatch_once(db: AsyncSession) -> int:
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp, own)
                     # What this item prints: checked again before it starts.
                     job.queued_as = {"objects": _plate_objects(plate), "file_hash": file_hash}
-                    job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
+                    if overridden:  # the queue says the colour was not checked
+                        job.note = (
+                            f"Sent to {printer['name']} without the spool check (Accoda): "
+                            "material and colour not checked"
+                        )[:255]
+                    else:
+                        job.note = (
+                            None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
+                        )
                     busy.add(printer["id"])
                     created += 1
                     placed = True

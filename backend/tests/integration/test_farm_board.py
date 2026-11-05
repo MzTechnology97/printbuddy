@@ -293,6 +293,58 @@ async def test_a_forced_slice_reads_the_3mf_from_the_nas(db_session, printer_fac
 
 
 @pytest.mark.asyncio
+async def test_a_forced_slice_with_the_nas_down_says_so_and_never_slices_the_cached_copy(db_session, printer_factory):
+    _, plate, _, _ = await make(db_session, printer_factory)
+    project = await db_session.get(LibraryFile, plate.library_file_id)
+    project.is_external = True  # a NAS project
+    db_session.add(
+        FarmLibraryFile(
+            watch_folder_id=1,
+            library_file_id=project.id,
+            path="/nas/M.3mf",
+            mtime=1,
+            size=1,
+            sha256="v1",
+            slicer_detected="orcaslicer",
+        )
+    )
+    await db_session.commit()
+    runs = []
+
+    async def enqueue(**kw):
+        runs.append(kw["run"])
+        return SimpleNamespace(id=78)
+
+    key = slicing._queue_key(project.id, plate.plate_index, None)
+    sidecar = AsyncMock()
+    try:
+        with (
+            patch("backend.app.services.slice_dispatch.slice_dispatch.enqueue", enqueue),
+            patch("backend.app.farm.slicing.ensure_local", AsyncMock(return_value=False)),
+            patch("backend.app.farm.slicing.sidecar_url", sidecar),
+        ):
+            assert await slicing.force_slice(db_session, plate, None)
+            with pytest.raises(Exception, match="NAS not reachable"):
+                await runs[0](78)
+        sidecar.assert_not_awaited()  # the slicer never got the copy in the cache
+        assert "NAS not reachable" in slicing._failed[key]["reason"]  # what the job's note says
+        # Asked again later (the dispatcher's retry): still read from the NAS, until one succeeds.
+        slicing._forget_asked(key)
+        sliced = AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {}))
+        with (
+            patch("backend.app.services.slice_dispatch.slice_dispatch.enqueue", enqueue),
+            patch("backend.app.farm.slicing.slice_embedded", sliced),
+        ):
+            assert await slicing.ask_variant_slicing(db_session, plate, None)
+            await runs[1](79)
+        assert sliced.await_args.kwargs["from_nas"] is True
+        assert key not in slicing._from_nas and key not in slicing._failed
+    finally:
+        slicing._failed.pop(key, None)
+        slicing._from_nas.discard(key)
+
+
+@pytest.mark.asyncio
 async def test_a_waiting_job_shows_how_far_its_slice_is(async_client, db_session, printer_factory):
     from backend.app.services.slice_dispatch import SliceJob, slice_dispatch
 
