@@ -955,6 +955,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: 'Detalhes técnicos',
+      unknown: 'Motivo não informado pela impressora',
+      phase: {
+        dispatch: 'Antes do envio',
+        upload: 'Envio para a impressora',
+        start: 'Início da impressão',
+        printing: 'Durante a impressão',
+      },
+      progress: 'em {{progress}}%',
+      layer: 'camada {{layer}}',
+      layerOf: 'camada {{layer}} de {{total}}',
+      by: 'por {{name}}',
+      via: {
+        panel: 'pelo painel',
+        api: 'pela API (Seller Hub, MCP)',
+      },
+      attempts: 'tentativas de início: {{n}}',
+    },
     filamentShort: {
       rowBadge: 'Filamento insuficiente para a bobina atribuida',
       rowTooltip: 'O escalonador sinalizou este item. Clique em Play para ver o deficit por slot e decidir se quer imprimir mesmo assim.',

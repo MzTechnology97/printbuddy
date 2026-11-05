@@ -60,6 +60,7 @@ from backend.app.models.archive import PrintArchive
 from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
+from backend.app.services import queue_failure
 from backend.app.services.filament_requirements import extract_filament_requirements
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
 from backend.app.services.printer_manager import printer_manager
@@ -399,9 +400,10 @@ _sha_cache: dict[tuple[str, int, int], str] = {}  # (path, mtime_ns, size) -> sh
 
 
 async def fail_queued(db: AsyncSession, item: PrintQueueItem, reason: str) -> None:
-    """A queue item that never can start fails: the queue shows why, and so does its farm job's note."""
-    item.status, item.error_message, item.waiting_reason = "failed", reason, None
-    item.completed_at = datetime.now(timezone.utc)
+    """A queue item that never can start fails: the queue history shows why (in the "dispatch" phase,
+    ``services.queue_failure``), and so does its farm job's note."""
+    queue_failure.mark_failed(item, reason, "dispatch")
+    item.waiting_reason = None
     job = await db.scalar(select(FarmPrintJob).where(FarmPrintJob.queue_item_id == item.id))
     if job is not None:
         job.note = reason[:255]
@@ -1041,8 +1043,8 @@ async def dispatch_once(db: AsyncSession) -> int:
     return created
 
 
-async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
-    """Cancel a job; its queue item too while it has not started."""
+async def cancel_job(db: AsyncSession, job: FarmPrintJob, who: dict | None = None) -> None:
+    """Cancel a job; its queue item too while it has not started (the queue history says by whom)."""
     if job.source:
         raise HTTPException(409, "A print outside the queue is not cancelled: say it is not production")
     if job.queue_item_id:
@@ -1051,6 +1053,9 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
             raise HTTPException(409, "Already printing: stop it from the printer or the queue")
         if item is not None and item.status == "pending":
             item.status = "cancelled"
+            item.completed_at = datetime.now(timezone.utc)
+            item.error_message = "Cancelled with its farm job"
+            item.failure_detail = {"phase": "dispatch", **(who or {})}
     job.status = "cancelled"
     await db.commit()
 

@@ -954,6 +954,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: '技術的な詳細',
+      unknown: 'プリンターから理由が報告されていません',
+      phase: {
+        dispatch: '送信前',
+        upload: 'プリンターへのアップロード',
+        start: '印刷開始',
+        printing: '印刷中',
+      },
+      progress: '{{progress}}% 時点',
+      layer: 'レイヤー {{layer}}',
+      layerOf: 'レイヤー {{layer}} / {{total}}',
+      by: '{{name}} による',
+      via: {
+        panel: 'パネルから',
+        api: 'API 経由 (Seller Hub, MCP)',
+      },
+      attempts: '開始の試行回数: {{n}}',
+    },
     filamentShort: {
       rowBadge: '割り当てられたスプールのフィラメントが不足しています',
       rowTooltip: 'スケジューラーがこのアイテムをフラグしました。再生ボタンをクリックしてスロットごとの不足量を確認し、それでも印刷するか判断してください。',

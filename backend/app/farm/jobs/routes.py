@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -179,9 +179,11 @@ async def assign_job(job_id: int, data: AssignIn, db: AsyncSession = Depends(get
 
 
 @router.delete("/jobs/{job_id}", dependencies=[_delete])
-async def cancel_job(job_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+async def cancel_job(job_id: int, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    from backend.app.services.queue_failure import requester
+
     job = await db.get(FarmPrintJob, job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    await service.cancel_job(db, job)
+    await service.cancel_job(db, job, requester(None, request))
     return {"id": job_id, "state": "cancelled"}
