@@ -281,5 +281,29 @@ async def put_sd_files(body: SdFilesIn, db: AsyncSession = Depends(get_db)) -> d
     return await _sd_files(db)
 
 
+class AutoSpoolsIn(BaseModel):
+    enabled: bool
+
+
+@router.get("/auto-spools", dependencies=[Depends(require_permission_if_auth_enabled(Permission.SETTINGS_READ))])
+async def get_auto_spools(db: AsyncSession = Depends(get_db)) -> dict:
+    """Whether spools are created for the filaments the 3MFs use."""
+    from backend.app.api.routes.settings import get_setting
+    from backend.app.farm import auto_spools
+
+    enabled = (await get_setting(db, auto_spools.ENABLED_KEY) or "1") != "0"
+    return {"enabled": enabled}
+
+
+@router.put("/auto-spools", dependencies=[Depends(require_permission_if_auth_enabled(Permission.SETTINGS_UPDATE))])
+async def put_auto_spools(body: AutoSpoolsIn, db: AsyncSession = Depends(get_db)) -> dict:
+    from backend.app.api.routes.settings import set_setting
+    from backend.app.farm import auto_spools
+
+    await set_setting(db, auto_spools.ENABLED_KEY, "1" if body.enabled else "0")
+    await db.commit()
+    return {"enabled": body.enabled}
+
+
 router.include_router(plates_router)
 router.include_router(nas_router)
