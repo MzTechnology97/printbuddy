@@ -250,6 +250,11 @@ export interface FarmPrinterSpool {
   materials?: string[]; // filament types of this model in the slicer profiles
 }
 
+export interface FarmSdFiles {
+  keep_days: number;
+  printers: { id: number; name: string; model: string | null; keep: boolean; ghost_print_risk: boolean }[];
+}
+
 export interface FarmPlanSettings {
   url: string;
   tolerance: number;
@@ -403,6 +408,9 @@ export const farmApi = {
   assignJob: (id: number, body: { parts?: { component_code: string; pieces: number }[]; not_production?: boolean }) =>
     farmRequest<FarmJob[]>(`/jobs/${id}/assign`, { method: 'POST', body: JSON.stringify(body) }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
+  getSdFiles: () => farmRequest<FarmSdFiles>('/sd-files'),
+  saveSdFiles: (data: { keep_days: number; keep_printer_ids: number[] }) =>
+    farmRequest<FarmSdFiles>('/sd-files', { method: 'PUT', body: JSON.stringify(data) }),
   savePlanSettings: (data: FarmPlanSettings) =>
     farmRequest<FarmPlanSettings>('/plan/settings', { method: 'PUT', body: JSON.stringify(data) }),
   getProjectNames: () => farmRequest<{ id: number; name: string }[]>('/projects'),

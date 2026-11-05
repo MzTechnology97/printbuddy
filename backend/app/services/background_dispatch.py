@@ -21,6 +21,7 @@ from sqlalchemy import select
 from backend.app.core.config import settings
 from backend.app.core.database import async_session
 from backend.app.core.websocket import ws_manager
+from backend.app.farm import printer_files as farm_printer_files  # fork: printfarm
 from backend.app.models.library import LibraryFile
 from backend.app.models.printer import Printer
 from backend.app.services.archive import ArchiveService
@@ -641,6 +642,8 @@ class BackgroundDispatchService:
         operation_name: str,
         progress_callback,
     ) -> bool:
+        # fork: recorded so a file kept on the printer after the print is cleaned up when old
+        await farm_printer_files.before_upload(job.printer_id, remote_path)
         if provider == "bambu":
             if ftp_retry_enabled:
                 return bool(

@@ -1,4 +1,4 @@
-"""Printfarm (fork): fingerprinted queue files on printers, reuse and 30-day clean-up. No printer is contacted."""
+"""Printfarm (fork): fingerprinted queue files on printers, reuse and clean-up of old ones. No printer is contacted."""
 
 from datetime import timedelta
 from unittest.mock import patch
@@ -42,7 +42,8 @@ async def test_reuse_only_when_the_printer_lists_the_file(async_client, db_sessi
         assert await printer_files.before_upload(1, "/Sopra__1a2b3c4d.3mf") is False  # used once only
         assert await printer_files.before_upload(1, "/manuale.3mf") is False
     rows = (await db_session.execute(select(FarmPrinterFile))).scalars().all()
-    assert [(r.printer_id, r.remote_path) for r in rows] == [(1, "/Sopra__1a2b3c4d.3mf")]
+    # Every file put on a printer is recorded for the clean-up; only fingerprinted names are reused.
+    assert sorted((r.printer_id, r.remote_path) for r in rows) == [(1, "/Sopra__1a2b3c4d.3mf"), (1, "/manuale.3mf")]
 
 
 @pytest.mark.asyncio
