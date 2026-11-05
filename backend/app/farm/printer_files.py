@@ -107,6 +107,7 @@ async def check_reusable(
         return False
     if remote_path.rsplit("/", 1)[-1] in names:
         _reusable.add((printer_id, remote_path))
+        await _record(printer_id, remote_path)  # used now: the clean-up must not take it away meanwhile
         logger.info("Printer %s already has %s: reusing it", printer_id, remote_path)
         return True
     return False
@@ -148,13 +149,17 @@ async def save_settings(db: AsyncSession, days: int, printer_ids: set[int]) -> N
     await db.commit()
 
 
-async def before_upload(printer_id: int, remote_path: str) -> bool:
-    """Record a file Printbuddy puts on a printer (for the clean-up); True when the upload can be skipped.
+async def _record(printer_id: int, remote_path: str, *, plain_if_kept: bool = False) -> None:
+    """Mark the file used now. Bookkeeping only: a failure is logged and never stops an upload.
 
-    Only fingerprinted names are ever reused. The record is bookkeeping: it never stops an upload.
+    Fingerprinted names are always recorded (queue files, as before). With ``plain_if_kept`` a plain name
+    (archive reprint, print outside the queue) is recorded too, but only on a printer that keeps its files:
+    elsewhere upstream already deletes it after the print, and Klipper is left as it was.
     """
     try:
         async with database.async_session() as db:
+            if not FINGERPRINT_RE.search(remote_path) and not (plain_if_kept and printer_id in await kept_printers(db)):
+                return
             row = await db.scalar(
                 select(FarmPrinterFile).where(
                     FarmPrinterFile.printer_id == printer_id, FarmPrinterFile.remote_path == remote_path
@@ -167,6 +172,14 @@ async def before_upload(printer_id: int, remote_path: str) -> bool:
             await db.commit()
     except Exception as exc:
         logger.warning("Printer %s: could not record %s for the clean-up: %s", printer_id, remote_path, exc)
+
+
+async def before_upload(printer_id: int, remote_path: str) -> bool:
+    """Record a file Printbuddy puts on a printer (for the clean-up); True when the upload can be skipped.
+
+    Only fingerprinted names are ever reused.
+    """
+    await _record(printer_id, remote_path, plain_if_kept=True)
     reuse = (printer_id, remote_path) in _reusable
     _reusable.discard((printer_id, remote_path))
     return reuse
@@ -185,48 +198,76 @@ async def _busy_printers(db: AsyncSession) -> set[int]:
     return {pid for (pid,) in rows if pid is not None}
 
 
+async def _listing(printer, provider: str) -> set[str] | None:
+    """The file names at the printer's root; None when it can't be listed now (offline, no support, error)."""
+    if provider != "bambu":
+        from backend.app.services.printer_manager import printer_manager
+
+        client = printer_manager.get_client(printer.id)
+        if client is None or not hasattr(client, "list_files"):
+            return None
+    try:
+        return await _list_names(printer.id, provider, printer.ip_address, printer.access_code, printer.model)
+    except Exception as exc:
+        logger.debug("Printer %s: file list failed, clean-up skipped: %s", printer.id, exc)
+        return None
+
+
+async def _delete(printer, provider: str, remote_path: str) -> bool:
+    if provider == "bambu":
+        from backend.app.services.bambu_ftp import delete_file_async
+
+        return bool(
+            await delete_file_async(printer.ip_address, printer.access_code, remote_path, printer_model=printer.model)
+        )
+    from backend.app.services.printer_manager import printer_manager
+
+    client = printer_manager.get_client(printer.id)
+    if client is None:
+        return False
+    return await asyncio.to_thread(client.delete_file, remote_path) is not False
+
+
 async def cleanup(db: AsyncSession) -> int:
-    """Delete files Printbuddy put on idle printers and unused for ``keep_days``; returns how many."""
+    """Delete files Printbuddy put on idle printers and unused for ``keep_days``; returns how many.
+
+    Before each delete the printer's queue and the file's last use are read again: a queued print may
+    have picked the file up (reuse) while the earlier deletes were running. A file no longer on the
+    printer is forgotten; one that could not be deleted is kept and tried again next time.
+    """
     from backend.app.models.printer import Printer
     from backend.app.services.print_scheduler import scheduler
     from backend.app.services.printer_providers.factory import normalize_provider
 
-    days = await keep_days(db)
-    busy = await _busy_printers(db)
-    old = (
-        (await db.execute(select(FarmPrinterFile).where(FarmPrinterFile.last_used_at < _now() - timedelta(days=days))))
-        .scalars()
-        .all()
-    )
+    cutoff = _now() - timedelta(days=await keep_days(db))
+    old = (await db.execute(select(FarmPrinterFile).where(FarmPrinterFile.last_used_at < cutoff))).scalars().all()
+    listed: dict[int, set[str] | None] = {}
     deleted = 0
     for row in old:
-        if row.printer_id in busy:
-            continue  # printing, or a queued print is being sent to it
         printer = await db.get(Printer, row.printer_id)
         if printer is None:
             await db.delete(row)
             continue
         if not scheduler._is_printer_idle(printer.id, require_plate_clear=False):
             continue  # never touch a printer that is working
-        try:
-            provider = normalize_provider(printer.provider)
-            if provider == "bambu":
-                from backend.app.services.bambu_ftp import delete_file_async
-
-                await delete_file_async(
-                    printer.ip_address, printer.access_code, row.remote_path, printer_model=printer.model
-                )
-            else:
-                from backend.app.services.printer_manager import printer_manager
-
-                client = printer_manager.get_client(printer.id)
-                if client is None:
-                    continue
-                await asyncio.to_thread(client.delete_file, row.remote_path)
-        except Exception as exc:
-            logger.warning("Printer %s: could not delete old queue file %s: %s", printer.id, row.remote_path, exc)
+        provider = normalize_provider(printer.provider)
+        if printer.id not in listed:
+            listed[printer.id] = await _listing(printer, provider)
+        names = listed[printer.id]
+        if names is None:
             continue
+        await db.refresh(row)
+        if printer.id in await _busy_printers(db) or row.last_used_at >= cutoff:
+            continue  # printing, being sent, or picked up again since the list was read
+        if row.remote_path.rsplit("/", 1)[-1] in names:
+            try:
+                ok = await _delete(printer, provider, row.remote_path)
+            except Exception as exc:
+                ok = False
+                logger.warning("Printer %s: could not delete old file %s: %s", printer.id, row.remote_path, exc)
+            if not ok:
+                continue  # still on the printer: keep the record, try again next time
+            deleted += 1
         await db.delete(row)
-        deleted += 1
     await db.commit()
     return deleted

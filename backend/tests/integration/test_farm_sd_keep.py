@@ -8,7 +8,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from backend.app.farm import printer_files
 from backend.app.farm.printer_files import FarmPrinterFile
@@ -144,6 +144,45 @@ async def test_klipper_is_unchanged():
 # ---------------------------------------------------------------- clean-up
 
 
+def _session_factory(db_session):
+    class _Ctx:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return lambda: _Ctx()
+
+
+async def run_cleanup(db_session, *, on_printer, delete=None, idle=lambda *a, **k: True):
+    """``cleanup`` with the printers' file lists and deletes stubbed; returns the paths it deleted."""
+    deleted: list[str] = []
+
+    async def names(printer_id, provider, ip, code, model):
+        if on_printer is None:
+            raise OSError("printer offline")
+        return set(on_printer)
+
+    async def fake_delete(ip, code, remote_path, **kwargs):
+        if delete is not None:
+            return await delete(remote_path)
+        deleted.append(remote_path)
+        return True
+
+    with (
+        patch.object(printer_files, "_list_names", names),
+        patch("backend.app.services.bambu_ftp.delete_file_async", fake_delete),
+        patch("backend.app.services.print_scheduler.scheduler._is_printer_idle", idle),
+    ):
+        count = await printer_files.cleanup(db_session)
+    return count, deleted
+
+
+async def left(db_session):
+    return sorted(r.remote_path for r in (await db_session.execute(select(FarmPrinterFile))).scalars())
+
+
 @pytest.mark.asyncio
 async def test_cleanup_uses_the_days_setting_and_never_touches_files_in_use(db_session, printer_factory):
     idle = await printer_factory(name="A1 uno", model="A1")
@@ -164,39 +203,141 @@ async def test_cleanup_uses_the_days_setting_and_never_touches_files_in_use(db_s
         ]
     )
     await db_session.commit()
-    deleted = []
-
-    async def fake_delete(ip, code, remote_path, **kwargs):
-        deleted.append(remote_path)
-        return True
-
-    with (
-        patch("backend.app.services.bambu_ftp.delete_file_async", fake_delete),
-        # the idle check alone would let all three through: the queue must hold the busy ones back
-        patch("backend.app.services.print_scheduler.scheduler._is_printer_idle", lambda *a, **k: True),
-    ):
-        assert await printer_files.cleanup(db_session) == 2
+    on_printer = {"vecchio__11111111.3mf", "ristampa.3mf", "stampa__33333333.3mf", "invio__44444444.3mf"}
+    # the idle check alone would let all three through: the queue must hold the busy ones back
+    count, deleted = await run_cleanup(db_session, on_printer=on_printer)
+    assert count == 2
     assert sorted(deleted) == ["/ristampa.3mf", "/vecchio__11111111.3mf"]
-    left = sorted(r.remote_path for r in (await db_session.execute(select(FarmPrinterFile))).scalars())
-    assert left == ["/invio__44444444.3mf", "/recente__22222222.3mf", "/stampa__33333333.3mf"]
-
-
-def _session_factory(db_session):
-    class _Ctx:
-        async def __aenter__(self):
-            return db_session
-
-        async def __aexit__(self, *exc):
-            return False
-
-    return lambda: _Ctx()
+    assert await left(db_session) == ["/invio__44444444.3mf", "/recente__22222222.3mf", "/stampa__33333333.3mf"]
 
 
 @pytest.mark.asyncio
-async def test_reprints_and_prints_outside_the_queue_are_recorded_but_never_reused(db_session):
-    """A plain name (archive reprint, print from the library) goes to the clean-up; reuse stays fingerprinted."""
+async def test_a_file_picked_up_while_the_cleanup_runs_is_not_deleted(db_session, printer_factory):
+    """The race: the clean-up read its list, then the queue reuses an old file (or starts sending) meanwhile."""
+    a = await printer_factory(name="A1 uno", model="A1")
+    b = await printer_factory(name="X1C", model="X1C")
+    c = await printer_factory(name="H2D", model="H2D")
+    old = printer_files._now() - timedelta(days=30)
+    rows = [
+        FarmPrinterFile(printer_id=a.id, remote_path="/primo__11111111.3mf", last_used_at=old),
+        FarmPrinterFile(printer_id=b.id, remote_path="/riusato__22222222.3mf", last_used_at=old),
+        FarmPrinterFile(printer_id=c.id, remote_path="/inviato__33333333.3mf", last_used_at=old),
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    deleted: list[str] = []
+
+    async def delete(remote_path):
+        deleted.append(remote_path)
+        if remote_path == "/primo__11111111.3mf":  # while this delete runs, the scheduler works on b and c
+            await db_session.execute(
+                update(FarmPrinterFile)
+                .where(FarmPrinterFile.printer_id == b.id)
+                .values(last_used_at=printer_files._now())
+            )
+            db_session.add(
+                PrintQueueItem(printer_id=c.id, position=1, status="pending", dispatching_at=printer_files._now())
+            )
+            await db_session.commit()
+        return True
+
+    names = {"primo__11111111.3mf", "riusato__22222222.3mf", "inviato__33333333.3mf"}
+    count, _ = await run_cleanup(db_session, on_printer=names, delete=delete)
+    assert (count, deleted) == (1, ["/primo__11111111.3mf"])
+    assert await left(db_session) == ["/inviato__33333333.3mf", "/riusato__22222222.3mf"]
+
+
+@pytest.mark.asyncio
+async def test_reuse_marks_the_file_used_so_the_cleanup_leaves_it(db_session, printer_factory):
+    x1c = await printer_factory(name="X1C", model="X1C")
+    row = FarmPrinterFile(
+        printer_id=x1c.id, remote_path="/Sopra__1a2b3c4d.3mf", last_used_at=printer_files._now() - timedelta(days=30)
+    )
+    db_session.add(row)
+    await db_session.commit()
+
+    async def names(*args):
+        return {"Sopra__1a2b3c4d.3mf"}
+
+    with (
+        patch.object(printer_files, "_list_names", names),
+        patch("backend.app.core.database.async_session", _session_factory(db_session)),
+    ):
+        assert await printer_files.check_reusable(x1c.id, "bambu", "ip", "code", "/Sopra__1a2b3c4d.3mf", "X1C")
+    await db_session.refresh(row)
+    assert row.last_used_at > printer_files._now() - timedelta(minutes=1)
+    printer_files._reusable.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_delete_keeps_the_record_and_a_missing_file_is_forgotten(db_session, printer_factory):
+    x1c = await printer_factory(name="X1C", model="X1C")
+    old = printer_files._now() - timedelta(days=30)
+    db_session.add_all(
+        [
+            FarmPrinterFile(printer_id=x1c.id, remote_path="/bloccato__11111111.3mf", last_used_at=old),
+            FarmPrinterFile(printer_id=x1c.id, remote_path="/sparito__22222222.3mf", last_used_at=old),
+        ]
+    )
+    await db_session.commit()
+
+    async def refuse(remote_path):
+        return False  # what delete_file_async returns when the FTP delete fails
+
+    count, _ = await run_cleanup(db_session, on_printer={"bloccato__11111111.3mf"}, delete=refuse)
+    # The file still on the SD stays recorded (tried again next time); the one already gone is forgotten.
+    assert count == 0
+    assert await left(db_session) == ["/bloccato__11111111.3mf"]
+
+
+@pytest.mark.asyncio
+async def test_an_offline_printer_keeps_its_records(db_session, printer_factory):
+    x1c = await printer_factory(name="X1C", model="X1C")
+    db_session.add(
+        FarmPrinterFile(
+            printer_id=x1c.id,
+            remote_path="/vecchio__11111111.3mf",
+            last_used_at=printer_files._now() - timedelta(days=30),
+        )
+    )
+    await db_session.commit()
+    assert await run_cleanup(db_session, on_printer=None) == (0, [])  # the list fails: nothing deleted or forgotten
+    assert await run_cleanup(db_session, on_printer=set(), idle=lambda *a, **k: False) == (0, [])  # not idle
+    assert await left(db_session) == ["/vecchio__11111111.3mf"]
+
+
+@pytest.mark.asyncio
+async def test_plain_names_are_recorded_only_on_bambu_printers_that_keep_files(db_session, printer_factory):
+    """Settings off (and Klipper): only fingerprinted queue files are recorded, exactly as before this change."""
+    kept = await printer_factory(name="X1C", model="X1C")
+    not_kept = await printer_factory(name="H2D", model="H2D")
+    klipper = await printer_factory(name="K1", model="K1", provider="klipper")
+    await printer_files.save_settings(db_session, 14, {kept.id})
     with patch("backend.app.core.database.async_session", _session_factory(db_session)):
-        assert await printer_files.before_upload(1, "/Ristampa.3mf") is False
-        assert await printer_files.before_upload(1, "/Ristampa.3mf") is False
+        for printer in (kept, not_kept, klipper):
+            assert await printer_files.before_upload(printer.id, "/Ristampa.3mf") is False  # never reused
+            await printer_files.before_upload(printer.id, "/Coda__1a2b3c4d.gcode")
     rows = (await db_session.execute(select(FarmPrinterFile))).scalars().all()
-    assert [(r.printer_id, r.remote_path) for r in rows] == [(1, "/Ristampa.3mf")]
+    assert sorted((r.printer_id, r.remote_path) for r in rows) == sorted(
+        [
+            (kept.id, "/Ristampa.3mf"),
+            (kept.id, "/Coda__1a2b3c4d.gcode"),
+            (not_kept.id, "/Coda__1a2b3c4d.gcode"),
+            (klipper.id, "/Coda__1a2b3c4d.gcode"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_corrupt_settings_fall_back_to_nothing_kept(async_client, db_session, printer_factory):
+    from backend.app.api.routes.settings import set_setting
+
+    p1s = await printer_factory(name="P1S", model="P1S")
+    await set_setting(db_session, printer_files.KEEP_PRINTERS_KEY, "{non json")
+    await set_setting(db_session, printer_files.KEEP_DAYS_KEY, "tanti")
+    await db_session.commit()
+    assert await printer_files.kept_printers(db_session) == set()
+    assert await printer_files.keep_days(db_session) == printer_files.KEEP_DAYS
+    got = (await async_client.get("/api/v1/farm/sd-files")).json()
+    assert got["keep_days"] == 14
+    assert [(p["id"], p["keep"]) for p in got["printers"]] == [(p1s.id, False)]

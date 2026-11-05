@@ -42,8 +42,7 @@ async def test_reuse_only_when_the_printer_lists_the_file(async_client, db_sessi
         assert await printer_files.before_upload(1, "/Sopra__1a2b3c4d.3mf") is False  # used once only
         assert await printer_files.before_upload(1, "/manuale.3mf") is False
     rows = (await db_session.execute(select(FarmPrinterFile))).scalars().all()
-    # Every file put on a printer is recorded for the clean-up; only fingerprinted names are reused.
-    assert sorted((r.printer_id, r.remote_path) for r in rows) == [(1, "/Sopra__1a2b3c4d.3mf"), (1, "/manuale.3mf")]
+    assert [(r.printer_id, r.remote_path) for r in rows] == [(1, "/Sopra__1a2b3c4d.3mf")]
 
 
 @pytest.mark.asyncio
@@ -71,7 +70,11 @@ async def test_cleanup_deletes_only_old_files_on_idle_printers(db_session, print
         deleted.append(remote_path)
         return True
 
+    async def on_printer(*args):
+        return {"vecchio__11111111.3mf", "recente__22222222.3mf", "vecchio__33333333.3mf"}
+
     with (
+        patch.object(printer_files, "_list_names", on_printer),
         patch("backend.app.services.bambu_ftp.delete_file_async", fake_delete),
         patch(
             "backend.app.services.print_scheduler.scheduler._is_printer_idle",
