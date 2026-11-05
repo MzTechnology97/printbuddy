@@ -371,6 +371,22 @@ class TestEmbeddedSlicing:
         assert out.file_metadata["sliced_with"] == "orcaslicer"
         assert response.used_embedded_settings is True
 
+    async def test_a_queued_output_is_never_written_over(self, async_client, db_session, watched, sidecar):
+        from backend.app.models.print_queue import PrintQueueItem
+
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
+        first = await self._slice(db_session, file_id)
+        assert (await self._slice(db_session, file_id)).library_file_id == first.library_file_id  # nothing queued
+        db_session.add(PrintQueueItem(library_file_id=first.library_file_id, position=1, status="pending"))
+        await db_session.commit()
+
+        again = await self._slice(db_session, file_id)
+        kept = await db_session.get(LibraryFile, first.library_file_id)
+        new = await db_session.get(LibraryFile, again.library_file_id)
+        assert new.id != kept.id and new.file_path != kept.file_path
+        assert kept.filename == "box.gcode.3mf" and new.filename.startswith("box - ")
+
     async def test_project_settings_show_what_the_slice_will_use(self, async_client, watched, nas):
         path = nas / "Handle" / "K2-handle.3mf"
         path.parent.mkdir()

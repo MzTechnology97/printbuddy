@@ -35,6 +35,7 @@ from backend.app.farm.nas.access import library_path
 from backend.app.farm.nas.cache import ensure_local
 from backend.app.farm.plates.models import FarmPlate
 from backend.app.models.library import LibraryFile
+from backend.app.models.print_queue import PrintQueueItem
 from backend.app.schemas.slicer import SliceResponse
 from backend.app.services.slicer_api import (
     SlicerApiServerError,
@@ -118,6 +119,19 @@ async def previous_output(
     return found
 
 
+async def _queued(db: AsyncSession, output: LibraryFile) -> bool:
+    """Whether a queue item that hasn't started prints this output, or a Klipper G-code taken out of it."""
+    rows = await db.execute(
+        select(LibraryFile)
+        .join(PrintQueueItem, PrintQueueItem.library_file_id == LibraryFile.id)
+        .where(PrintQueueItem.status == "pending")
+    )
+    return any(
+        f.id == output.id or (f.file_metadata or {}).get("extracted_from_library_file_id") == output.id
+        for f in rows.scalars()
+    )
+
+
 def colour_key(colour: str | None) -> str | None:
     """How colour variants are compared (``sliced_color``): the name as a key of the farm's colour table."""
     return (colour or "").strip().lower() or None
@@ -189,14 +203,18 @@ async def slice_embedded(
         await service.close()
 
     base_name = lib_file.filename.removesuffix(".3mf")
-    # A new slice of the same plate replaces the previous output (same row, same file): queued
-    # prints and plates follow it, and printers get it under the same name.
+    filename = output_name(base_name, plate, colour)
+    # A new slice of the same plate replaces the previous output (same row, same file): plates
+    # follow it, and printers get it under the same name. Not one a queued print still waits on:
+    # that keeps its bytes, and the new slice gets a row and a name of its own (``jobs.service``
+    # moves the print to it when its pieces are the same).
     previous = await previous_output(db, lib_file.id, plate, colour)
+    if previous is not None and await _queued(db, previous):
+        previous = None
+        filename = filename.replace(".gcode.3mf", f" - {uuid.uuid4().hex[:8]}.gcode.3mf")
     # NAS project: the output goes on the NAS next to it, the local file is only its cache copy.
     try:
-        saved = await nas_library.save_sliced(
-            db, lib_file, output_name(base_name, plate, colour), result.content, replaces=previous
-        )
+        saved = await nas_library.save_sliced(db, lib_file, filename, result.content, replaces=previous)
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Cannot save the sliced file on the NAS: {exc}"[:500]) from exc
     if saved is not None:
@@ -245,7 +263,7 @@ async def slice_embedded(
         _drop_thumbnail(previous.thumbnail_path)
     else:
         new_file.folder_id = saved.folder_id if saved else lib_file.folder_id
-        new_file.filename = saved.filename if saved else output_name(base_name, plate, colour)
+        new_file.filename = saved.filename if saved else filename
         db.add(new_file)
     new_file.is_external = saved is not None
     new_file.file_path = str(out_path) if saved else lib.to_relative_path(out_path)

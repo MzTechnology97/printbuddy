@@ -268,7 +268,8 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
     A plate whose pieces changed goes back to ``proposed``; shapes (and old component
     codes) set for an object name are kept, and so are those of a renamed object with the
     same geometry. Objects still without a shape get it from the same geometry on other
-    plates, and a plate whose objects all have one is confirmed.
+    plates, and a plate whose objects all have one is confirmed. Farm jobs queued on a plate
+    whose pieces changed, or that is gone, fail (``jobs.service.fail_queued_jobs``).
     """
     plates = {
         p.plate_index: p
@@ -284,7 +285,7 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
         except (ET.ParseError, zipfile.BadZipFile, KeyError, OSError) as exc:
             # Keep the stored plates: an unreadable version must not wipe confirmed ones.
             raise PlateReadError(f"Cannot read plates from {lib_file.filename}: {exc}") from exc
-        touched = []
+        touched, changed = [], set()
         for pp in parsed:
             plate = plates.pop(pp.index, None)
             if plate is None:
@@ -301,6 +302,8 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
             plate.filament_grams = pp.filament_grams
             plate.sliced_file_id = None
             if {y.object_name: y.quantity for y in plate.yields} != pp.objects:
+                if plate.id is not None:
+                    changed.add(plate.id)
                 old = list(plate.yields)
                 links = {y.object_name: (y.shape_id, y.component_code) for y in old}
                 yields = []
@@ -321,6 +324,11 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
             else:
                 for y in plate.yields:
                     y.fingerprint = pp.fingerprints.get(y.object_name, [])
+        from backend.app.farm.jobs import service as farm_jobs  # imports this module
+
+        # Queued jobs of these plates were made for the old pieces: they fail now, never start with the new ones.
+        await farm_jobs.fail_queued_jobs(db, changed, farm_jobs.FAIL_PLATE_CHANGED)
+        await farm_jobs.fail_queued_jobs(db, {p.id for p in plates.values()}, farm_jobs.FAIL_PLATE_GONE)
         for gone in plates.values():  # plate removed from the project
             await db.delete(gone)
         await db.flush()
