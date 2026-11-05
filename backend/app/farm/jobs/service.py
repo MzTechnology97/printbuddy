@@ -1079,16 +1079,17 @@ class FarmJobDispatcher:
             self._task = asyncio.create_task(self._loop(), name="farm-job-dispatcher")
 
     def stop(self) -> None:
-        from backend.app.farm import alerts
+        from backend.app.farm import alerts, slicer_filaments
 
         if self._task is not None:
             self._task.cancel()
             self._task = None
         alerts.stop_check()
+        slicer_filaments.stop_check()
         notify.cancel_pending()
 
     async def _loop(self) -> None:
-        from backend.app.farm import alerts, printer_files
+        from backend.app.farm import alerts, printer_files, slicer_filaments
         from backend.app.farm.jobs import outside
 
         last_cleanup = 0.0
@@ -1106,6 +1107,8 @@ class FarmJobDispatcher:
                     if time.monotonic() - last_history > HISTORY_EVERY_SECONDS:
                         last_history = time.monotonic()
                         await _guarded(db, "Klipper history", outside.scan_klipper_history)
+                        # its own task, like the alerts: an import never delays the dispatch
+                        slicer_filaments.start_check()
                     if time.monotonic() - last_cleanup > CLEANUP_EVERY_SECONDS:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)
