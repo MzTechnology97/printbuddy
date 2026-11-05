@@ -95,18 +95,21 @@ async def sliced_file(db: AsyncSession, plate: FarmPlate) -> LibraryFile | None:
     return (await _latest_slices(db, lib_file, state.sha256)).get(plate.plate_index)
 
 
-async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
-    """Slice the plate on its slicer's sidecar in the background (once; again after a while if it failed)."""
+async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> bool:
+    """Slice the plate on its slicer's sidecar in the background (once; again after a while if it failed).
+
+    True when a slice was queued now.
+    """
     key = (plate.library_file_id, plate.plate_index)
     if time.monotonic() - _slicing.get(key, -RESLICE_AFTER_SECONDS) < RESLICE_AFTER_SECONDS:
-        return
+        return False
     _slicing[key] = time.monotonic()
-    from backend.app.farm.slicing import slice_embedded
+    from backend.app.farm.slicing import queue_slice_ended, slice_embedded
     from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
 
     lib_file = await db.get(LibraryFile, plate.library_file_id)
     if lib_file is None:
-        return
+        return False
     name = lib_file.filename
 
     async def run(job_id: int):
@@ -116,14 +119,15 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate) -> None:
             try:
                 response = await slice_embedded(task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id)
             except Exception as exc:
-                notify.slicing_done(key[0], name, key[1], None, notify.QUEUE_SLICE, exc)
+                queue_slice_ended(key[0], name, key[1], None, state.slicer if state else None, exc)
                 if isinstance(exc, HTTPException):
                     raise http_exception_to_job_error(exc) from exc
                 raise
-        notify.slicing_done(key[0], name, key[1], None, notify.QUEUE_SLICE)
+        queue_slice_ended(key[0], name, key[1], None, state.slicer if state else None)
         return response.model_dump()
 
     await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=name, run=run)
+    return True
 
 
 async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:
@@ -133,10 +137,11 @@ async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) ->
     return await variant_slice(db, plate, color)
 
 
-async def ask_variant(db: AsyncSession, plate: FarmPlate, color: str | None) -> None:
-    from backend.app.farm.slicing import ask_variant_slicing
+async def ask_variant(db: AsyncSession, plate: FarmPlate, color: str | None) -> str:
+    """Ask for the plate's slice in the component's colour; the job's note: being sliced, or why not yet."""
+    from backend.app.farm.slicing import queue_slice_note
 
-    await ask_variant_slicing(db, plate, color)
+    return await queue_slice_note(db, plate, color)
 
 
 def _plate_model(resolver: PrinterModelResolver, plate: FarmPlate) -> str:
@@ -934,9 +939,8 @@ async def dispatch_once(db: AsyncSession) -> int:
                     continue
                 sliced = await variant_file(db, plate, job.color)  # the slice in the component's colour
                 if sliced is None:
-                    await ask_variant(db, plate, job.color)
+                    reasons.append(await ask_variant(db, plate, job.color))  # being sliced, or why it failed
                     slicing = True
-                    reasons.append(f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced")
                     continue
                 model = _plate_model(resolver, plate)
                 read: tuple | None = None  # (path, plate number, used filaments) of the sliced file, once
