@@ -1,8 +1,10 @@
 """Re-slice a project's outputs when its 3MF changes (saved again under the same name).
 
 A new slice of a plate replaces the previous output: same library row, same file on the NAS
-(see ``slicing.slice_embedded``). Queued prints point at that row, so they print the new G-code;
-the printer gets it under the same name, replacing the old copy in its cache or storage. Plates
+(see ``slicing.slice_embedded``); the printer gets it under the same name, replacing the old copy
+in its cache or storage. An output a queued print still waits on is kept instead, and the new
+slice gets a row and a name of its own: before it starts, the print moves to it if its plate
+still prints the same pieces, and fails otherwise (``jobs.service.stale_slice_reason``). Plates
 then take time and grams from the new output.
 
 Only plates that already had an output are re-sliced, and only those still in the project: a
