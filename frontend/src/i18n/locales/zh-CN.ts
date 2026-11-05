@@ -4826,6 +4826,8 @@ export default {
     farmSlicingFailedDescription: '后台切片或自动重新切片失败',
     farmFileCorrupt: '农场文件损坏',
     farmFileCorruptDescription: '农场或 NAS 文件夹中的打印文件已损坏',
+    farmLibraryProblem: '资料库问题',
+    farmLibraryProblemDescription: '资料库中保存的 3MF 无法使用（切片、配置、打印机型号、空盘）',
     farmPlateToClear: '待清理打印板',
     farmPlateToClearDescription: '打印机已完成，农场任务正在等待清理打印板',
     farmComponentUrgent: '紧急部件受阻',

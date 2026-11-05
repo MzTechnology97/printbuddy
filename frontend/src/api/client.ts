@@ -2227,6 +2227,7 @@ export interface NotificationProvider {
   // Print farm events
   on_farm_slicing_failed: boolean;
   on_farm_file_corrupt: boolean;
+  on_farm_library_problem: boolean;
   on_farm_plate_to_clear: boolean;
   on_farm_component_urgent: boolean;
   on_farm_batch_to_assign: boolean;
@@ -2294,6 +2295,7 @@ export interface NotificationProviderCreate {
   // Print farm events
   on_farm_slicing_failed?: boolean;
   on_farm_file_corrupt?: boolean;
+  on_farm_library_problem?: boolean;
   on_farm_plate_to_clear?: boolean;
   on_farm_component_urgent?: boolean;
   on_farm_batch_to_assign?: boolean;
@@ -2353,6 +2355,7 @@ export interface NotificationProviderUpdate {
   // Print farm events
   on_farm_slicing_failed?: boolean;
   on_farm_file_corrupt?: boolean;
+  on_farm_library_problem?: boolean;
   on_farm_plate_to_clear?: boolean;
   on_farm_component_urgent?: boolean;
   on_farm_batch_to_assign?: boolean;

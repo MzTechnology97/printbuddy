@@ -250,6 +250,16 @@ export interface FarmPrinterSpool {
   materials?: string[]; // filament types of this model in the slicer profiles
 }
 
+export interface FarmLibraryProblem {
+  id: number;
+  library_file_id: number;
+  filename: string;
+  plate: number | null;
+  code: string;
+  message: string;
+  since: string;
+}
+
 export interface FarmSdFiles {
   keep_days: number;
   printers: { id: number; name: string; model: string | null; keep: boolean; ghost_print_risk: boolean }[];
@@ -409,6 +419,7 @@ export const farmApi = {
     farmRequest<FarmJob[]>(`/jobs/${id}/assign`, { method: 'POST', body: JSON.stringify(body) }),
   getPlanSettings: () => farmRequest<FarmPlanSettings>('/plan/settings'),
   getSdFiles: () => farmRequest<FarmSdFiles>('/sd-files'),
+  getLibraryProblems: () => farmRequest<FarmLibraryProblem[]>('/library-problems'),
   saveSdFiles: (data: { keep_days: number; keep_printer_ids: number[] }) =>
     farmRequest<FarmSdFiles>('/sd-files', { method: 'PUT', body: JSON.stringify(data) }),
   savePlanSettings: (data: FarmPlanSettings) =>

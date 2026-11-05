@@ -188,6 +188,13 @@ const en = {
     ghostRisk: 'Warning: on this model a power cycle may start the last print again while its file is on the SD (ghost print).',
     days: 'Delete unused files after (days)',
   },
+  problems: {
+    title: 'Library problems',
+    intro: 'Saved 3MFs that will not work. Each one goes away by itself once the file is fixed and saved again.',
+    plate: 'Plate {{n}}',
+    since: 'since {{at}}',
+    open: 'Open the plates in Products',
+  },
   spools: {
     title: 'Spools loaded by hand',
     intro: 'These Klipper printers have no CFS and cannot say which spool is loaded. Set material and colour here: Accoda uses them to pick the 3MF and check the colour, and the print starts by itself after the plate-clear OK. Update it whenever you change spool.',
@@ -562,6 +569,13 @@ const it: typeof en = {
     keep: 'Tieni il file sulla SD dopo la stampa (ristampa dal display)',
     ghostRisk: 'Attenzione: su questo modello, spegnendo e riaccendendo, la stampante può far ripartire da sola l\'ultima stampa finché il suo file è sulla SD (stampa fantasma).',
     days: 'Cancella i file non usati dopo (giorni)',
+  },
+  problems: {
+    title: 'Problemi della libreria',
+    intro: 'I 3MF salvati che non funzioneranno. Ognuno sparisce da solo quando il file viene corretto e salvato di nuovo.',
+    plate: 'Piatto {{n}}',
+    since: 'dal {{at}}',
+    open: 'Apri i piatti in Prodotti',
   },
   spools: {
     title: 'Bobine montate (indicate a mano)',

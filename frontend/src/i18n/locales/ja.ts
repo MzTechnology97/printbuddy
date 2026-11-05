@@ -4839,6 +4839,8 @@ export default {
     farmSlicingFailedDescription: 'バックグラウンドのスライスまたは自動再スライスに失敗しました',
     farmFileCorrupt: 'ファームのファイル破損',
     farmFileCorruptDescription: 'ファームまたはNASフォルダの印刷ファイルが破損しています',
+    farmLibraryProblem: 'ライブラリの問題',
+    farmLibraryProblemDescription: 'ライブラリに保存された3MFが動作しません（スライス、プロファイル、プリンターモデル、空のプレート）',
     farmPlateToClear: 'プレートの片付け待ち',
     farmPlateToClearDescription: 'プリンターが完了し、ファームの作業がプレートを待っています',
     farmComponentUrgent: '緊急部品が停滞',

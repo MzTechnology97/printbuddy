@@ -103,6 +103,7 @@ class NotificationProvider(Base):
     # Event triggers - Print farm (backend/app/farm/notify.py)
     on_farm_slicing_failed = Column(Boolean, default=False)  # Background slicing (or auto re-slice) failed
     on_farm_file_corrupt = Column(Boolean, default=False)  # A watched/NAS print file is not a valid archive
+    on_farm_library_problem = Column(Boolean, default=False)  # A saved 3MF will not work (fork)
     on_farm_plate_to_clear = Column(Boolean, default=False)  # Farm work waits for a plate to be cleared
     on_farm_component_urgent = Column(Boolean, default=False)  # Urgent component, no free printer loaded for it
     on_farm_batch_to_assign = Column(Boolean, default=False)  # A batch waits to be assigned (Products)

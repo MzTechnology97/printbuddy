@@ -47,6 +47,7 @@ EVENT_NAMES = {
     # Print farm
     "farm_slicing_failed": "Farm Slicing Failed",
     "farm_file_corrupt": "Farm File Corrupt",
+    "farm_library_problem": "Farm Library Problem",
     "farm_plate_to_clear": "Farm Plate To Clear",
     "farm_component_urgent": "Farm Urgent Component",
     "farm_batch_to_assign": "Farm Batch To Assign",

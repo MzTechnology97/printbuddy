@@ -691,6 +691,40 @@ function SpoolsCard() {
   );
 }
 
+/** 3MFs that will not work, by file: told when they are saved, gone once fixed (``farm.library_problems``). */
+function LibraryProblems() {
+  const { t } = useTranslation();
+  const problems = useQuery({ queryKey: ['farm', 'library-problems'], queryFn: farmApi.getLibraryProblems,
+    refetchInterval: 60_000 });
+  if (!problems.data?.length) return null;
+  const files = new Map<number, typeof problems.data>();
+  for (const p of problems.data) files.set(p.library_file_id, [...(files.get(p.library_file_id) || []), p]);
+  return (
+    <section role="alert" className="space-y-2 bg-amber-500/10 border border-amber-500/40 rounded-lg p-4">
+      <h2 className="text-lg font-semibold text-amber-300 flex items-center gap-2">
+        <AlertTriangle className="w-5 h-5" /> {t('farm.problems.title')}
+      </h2>
+      <p className="text-xs text-bambu-gray">{t('farm.problems.intro')}</p>
+      <ul className="space-y-2">
+        {[...files.values()].map((rows) => (
+          <li key={rows[0].library_file_id} className="text-sm">
+            <p className="text-white break-all">{rows[0].filename}</p>
+            <ul className="text-xs text-amber-300 space-y-0.5 pl-3">
+              {rows.map((p) => (
+                <li key={p.id}>
+                  {p.plate ? `${t('farm.problems.plate', { n: p.plate })}: ` : ''}{p.message}
+                  <span className="text-bambu-gray"> · {t('farm.problems.since', { at: p.since.slice(0, 16).replace('T', ' ') })}</span>
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+      <Link to="/farm/products?tab=plates" className="text-sm text-bambu-green hover:underline">{t('farm.problems.open')}</Link>
+    </section>
+  );
+}
+
 function JobsList() {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -781,6 +815,7 @@ export function PrintPlanPage() {
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.plan.intro')}</p>
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
       {showSettings && sdFiles.data && <SdFilesCard data={sdFiles.data} />}
+      <LibraryProblems />
       <JobsList />
       <SpoolsCard />
       {summary ? (

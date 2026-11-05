@@ -4828,6 +4828,8 @@ export default {
     farmSlicingFailedDescription: 'Le slicing en arrière-plan ou le re-slicing automatique a échoué',
     farmFileCorrupt: 'Fichier de la ferme endommagé',
     farmFileCorruptDescription: 'Un fichier d\'impression du dossier de la ferme ou du NAS est endommagé',
+    farmLibraryProblem: 'Problème de bibliothèque',
+    farmLibraryProblemDescription: 'Un 3MF enregistré dans la bibliothèque ne fonctionnera pas (découpe, profil, modèle d\'imprimante, plateau vide)',
     farmPlateToClear: 'Plateau à libérer',
     farmPlateToClearDescription: 'Une imprimante a terminé et le travail de la ferme attend son plateau',
     farmComponentUrgent: 'Composant urgent bloqué',
