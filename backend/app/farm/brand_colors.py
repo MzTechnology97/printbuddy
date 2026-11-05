@@ -1,13 +1,16 @@
-"""The colours of the filament brands in use, from the Open Filament Database, in the colour catalog (fork).
+"""The colours of the filament lines in use, from the Open Filament Database, in the colour catalog (fork).
 
-The brands come from the filament presets (``local_presets.filament_vendor``: the slicers' filaments
-imported every night, and any imported by hand). Each brand the Open Filament Database knows is added
-with every colour of every filament it lists (manufacturer, filament as material, colour name, hex), so
-searching "IEMAI" in the colour catalog finds them. Colours already there (same manufacturer, colour and
-material, any case) are left alone and nothing is ever deleted: entries added or edited by hand stay.
+The brands and lines come from the filament presets (``local_presets``: the slicers' filaments imported
+every night, and any imported by hand). For each brand the Open Filament Database knows, only the lines the
+presets use are taken: a line comes in when its words (besides the material) are all in a preset's name,
+so "Marble PLA" comes with "Sunlu-Marble PLA" and "PA6-CF" with "Sunlu PA6-CF"; the plain line of a material
+in use ("PLA") comes too. Each colour is added with manufacturer, line as material, colour name and hex, at
+most ``MAX_PER_BRAND`` per brand. All of a brand's lines would be far too many (SUNLU alone: over 500).
 
-It runs again when the set of brands changes, and once a week for colours added upstream. Brands the
-database does not know (e.g. "Retro D") are listed in the result, nothing else happens to them.
+Never duplicated, never deleted: a colour already there (same brand, colour and line, compared without case,
+punctuation or the brand's spelling: "eSUN" = "eSUN 3D") is left alone, and one this sync added and the user
+deleted is not added again. It runs when the brands change, once a week for new colours, and retries a brand
+that could not be read after a growing wait; a single line that can't be read is skipped.
 """
 
 from __future__ import annotations
@@ -19,7 +22,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.routes.settings import get_setting, set_setting
@@ -29,25 +33,38 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.models.color_catalog import ColorCatalogEntry
 from backend.app.models.local_preset import LocalPreset
-from backend.app.services.open_filament_database import OpenFilamentDatabaseClient, OpenFilamentDatabaseError
+from backend.app.services.open_filament_database import (
+    OpenFilamentDatabaseClient,
+    OpenFilamentDatabaseError,
+    OpenFilamentDatabaseUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
-STATE_KEY = "farm_brand_colors"  # {"brands": [slugs], "at": iso, "added": n, ...}: the last run
+STATE_KEY = "farm_brand_colors"  # the last run: brands done, "at" (last full run), retries, counts
+ADDED_KEY = "farm_brand_colors_added"  # every colour this sync ever added: deleted by hand, never again
 REFRESH_DAYS = 7
+MAX_PER_BRAND = 150
+RETRY_FIRST_SECONDS = 3600  # a brand that could not be read: 1 h, then doubling up to a day
+RETRY_MAX_SECONDS = 24 * 3600
+CONCURRENCY = 2  # parallel requests to the database during a brand (more trips its rate limit)
 CHECK_EVERY_SECONDS = 3600
 FIRST_CHECK_SECONDS = 120  # after start-up, once the rest is up
 NOT_BRANDS = {"", "generic", "default", "custom", "unknown", "orcaslicer", "bambustudio", "orca"}
 _SUFFIXES = ("filaments", "filament", "tech", "3d", "lab")  # "eSUN 3D" = "Esun", "QIDI Tech" = "Qidi"
 _HEX = re.compile(r"^#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+_READ_ERRORS = (OpenFilamentDatabaseError, ValueError)  # ValueError: a name the client refuses as a path
+
+_lock = asyncio.Lock()  # one run at a time: the hourly check and a run by hand never insert twice
+_background: asyncio.Task | None = None
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _norm(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", name.lower())
+def _norm(name: str | None) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
 def _keys(name: str) -> set[str]:
@@ -60,19 +77,28 @@ def _keys(name: str) -> set[str]:
     return keys
 
 
-def match_brands(vendors: set[str], brands: list[dict]) -> tuple[dict[str, dict], list[str]]:
-    """``vendor -> Open Filament Database brand`` for the vendors it knows, and the vendors it does not."""
+def _brand_index(brands: list[dict]) -> dict[str, dict]:
     index: dict[str, dict] = {}
     for brand in brands:
         for label in (brand.get("name") or "", brand.get("slug") or ""):
             for key in _keys(label):
                 index.setdefault(key, brand)
+    return index
+
+
+def _brand_of(name: str, index: dict[str, dict]) -> dict | None:
+    return next((index[k] for k in sorted(_keys(name)) if k in index), None)
+
+
+def match_brands(vendors: set[str], brands: list[dict]) -> tuple[dict[str, dict], list[str]]:
+    """``vendor -> Open Filament Database brand`` for the vendors it knows, and the vendors it does not."""
+    index = _brand_index(brands)
     matched: dict[str, dict] = {}
     unmatched: list[str] = []
     for vendor in sorted(vendors):
         if _norm(vendor) in NOT_BRANDS:
             continue
-        brand = next((index[k] for k in sorted(_keys(vendor)) if k in index), None)
+        brand = _brand_of(vendor, index)
         if brand is None:
             unmatched.append(vendor)
         else:
@@ -80,115 +106,216 @@ def match_brands(vendors: set[str], brands: list[dict]) -> tuple[dict[str, dict]
     return matched, unmatched
 
 
-async def brands_in_use(db: AsyncSession) -> set[str]:
+def _words(text: str | None) -> set[str]:
+    """Lower-case words, "+" kept ("PLA+" is not "PLA"): "Sunlu-Marble PLA" -> {sunlu, marble, pla}."""
+    return set(re.findall(r"[a-z0-9]+\+?", (text or "").lower()))
+
+
+def _family(word: str) -> str:
+    return re.sub(r"\d+$", "", _norm(word))  # "PA6" and "PA" are one family, "PCTG" and "PC" are not
+
+
+def line_in_use(material: str, line: str, presets: list[set[str]]) -> bool:
+    """A line of this material whose words (besides the material) are all in one preset of the brand."""
+    family = _family(material)
+    extra = _words(line) - {material.lower(), _norm(material)}
+    return any(extra <= words and any(_family(w) == family for w in words) for words in presets)
+
+
+async def presets_by_vendor(db: AsyncSession) -> dict[str, list[set[str]]]:
     rows = await db.execute(
-        select(LocalPreset.filament_vendor)
-        .where(LocalPreset.preset_type == "filament", LocalPreset.filament_vendor.is_not(None))
-        .distinct()
+        select(LocalPreset.filament_vendor, LocalPreset.name, LocalPreset.filament_type).where(
+            LocalPreset.preset_type == "filament", LocalPreset.filament_vendor.is_not(None)
+        )
     )
-    return {v.strip() for (v,) in rows if v and v.strip()}
-
-
-async def brand_colours(client: OpenFilamentDatabaseClient, slug: str) -> list[tuple[str, str, str]]:
-    """``(filament, colour name, #HEX)`` for every colour of every filament of the brand."""
-    out: list[tuple[str, str, str]] = []
-    brand = await client.get_brand(slug)
-    for material in brand.get("materials") or []:
-        material_name = material.get("material") or material.get("slug")
-        if not material_name:
-            continue
-        listing = await client.get_material(slug, material_name)
-        for filament in listing.get("filaments") or []:
-            if not filament.get("slug"):
-                continue
-            detail = await client.get_filament(slug, material_name, filament["slug"])
-            label = detail.get("name") or filament.get("name") or material_name
-            for variant in detail.get("variants") or []:
-                colour, hex_value = (variant.get("name") or "").strip(), variant.get("color_hex") or ""
-                m = _HEX.match(hex_value.strip())
-                if colour and m:
-                    out.append((label, colour, f"#{m.group(1).upper()}"))
+    out: dict[str, list[set[str]]] = {}
+    for vendor, name, ftype in rows:
+        if vendor and vendor.strip():
+            out.setdefault(vendor.strip(), []).append(_words(name.split("@")[0]) | _words(ftype))
     return out
 
 
-async def _state(db: AsyncSession) -> dict:
+async def brand_colours(
+    client: OpenFilamentDatabaseClient, slug: str, presets: list[set[str]]
+) -> tuple[list[tuple[str, str, str]], int, int]:
+    """``(line, colour name, #HEX)`` of the brand's lines in use, then how many materials or lines were
+    skipped for good (not found, a refused name) and how many only for now (timeout, server error).
+
+    The brand itself not being readable raises.
+    """
+    brand = await client.get_brand(slug)
+    gate = asyncio.Semaphore(CONCURRENCY)
+    skipped = transient = 0
+
+    async def read(call, *args):
+        nonlocal skipped, transient
+        async with gate:
+            try:
+                return await call(*args)
+            except OpenFilamentDatabaseUnavailable as exc:
+                transient += 1
+                logger.debug("Brand colours: %s %s not read now: %s", slug, args, exc)
+            except _READ_ERRORS as exc:
+                skipped += 1
+                logger.debug("Brand colours: %s %s skipped: %s", slug, args, exc)
+            return None
+
+    families = {_family(w) for words in presets for w in words}
+    materials = [
+        m.get("material") or m.get("slug")
+        for m in brand.get("materials") or []
+        if _family(m.get("material") or m.get("slug") or "") in families
+    ]
+    listings = await asyncio.gather(*(read(client.get_material, slug, m) for m in materials))
+    wanted = [
+        (material, f["slug"])
+        for material, listing in zip(materials, listings, strict=True)
+        if listing
+        for f in listing.get("filaments") or []
+        if f.get("slug") and line_in_use(material, f.get("name") or f["slug"], presets)
+    ]
+    details = await asyncio.gather(*(read(client.get_filament, slug, m, f) for m, f in wanted))
+    out: list[tuple[str, str, str]] = []
+    for (material, _), detail in zip(wanted, details, strict=True):
+        if not detail:
+            continue
+        line = detail.get("name") or material
+        for variant in detail.get("variants") or []:
+            colour = (variant.get("name") or "").strip()
+            m = _HEX.match((variant.get("color_hex") or "").strip())
+            if colour and m:
+                out.append((line, colour, f"#{m.group(1).upper()}"))
+    return out, skipped, transient
+
+
+async def _read_json(db: AsyncSession, key: str, default):
     try:
-        return json.loads(await get_setting(db, STATE_KEY) or "{}")
+        value = json.loads(await get_setting(db, key) or "null")
     except ValueError:
-        return {}
+        return default
+    return value if isinstance(value, type(default)) else default
 
 
-def _fresh(state: dict, slugs: list[str]) -> bool:
+def _when(value) -> datetime | None:
     try:
-        at = datetime.fromisoformat(state["at"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    return state.get("brands") == slugs and _now() - at < timedelta(days=REFRESH_DAYS)
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _todo(previous: dict, slugs: list[str], force: bool) -> tuple[list[str], bool]:
+    """The brands to read now, and whether it is a full run (brands changed, a week passed, by hand)."""
+    retry = previous.get("retry") or {}
+    known = sorted(set(previous.get("brands") or []) | set(retry))
+    last = _when(previous.get("at"))
+    if force or known != slugs or last is None or _now() - last >= timedelta(days=REFRESH_DAYS):
+        return slugs, True
+    due = [s for s, r in retry.items() if s in slugs and (_when(r.get("next_at")) or _now()) <= _now()]
+    return sorted(due), False
 
 
 async def sync(db: AsyncSession, client: OpenFilamentDatabaseClient | None = None, *, force: bool = False) -> dict:
-    """Add the colours of the brands in use; skipped when nothing changed since the last run this week."""
-    client = client or OpenFilamentDatabaseClient()
-    vendors = await brands_in_use(db)
+    async with _lock:
+        return await _sync(db, client or OpenFilamentDatabaseClient(), force)
+
+
+async def _sync(db: AsyncSession, client: OpenFilamentDatabaseClient, force: bool) -> dict:
+    by_vendor = await presets_by_vendor(db)
     try:
         catalogue = (await client.get_brands()).get("brands") or []
-    except OpenFilamentDatabaseError as exc:
+    except _READ_ERRORS as exc:
         logger.warning("Brand colours: Open Filament Database not reachable: %s", exc)
         return {"status": "unavailable", "error": str(exc)}
-    matched, unmatched = match_brands(vendors, catalogue)
-    brands = {b["slug"]: b for b in matched.values() if b.get("slug")}
+    index = _brand_index(catalogue)
+    matched, unmatched = match_brands(set(by_vendor), catalogue)
+    brands: dict[str, dict] = {}
+    presets: dict[str, list[set[str]]] = {}
+    for vendor, brand in matched.items():
+        if brand.get("slug"):
+            brands[brand["slug"]] = brand
+            presets.setdefault(brand["slug"], []).extend(by_vendor[vendor])
     slugs = sorted(brands)
-    previous = await _state(db)
-    if not force and _fresh(previous, slugs):
+    previous = await _read_json(db, STATE_KEY, {})
+    todo, full = _todo(previous, slugs, force)
+    if not todo:
         return {**previous, "status": "unchanged"}
 
-    rows = await db.execute(
-        select(
-            func.lower(ColorCatalogEntry.manufacturer),
-            func.lower(ColorCatalogEntry.color_name),
-            func.lower(func.coalesce(ColorCatalogEntry.material, "")),
-        )
-    )
-    existing = set(rows.all())
-    added: dict[str, int] = {}
-    failed: list[str] = []
-    for slug in slugs:
-        name = brands[slug].get("name") or slug
+    read: dict[str, list[tuple[str, str, str]]] = {}
+    retry = {s: r for s, r in (previous.get("retry") or {}).items() if s in slugs}
+    skipped: dict[str, int] = {}
+
+    def later(slug: str, why) -> None:
+        fails = int((retry.get(slug) or {}).get("fails", 0)) + 1
+        wait = min(RETRY_MAX_SECONDS, RETRY_FIRST_SECONDS * 2 ** (fails - 1))
+        retry[slug] = {"fails": fails, "next_at": (_now() + timedelta(seconds=wait)).isoformat()}
+        logger.warning("Brand colours: %s not fully read (try %s, again in %s s): %s", slug, fails, wait, why)
+
+    for slug in todo:
         try:
-            colours = await brand_colours(client, slug)
-        except OpenFilamentDatabaseError as exc:
-            logger.warning("Brand colours: %s not read: %s", name, exc)
-            failed.append(name)
+            read[slug], skipped[slug], transient = await brand_colours(client, slug, presets[slug])
+        except _READ_ERRORS as exc:
+            later(slug, exc)
             continue
+        if transient:  # what was read is added now; the rest is asked again after the wait
+            later(slug, f"{transient} materials or lines not answered")
+        else:
+            retry.pop(slug, None)
+
+    # Read just before inserting (the requests above take a while), keys without case, punctuation or the
+    # brand's spelling: what is there, and what this sync once added (deleted by hand: not again).
+    def key(manufacturer: str, colour: str, line: str | None) -> str:
+        brand = _brand_of(manufacturer, index)
+        return "|".join((brand["slug"] if brand else _norm(manufacturer), _norm(colour), _norm(line)))
+
+    rows = await db.execute(
+        select(ColorCatalogEntry.manufacturer, ColorCatalogEntry.color_name, ColorCatalogEntry.material)
+    )
+    there = {key(*row) for row in rows}
+    ever = set(await _read_json(db, ADDED_KEY, []))
+    added: dict[str, int] = {}
+    capped: list[str] = []
+    for slug, colours in read.items():
+        name = brands[slug].get("name") or slug
         added[name] = 0
-        for material, colour, hex_value in colours:
-            key = (name.lower(), colour.lower(), material.lower())
-            if key in existing:
+        for line, colour, hex_value in colours:
+            k = key(name, colour, line)
+            if k in there or k in ever:
                 continue
-            existing.add(key)
-            db.add(
-                ColorCatalogEntry(
-                    manufacturer=name, color_name=colour, hex_color=hex_value, material=material, is_default=False
-                )
-            )
+            if added[name] >= MAX_PER_BRAND:
+                capped.append(name)
+                break
+            there.add(k)
+            ever.add(k)
+            db.add(ColorCatalogEntry(manufacturer=name, color_name=colour, hex_color=hex_value, material=line))
             added[name] += 1
+    done = set(previous.get("brands") or []) if not full else set()
     result = {
-        # a brand that failed is not recorded as done, so the next check tries it again
-        "brands": [s for s in slugs if (brands[s].get("name") or s) not in failed],
-        "at": _now().isoformat(),
+        "brands": sorted(((done & set(slugs)) | set(read)) - set(retry)),
+        "at": _now().isoformat() if full else previous.get("at"),
         "added": sum(added.values()),
         "added_by_brand": added,
+        "skipped_lines": {brands[s].get("name") or s: n for s, n in skipped.items() if n},
+        "capped": capped,
         "unmatched": unmatched,
-        "failed": failed,
+        "retry": retry,
     }
     await set_setting(db, STATE_KEY, json.dumps(result))
+    await set_setting(db, ADDED_KEY, json.dumps(sorted(ever)))
     await db.commit()
-    logger.info("Brand colours: %s colours added (%s), not in the database: %s", result["added"], added, unmatched)
+    logger.info("Brand colours: %s added %s, not in the database: %s", result["added"], added, unmatched)
     return {**result, "status": "done"}
 
 
+async def _run_once(force: bool = False) -> None:
+    try:
+        async with database.async_session() as db:
+            await sync(db, force=force)
+    except Exception:  # pragma: no cover - defensive, a background run never takes anything down
+        logger.exception("Brand colours run failed")
+
+
 class BrandColourScheduler:
-    """Checks the brands in use every hour; ``sync`` does the work only when they changed or weekly."""
+    """Checks every hour; ``sync`` reads the database only when the brands changed, weekly, or to retry."""
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -205,13 +332,7 @@ class BrandColourScheduler:
     async def _run(self) -> None:
         await asyncio.sleep(FIRST_CHECK_SECONDS)
         while True:
-            try:
-                async with database.async_session() as db:
-                    await sync(db)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # pragma: no cover - defensive, keep the loop alive
-                logger.exception("Brand colours check failed")
+            await _run_once()
             await asyncio.sleep(CHECK_EVERY_SECONDS)
 
 
@@ -222,11 +343,20 @@ router = APIRouter(prefix="/farm/brand-colors", tags=["farm"])
 
 @router.get("", dependencies=[Depends(require_permission_if_auth_enabled(Permission.INVENTORY_READ))])
 async def get_brand_colours(db: AsyncSession = Depends(get_db)) -> dict:
-    """The last run: brands done, colours added, brands the database does not know."""
-    return await _state(db)
+    """The last run (brands done, colours added, lines skipped, retries, unknown brands) and whether one runs."""
+    running = _lock.locked() or (_background is not None and not _background.done())
+    return {**await _read_json(db, STATE_KEY, {}), "running": running}
 
 
-@router.post("/sync", dependencies=[Depends(require_permission_if_auth_enabled(Permission.INVENTORY_UPDATE))])
-async def sync_brand_colours(db: AsyncSession = Depends(get_db)) -> dict:
-    """Run now, even if nothing changed (e.g. after adding a brand by hand)."""
-    return await sync(db, force=True)
+@router.post(
+    "/sync",
+    status_code=202,
+    dependencies=[Depends(require_permission_if_auth_enabled(Permission.INVENTORY_UPDATE))],
+)
+async def sync_brand_colours():
+    """Start a full run in the background (it reads the database for a while); follow it with GET."""
+    global _background
+    if _lock.locked() or (_background is not None and not _background.done()):
+        return JSONResponse({"status": "running"}, status_code=202)
+    _background = asyncio.create_task(_run_once(force=True))
+    return JSONResponse({"status": "started"}, status_code=202)
