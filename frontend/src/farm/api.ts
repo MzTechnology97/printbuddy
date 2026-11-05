@@ -346,6 +346,55 @@ export interface FarmProductInput {
   variants?: { skus: string[]; asins: string[]; color: string | null; pieces: number }[];
 }
 
+/** The queue page's Jobs board (fork): one row per print, from the request to the end. */
+export type FarmBoardGroup = 'problems' | 'printing' | 'waiting' | 'history';
+export interface FarmBoardRow {
+  key: string;
+  job_id: number | null;
+  queue_item_id: number | null;
+  archive_id: number | null;
+  title: string;
+  component_code: string | null;
+  colour: string | null;
+  pieces: number | null;
+  printer_id: number | null;
+  printer: string | null;
+  group: FarmBoardGroup;
+  phase: string;
+  level: 'info' | 'warning' | 'error';
+  status_text: string | null;
+  failure_phase: string | null;
+  slicer: string | null;
+  file: string | null;
+  library_file_id: number | null;
+  manual_start: boolean;
+  source: 'farm' | 'queue' | 'outside';
+  created_at: string | null;
+  completed_at: string | null;
+  actions: string[];
+}
+export interface FarmBoard {
+  problems: FarmBoardRow[];
+  printing: FarmBoardRow[];
+  waiting: FarmBoardRow[];
+  history: FarmBoardRow[];
+  history_total: number;
+}
+export interface FarmBoardEvent {
+  at: string;
+  phase: string;
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  printer_id: number | null;
+  detail: Record<string, unknown> | null;
+}
+export interface FarmBoardDetail {
+  row: FarmBoardRow;
+  events: FarmBoardEvent[];
+  technical: Record<string, unknown>;
+  log: string[];
+}
+
 export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
   const response = await fetch(`/api/v1/farm${path}`, {
@@ -403,6 +452,13 @@ export const farmApi = {
       `/plan/products/${projectId}`,
     ),
   getJobs: () => farmRequest<FarmJob[]>('/jobs'),
+  getBoard: (printerId?: number | null, historyOffset = 0, historyLimit = 30) =>
+    farmRequest<FarmBoard>(
+      `/board?history_offset=${historyOffset}&history_limit=${historyLimit}${printerId ? `&printer_id=${printerId}` : ''}`,
+    ),
+  getBoardDetail: (key: string) => farmRequest<FarmBoardDetail>(`/board/${key}`),
+  boardAction: (key: string, action: 'retry-slice' | 'reslice' | 'requeue') =>
+    farmRequest<Record<string, unknown>>(`/board/${key}/${action}`, { method: 'POST' }),
   getPrinterSpools: () => farmRequest<FarmPrinterSpool[]>('/printer-spools'),
   setPrinterSpool: (printerId: number, data: { material: string; color_name: string }) =>
     farmRequest<FarmPrinterSpool>(`/printer-spools/${printerId}`, { method: 'PUT', body: JSON.stringify(data) }),

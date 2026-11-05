@@ -200,6 +200,21 @@ describe('AssignSpoolModal', () => {
     expect(screen.getByText(/Polymaker/)).toBeInTheDocument();
   });
 
+  it('blames the search, not the tray match, when "Show all spools" is on and nothing matches', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+
+    render(<AssignSpoolModal {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText(/Polymaker/)).toBeInTheDocument();
+    });
+    await user.click(screen.getByLabelText(/show all spools/i));
+    await user.type(screen.getByRole('textbox'), 'iemai');
+
+    expect(await screen.findByText(/3 not matching "iemai"/)).toBeInTheDocument();
+    expect(screen.queryByText(/filtered by tray match/)).not.toBeInTheDocument();
+  });
+
   it('shows and searches OFDB-created local spools in the assignment picker', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

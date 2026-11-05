@@ -13,14 +13,13 @@ import { ScheduleOptionsPanel } from '../components/PrintModal/ScheduleOptions';
 import { DEFAULT_SCHEDULE_OPTIONS, type ScheduleOptions } from '../components/PrintModal/types';
 import {
   farmApi,
-  type FarmJob,
   type FarmPlanComponent,
   type FarmPlanPlate,
   type FarmPlanSettings,
   type FarmPrinterSpool,
   type FarmSdFiles,
 } from './api';
-import { OutsidePrints } from './OutsidePrints';
+import { BoardSummary } from './JobsBoard';
 import { PlateThumb } from './PlatesPanel';
 import { PrinterSlots } from './PrinterSlots';
 import { kitUnits, suggestPrints } from './suggest';
@@ -725,53 +724,6 @@ function LibraryProblems() {
   );
 }
 
-function JobsList() {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const jobs = useQuery({ queryKey: ['farm', 'jobs'], queryFn: farmApi.getJobs, refetchInterval: 30_000 });
-  const cancel = useMutation({
-    mutationFn: (id: number) => farmApi.cancelJob(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['farm'] }),
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  if (!jobs.data?.length) return null;
-  const listed = jobs.data.filter((j) => j.state !== 'to_assign'); // those have their own section
-  return (
-    <>
-      <OutsidePrints jobs={jobs.data} />
-      {listed.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-lg font-semibold text-white">{t('farm.jobs.title')}</h2>
-          <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
-            {listed.map((j: FarmJob) => (
-              <li key={j.id} className="p-3 flex flex-wrap items-center gap-3 text-sm">
-                <span className="font-mono text-bambu-green">{j.component_code}</span>
-                <span className="text-white">{j.color}</span>
-                {j.color_from_printer && j.component_color && j.component_color.toLowerCase() !== j.color?.toLowerCase() && (
-                  <span className="text-xs text-amber-400">{t('farm.jobs.otherColour', { color: j.component_color })}</span>
-                )}
-                <span className="text-bambu-gray">{t('farm.plan.yield', { count: j.pieces })}</span>
-                <span className="text-white">{t(`farm.jobs.state.${j.state}`, { defaultValue: j.state })}</span>
-                {j.printer && <span className="text-bambu-gray">· {j.printer}</span>}
-                {j.outside_queue && (
-                  <span className="text-xs text-bambu-gray break-all">· {t('farm.outside.tag', { name: j.print_name })}</span>
-                )}
-                {j.state === 'waiting' && j.note && <span className="text-xs text-amber-400 break-words min-w-0 flex-1">{j.note}</span>}
-                {(j.state === 'waiting' || j.state === 'pending') && (
-                  <Button size="sm" variant="ghost" className="ml-auto" onClick={() => cancel.mutate(j.id)}>
-                    {t('farm.jobs.cancel')}
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </>
-  );
-}
-
 export function PrintPlanPage() {
   const { t } = useTranslation();
   const [showSettings, setShowSettings] = useState(false);
@@ -816,7 +768,7 @@ export function PrintPlanPage() {
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
       {showSettings && sdFiles.data && <SdFilesCard data={sdFiles.data} />}
       <LibraryProblems />
-      <JobsList />
+      <BoardSummary />
       <SpoolsCard />
       {summary ? (
         <AccodaSummary components={summary} notes={linkNotes} onDone={() => setSelected(new Set())}
