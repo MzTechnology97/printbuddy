@@ -2,7 +2,7 @@
  * Printfarm (fork): "What to print" page. All data is made up.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -395,5 +395,54 @@ describe('PrintPlanPage', () => {
     const again = await screen.findByRole('dialog', { name: 'Queue: summary' });
     expect(within(again).getByText('stock not available')).toBeInTheDocument();
     expect(within(again).getByLabelText('Print C-0094')).toBeChecked();
+  });
+
+  describe("Seller Hub's link ?accoda=", () => {
+    const open = (query: string) => window.history.pushState({}, '', `/farm/print-plan?${query}`);
+    afterEach(() => window.history.pushState({}, '', '/'));
+
+    it('opens the summary of the component once the plan is in, and drops the link from the URL', async () => {
+      open('accoda=C-0121');
+      render(<PrintPlanPage />);
+      const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+      expect(within(dialog).getByLabelText('Print C-0121')).toBeChecked();
+      expect(createdJobs).toBeUndefined(); // the user still confirms
+      await waitFor(() => expect(window.location.search).toBe(''));
+      expect(window.location.pathname).toBe('/farm/print-plan');
+    });
+
+    it('opens one summary with several components', async () => {
+      const bottom = { ...plan.components[0], code: 'C-0122', name: 'Tartufo sotto – Marrone' };
+      server.use(
+        http.get('/api/v1/farm/plan', () => HttpResponse.json({ ...plan, components: [...plan.components, bottom] })),
+      );
+      open('accoda=C-0121,%20c-0122');
+      render(<PrintPlanPage />);
+      const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+      expect(within(dialog).getByLabelText('Print C-0121')).toBeInTheDocument();
+      expect(within(dialog).getByLabelText('Print C-0122')).toBeInTheDocument();
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument();
+      await waitFor(() => expect(window.location.search).toBe(''));
+    });
+
+    it('says which codes are not in the plan or cannot be queued, never an empty dialog', async () => {
+      const user = userEvent.setup();
+      open('accoda=C-0099,C-0004');
+      render(<PrintPlanPage />);
+      expect(await screen.findByText('C-0099 is not in the plan')).toBeInTheDocument();
+      expect(screen.getByText("C-0004 can't be queued: it has no confirmed plate")).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'Queue: summary' })).not.toBeInTheDocument();
+      expect(screen.getByText('Tartufo sopra – Marrone')).toBeInTheDocument(); // the page is all there
+      await waitFor(() => expect(window.location.search).toBe(''));
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+      expect(screen.queryByText('C-0099 is not in the plan')).not.toBeInTheDocument();
+
+      // With one that can be queued, the summary opens and says what was left out.
+      open('accoda=C-0121,C-0099');
+      render(<PrintPlanPage />);
+      const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('C-0099 is not in the plan');
+      expect(within(dialog).getByLabelText('Print C-0121')).toBeChecked();
+    });
   });
 });

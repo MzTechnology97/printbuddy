@@ -9,6 +9,7 @@ import { api, type LoginResponse, type OIDCProvider, type TokenPersistence } fro
 import { Card, CardHeader, CardContent } from '../components/Card';
 import { Button } from '../components/Button';
 import { appAssetPath } from '../utils/assetPaths';
+import { takeLoginReturn } from '../utils/loginReturn';
 
 type LoginStep = 'credentials' | '2fa' | 'reset-password';
 
@@ -206,7 +207,7 @@ export function LoginPage() {
         } else if (resp.access_token && resp.user) {
           loginWithToken(resp.access_token, resp.user, toPersistence(savedRememberMe));
           showToast(t('login.loginSuccess'));
-          navigate('/', { replace: true });
+          navigate(takeLoginReturn(), { replace: true });
         } else {
           showToast(t('login.oidcLoginFailed'), 'error');
           navigate('/login', { replace: true });
@@ -235,7 +236,7 @@ export function LoginPage() {
         setStep('2fa');
       } else if (resp.access_token && resp.user) {
         showToast(t('login.loginSuccess'));
-        navigate('/');
+        navigate(takeLoginReturn());
       }
     },
     onError: (error: Error) => {
@@ -291,7 +292,7 @@ export function LoginPage() {
       if (resp.access_token && resp.user) {
         loginWithToken(resp.access_token, resp.user, toPersistence(rememberMe));
         showToast(t('login.loginSuccess'));
-        navigate('/');
+        navigate(takeLoginReturn());
       } else {
         console.error('2FA verify: unexpected response shape', resp);
         showToast(t('login.loginFailed'), 'error');
