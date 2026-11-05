@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from backend.app.core.auth import RequirePermissionIfAuthEnabled
 from backend.app.core.database import get_db
@@ -40,7 +41,8 @@ async def list_local_presets(
     db: AsyncSession = Depends(get_db),
 ):
     """List all local presets grouped by type."""
-    result = await db.execute(select(LocalPreset).order_by(LocalPreset.name))
+    # fork: the list never shows the setting blob, so it is not loaded (thousands of synced filaments)
+    result = await db.execute(select(LocalPreset).options(defer(LocalPreset.setting)).order_by(LocalPreset.name))
     presets = result.scalars().all()
 
     grouped = LocalPresetsResponse()
