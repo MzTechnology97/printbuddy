@@ -7,6 +7,7 @@ with nothing in the log. No slicer is contacted: the slice and the /health call 
 
 import asyncio
 import logging
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -46,7 +47,7 @@ async def project(db_session, test_engine, monkeypatch):
     db_session.add(state)
     await db_session.commit()
 
-    for name in ("_variant_asked", "_failed", "_health"):
+    for name in ("_variant_asked", "_failed", "_health", "_versions"):
         monkeypatch.setattr(slicing, name, {})
     monkeypatch.setattr(jobs, "_slicing", {})
     monkeypatch.setattr(database, "async_session", async_sessionmaker(test_engine, class_=AsyncSession))
@@ -61,7 +62,7 @@ async def project(db_session, test_engine, monkeypatch):
     monkeypatch.setattr(SlicerApiService, "health", health)
     monkeypatch.setattr(SlicerApiService, "close", AsyncMock())
     plate = SimpleNamespace(library_file_id=lib_file.id, plate_index=2)
-    return SimpleNamespace(plate=plate, queued=queued, health=health)
+    return SimpleNamespace(plate=plate, queued=queued, health=health, state=state)
 
 
 def slice_raises(monkeypatch, status: int, detail: str, cause: Exception) -> None:
@@ -124,9 +125,62 @@ async def test_a_slicer_error_says_what_and_waits_as_before(db_session, project,
     a_minute_later((plate.library_file_id, 2, None))
     note = await slicing.queue_slice_note(db_session, plate, None)
     where = f"plate 2 of file {plate.library_file_id}"
-    assert note.startswith(f"{where}: slicing failed (Plate 2 has no objects), trying again at ")
-    assert note.endswith(" UTC")
+    assert re.fullmatch(rf"{where}: slicing failed, trying again at \d\d:\d\d UTC: Plate 2 has no objects", note)
     assert project.health.await_count == 0 and len(project.queued) == 1  # no early retry for a real error
+
+
+@pytest.mark.asyncio
+async def test_a_path_conflict_says_to_space_the_objects_out(db_session, project, monkeypatch, caplog):
+    """The CLI refuses a plate whose objects' paths overlap (e.g. tree supports of close copies) and blames the
+    wipe tower: the note says what it is; the log keeps the CLI's own words."""
+    cli = (
+        "Slicer CLI failed (500): Slicing failed with error from slicer: G-code conflicts detected after "
+        "slicing. Please make sure the 3mf file can be successfully sliced in the latest Orca Slicer. If the "
+        "file slices normally in Orca Slicer, try moving the wipe tower further from other models"
+    )
+    slice_raises(monkeypatch, 502, cli, SlicerInputError(cli))
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, None)
+    with caplog.at_level(logging.WARNING, logger="backend.app.farm.slicing"):
+        await run_slice(project)
+    assert "G-code conflicts detected" in caplog.text
+
+    a_minute_later((plate.library_file_id, 2, None))
+    note = await slicing.queue_slice_note(db_session, plate, None)
+    assert "paths of different objects overlap on the plate" in note
+    assert "space the objects out in the project" in note
+    assert "wipe tower" not in note
+
+
+@pytest.mark.asyncio
+async def test_the_time_survives_a_long_reason_in_the_job_note(db_session, project, monkeypatch):
+    long = "Slicer CLI failed (500): " + "x" * 400
+    slice_raises(monkeypatch, 502, long, SlicerInputError(long))
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, None)
+    await run_slice(project)
+    a_minute_later((plate.library_file_id, 2, None))
+    note = (await slicing.queue_slice_note(db_session, plate, None))[:255]  # what the job keeps
+    assert re.search(r"trying again at \d\d:\d\d UTC: Slicer CLI failed", note)
+
+
+@pytest.mark.asyncio
+async def test_a_new_version_of_the_project_is_sliced_at_once(db_session, project, monkeypatch):
+    """The owner fixed the 3MF and saved it: the old failure and its 30-minute wait are of the old version."""
+    cli = "Slicer CLI failed (500): G-code conflicts detected after slicing."
+    slice_raises(monkeypatch, 502, cli, SlicerInputError(cli))
+    plate = project.plate
+    await slicing.queue_slice_note(db_session, plate, None)
+    await run_slice(project)
+    a_minute_later((plate.library_file_id, 2, None))
+    assert "slicing failed" in await slicing.queue_slice_note(db_session, plate, None)
+    assert len(project.queued) == 1  # the same version: no new slice before the wait is over
+
+    project.state.sha256 = "v2"  # the NAS scan saw the file saved again
+    await db_session.commit()
+    note = await slicing.queue_slice_note(db_session, plate, None)
+    assert note == f"plate 2 of file {plate.library_file_id} is being sliced"
+    assert len(project.queued) == 2  # sliced again now, on the new version
 
 
 @pytest.mark.asyncio
@@ -161,7 +215,7 @@ async def test_a_slice_that_timed_out_is_not_called_unreachable(db_session, proj
 
     a_minute_later((plate.library_file_id, 2, "nero"))
     note = await slicing.queue_slice_note(db_session, plate, "Nero")
-    assert "slicing timed out (Slicer sidecar unreachable: ReadTimeout), trying again at " in note
+    assert re.search(r"slicing timed out, trying again at \d\d:\d\d UTC: Slicer sidecar unreachable: ReadTimeout", note)
     assert "not reachable" not in note
     assert project.health.await_count == 0 and len(project.queued) == 1
 

@@ -407,6 +407,7 @@ EARLY_RETRY_SECONDS = 60  # a sidecar back after "not reachable": sliced again a
 PROBE_TIMEOUT_SECONDS = 2.0  # /health of a sidecar: short, the dispatcher waits for it
 PROBE_BACKOFF_SECONDS = (60, 300)  # after a failed probe: 60 s, doubling up to 5 minutes
 _failed: dict[tuple[int, int, str | None], dict] = {}  # (file, plate, colour) -> the last queue slice that failed
+_versions: dict[int, str | None] = {}  # file -> the project version the remembered failures and waits are of
 _health: dict[str, tuple[float, bool, float]] = {}  # sidecar url -> (next probe, answered, wait after a failure)
 
 
@@ -421,6 +422,22 @@ def failure_kind(error: BaseException) -> str:
             return "timeout"
         seen = seen.__cause__
     return "error"
+
+
+# The slicer CLI's words for a project it refuses, and what they mean. The GUI only warns of path conflicts
+# (at a layer, naming the objects) and still slices; the CLI stops, with a hint about the wipe tower even
+# when there is none. Seen with tree supports of copies placed close together.
+_EXPLAINED = (
+    (
+        "G-code conflicts detected",
+        "paths of different objects overlap on the plate, usually the supports of objects placed too close: "
+        "space the objects out in the project (Orca shows the conflict as a warning at a layer) and save it",
+    ),
+)
+
+
+def explain(reason: str) -> str:
+    return next((text for marker, text in _EXPLAINED if marker in reason), reason)
 
 
 def _queue_key(file_id: int, plate: int | None, colour: str | None) -> tuple[int, int, str | None]:
@@ -450,7 +467,7 @@ def queue_slice_ended(
         {"unreachable": " (slicer not reachable)", "timeout": " (timed out)"}.get(kind, ""),
         reason,
     )
-    _failed[key] = {"reason": reason[:200], "slicer": slicer, "kind": kind, "at": time.monotonic()}
+    _failed[key] = {"reason": explain(reason)[:200], "slicer": slicer, "kind": kind, "at": time.monotonic()}
 
 
 async def _answers(db: AsyncSession, slicer: str) -> bool:
@@ -495,6 +512,19 @@ def _forget_asked(key: tuple[int, int, str | None]) -> None:
         jobs._slicing.pop(key[:2], None)
 
 
+async def _forget_old_version(db: AsyncSession, file_id: int) -> None:
+    """The project was saved again (new version): its old failures and waits no longer hold, slice it now."""
+    from backend.app.farm.jobs import service as jobs
+
+    sha = await db.scalar(select(FarmLibraryFile.sha256).where(FarmLibraryFile.library_file_id == file_id))
+    if _versions.setdefault(file_id, sha) == sha:
+        return
+    _versions[file_id] = sha
+    for store in (_failed, _variant_asked, jobs._slicing):
+        for key in [k for k in store if k[0] == file_id]:
+            store.pop(key)
+
+
 async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None) -> str:
     """Ask for the plate's slice in the component's colour (``ask_variant_slicing``) and say what the job waits for.
 
@@ -503,6 +533,7 @@ async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None
     """
     from backend.app.farm.jobs.service import RESLICE_AFTER_SECONDS
 
+    await _forget_old_version(db, plate.library_file_id)
     key = _queue_key(plate.library_file_id, plate.plate_index, color)
     failed = _failed.get(key)
     if (
@@ -525,6 +556,7 @@ async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None
     if failed["kind"] == "unreachable":
         name = SLICER_NAMES.get(failed["slicer"], failed["slicer"] or "slicer")
         return f"{where}: {name} not reachable, sliced again as soon as it answers (at the latest at {at})"
+    # The time before the reason: a job note is cut at 255 characters, and the reason can be long.
     if failed["kind"] == "timeout":
-        return f"{where}: slicing timed out ({failed['reason']}), trying again at {at}"
-    return f"{where}: slicing failed ({failed['reason']}), trying again at {at}"
+        return f"{where}: slicing timed out, trying again at {at}: {failed['reason']}"
+    return f"{where}: slicing failed, trying again at {at}: {failed['reason']}"
