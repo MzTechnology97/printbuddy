@@ -68,6 +68,7 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
 
     async def fake_ask(db, plate, color):
         slicing_asked.append((plate.printer_model, color))
+        return f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced"
 
     async def fake_local(db, lib_file):
         return sliced_path

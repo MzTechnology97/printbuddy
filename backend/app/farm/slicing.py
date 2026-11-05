@@ -16,8 +16,10 @@ import os
 import time
 import uuid
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +29,7 @@ from backend.app.api.routes.settings import get_setting
 from backend.app.core import database
 from backend.app.core.config import settings as app_settings
 from backend.app.farm import notify, variants
-from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_ORCA
+from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_BAMBU, SLICER_ORCA
 from backend.app.farm.library_sync import _drop_thumbnail
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas import library as nas_library
@@ -353,24 +355,29 @@ async def variant_slice(db: AsyncSession, plate: FarmPlate, color: str | None) -
                 variant = colour_key(color)
         except HTTPException:
             return None
-    return (await _latest_slices(db, lib_file, state.sha256, variant)).get(plate.plate_index)
+    found = (await _latest_slices(db, lib_file, state.sha256, variant)).get(plate.plate_index)
+    if found is not None:  # sliced, by the queue or another way (re-slice, by hand): no failure to tell any more
+        _failed.pop(_queue_key(plate.library_file_id, plate.plate_index, color), None)
+    return found
 
 
-async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None) -> None:
-    """``ask_slicing`` for the component's colour: a missing colour fails the slice job with its reason."""
+async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | None) -> bool:
+    """``ask_slicing`` for the component's colour: a missing colour fails the slice job with its reason.
+
+    True when a slice was queued now (False: asked a short while ago, or the 3MF is gone).
+    """
     from backend.app.farm.jobs import service as jobs
     from backend.app.services.slice_dispatch import http_exception_to_job_error, slice_dispatch
 
     if not colour_key(color):
-        await jobs.ask_slicing(db, plate)
-        return
+        return await jobs.ask_slicing(db, plate)
     key = (plate.library_file_id, plate.plate_index, colour_key(color))
     if time.monotonic() - _variant_asked.get(key, -jobs.RESLICE_AFTER_SECONDS) < jobs.RESLICE_AFTER_SECONDS:
-        return
+        return False
     _variant_asked[key] = time.monotonic()
     lib_file = await db.get(LibraryFile, plate.library_file_id)
     if lib_file is None:
-        return
+        return False
     name = lib_file.filename
 
     async def run(job_id: int):
@@ -382,11 +389,142 @@ async def ask_variant_slicing(db: AsyncSession, plate: FarmPlate, color: str | N
                     task_db, lib_file=task_file, state=state, plate=key[1], job_id=job_id, colour=color
                 )
             except Exception as exc:
-                notify.slicing_done(key[0], name, key[1], color, notify.QUEUE_SLICE, exc)
+                queue_slice_ended(key[0], name, key[1], color, state.slicer if state else None, exc)
                 if isinstance(exc, HTTPException):
                     raise http_exception_to_job_error(exc) from exc
                 raise
-        notify.slicing_done(key[0], name, key[1], color, notify.QUEUE_SLICE)
+        queue_slice_ended(key[0], name, key[1], color, state.slicer if state else None)
         return response.model_dump()
 
     await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({color})", run=run)
+    return True
+
+
+# ---------------------------------------------------------------- why a queue slice is still missing
+
+SLICER_NAMES = {SLICER_ORCA: "OrcaSlicer", SLICER_BAMBU: "Bambu Studio"}
+EARLY_RETRY_SECONDS = 60  # a sidecar back after "not reachable": sliced again at most this often
+PROBE_TIMEOUT_SECONDS = 2.0  # /health of a sidecar: short, the dispatcher waits for it
+PROBE_BACKOFF_SECONDS = (60, 300)  # after a failed probe: 60 s, doubling up to 5 minutes
+_failed: dict[tuple[int, int, str | None], dict] = {}  # (file, plate, colour) -> the last queue slice that failed
+_health: dict[str, tuple[float, bool, float]] = {}  # sidecar url -> (next probe, answered, wait after a failure)
+
+
+def failure_kind(error: BaseException) -> str:
+    """``unreachable``: the sidecar couldn't be connected to (refused, no route, connect timeout). ``timeout``: it
+    took the request but didn't answer in time, and may still be slicing it. ``error``: anything else, its own."""
+    seen: BaseException | None = error
+    while seen is not None:
+        if isinstance(seen, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return "unreachable"
+        if isinstance(seen, httpx.TimeoutException):
+            return "timeout"
+        seen = seen.__cause__
+    return "error"
+
+
+def _queue_key(file_id: int, plate: int | None, colour: str | None) -> tuple[int, int, str | None]:
+    return (file_id, plate_key(plate), colour_key(colour))
+
+
+def queue_slice_ended(
+    file_id: int, filename: str, plate: int | None, colour: str | None, slicer: str | None, error=None
+) -> None:
+    """A slice asked for the queue ended (also notified, ``notify.slicing_done``).
+
+    A failure is logged and kept for the job's note, with its kind (``failure_kind``); a success forgets it.
+    """
+    notify.slicing_done(file_id, filename, plate, colour, notify.QUEUE_SLICE, error)
+    key = _queue_key(file_id, plate, colour)
+    if error is None:
+        _failed.pop(key, None)
+        return
+    reason = str(getattr(error, "detail", None) or f"{type(error).__name__}: {error}")
+    kind = failure_kind(error)
+    logger.warning(
+        "Farm slice of %s plate %s%s on %s failed%s: %s",
+        filename,
+        key[1],
+        f" ({colour})" if colour else "",
+        SLICER_NAMES.get(slicer, slicer or "an unknown slicer"),
+        {"unreachable": " (slicer not reachable)", "timeout": " (timed out)"}.get(kind, ""),
+        reason,
+    )
+    _failed[key] = {"reason": reason[:200], "slicer": slicer, "kind": kind, "at": time.monotonic()}
+
+
+async def _answers(db: AsyncSession, slicer: str) -> bool:
+    """Whether the slicer's sidecar answers its /health now.
+
+    One short probe per sidecar per dispatcher tick, however many jobs wait on it; after a failed probe
+    the next one waits ``PROBE_BACKOFF_SECONDS`` (doubling), so a host that doesn't answer at all doesn't
+    slow every tick down.
+    """
+    from backend.app.farm.jobs.service import TICK_SECONDS
+
+    url = await sidecar_url(db, slicer)
+    next_at, ok, wait = _health.get(url, (0.0, False, 0.0))
+    if time.monotonic() < next_at:
+        return ok
+    service = SlicerApiService(url)
+    try:
+        await asyncio.wait_for(service.health(), PROBE_TIMEOUT_SECONDS)
+        ok = True
+    except Exception:  # refused, no answer in time, or any answer but a good one
+        ok = False
+    finally:
+        await service.close()
+    first, most = PROBE_BACKOFF_SECONDS
+    wait = 0.0 if ok else min(most, wait * 2 if wait else first)
+    _health[url] = (time.monotonic() + (wait or TICK_SECONDS), ok, wait)
+    return ok
+
+
+def _asked_at(key: tuple[int, int, str | None]) -> float | None:
+    from backend.app.farm.jobs import service as jobs
+
+    return _variant_asked.get(key) if key[2] else jobs._slicing.get(key[:2])
+
+
+def _forget_asked(key: tuple[int, int, str | None]) -> None:
+    from backend.app.farm.jobs import service as jobs
+
+    if key[2]:
+        _variant_asked.pop(key, None)
+    else:
+        jobs._slicing.pop(key[:2], None)
+
+
+async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None) -> str:
+    """Ask for the plate's slice in the component's colour (``ask_variant_slicing``) and say what the job waits for.
+
+    "is being sliced", or why the last slice failed and when it is tried again: a sidecar that couldn't be
+    reached is tried again as soon as its /health answers; a slicer error, after ``RESLICE_AFTER_SECONDS``.
+    """
+    from backend.app.farm.jobs.service import RESLICE_AFTER_SECONDS
+
+    key = _queue_key(plate.library_file_id, plate.plate_index, color)
+    failed = _failed.get(key)
+    if (
+        failed is not None
+        and failed["kind"] == "unreachable"
+        and failed["slicer"]
+        and time.monotonic() - failed["at"] >= EARLY_RETRY_SECONDS
+        and await _answers(db, failed["slicer"])
+    ):
+        _forget_asked(key)  # back: sliced again now, not after RESLICE_AFTER_SECONDS
+    if await ask_variant_slicing(db, plate, color):
+        _failed.pop(key, None)
+        failed = None
+    where = f"plate {plate.plate_index} of file {plate.library_file_id}"
+    if failed is None:
+        return f"{where} is being sliced"
+    asked = _asked_at(key)
+    left = RESLICE_AFTER_SECONDS - (time.monotonic() - asked) if asked is not None else 0
+    at = f"{datetime.now(timezone.utc) + timedelta(seconds=max(0, left)):%H:%M} UTC"
+    if failed["kind"] == "unreachable":
+        name = SLICER_NAMES.get(failed["slicer"], failed["slicer"] or "slicer")
+        return f"{where}: {name} not reachable, sliced again as soon as it answers (at the latest at {at})"
+    if failed["kind"] == "timeout":
+        return f"{where}: slicing timed out ({failed['reason']}), trying again at {at}"
+    return f"{where}: slicing failed ({failed['reason']}), trying again at {at}"
