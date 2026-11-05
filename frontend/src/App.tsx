@@ -1,4 +1,4 @@
-import { Component, type ReactNode, type ErrorInfo } from 'react';
+import { Component, useEffect, type ReactNode, type ErrorInfo } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/Layout';
@@ -96,7 +96,8 @@ function WebSocketProvider({ children }: { children: React.ReactNode }) {
 /** To the login, remembering the page asked for (with its query) so the login comes back to it. */
 function ToLogin() {
   const location = useLocation();
-  saveLoginReturn(location.pathname + location.search + location.hash);
+  const path = location.pathname + location.search + location.hash;
+  useEffect(() => saveLoginReturn(path), [path]);
   return <Navigate to="/login" replace />;
 }
 

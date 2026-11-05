@@ -737,7 +737,11 @@ export function PrintPlanPage() {
       {plan.isLoading ? (
         <Loader2 className="w-8 h-8 animate-spin text-bambu-green" />
       ) : plan.error ? (
-        <p className="text-red-400">{(plan.error as Error).message}</p>
+        <>
+          <p className="text-red-400">{(plan.error as Error).message}</p>
+          {/* The link stays in the URL: it opens once the plan loads (a refresh tries again). */}
+          {linked !== null && <LinkNotes notes={[t('farm.plan.link.waitPlan', { codes: linked })]} />}
+        </>
       ) : rows.length === 0 ? (
         <p className="text-bambu-gray">{t('farm.plan.nothing')}</p>
       ) : (

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
@@ -12,6 +12,7 @@ import { AuthProvider, useAuth } from '../../contexts/AuthContext';
 import { ThemeProvider } from '../../contexts/ThemeContext';
 import { ToastProvider } from '../../contexts/ToastContext';
 import type { Permission } from '../../api/client';
+import { saveLoginReturn, takeLoginReturn } from '../../utils/loginReturn';
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -259,6 +260,23 @@ describe('AuthContext', () => {
           'groups:delete' as Permission
         )
       ).toBe(true);
+    });
+  });
+
+  describe('logout', () => {
+    it("forgets the page to come back to, even one saved as the page re-renders without a user", async () => {
+      server.use(
+        http.get('/api/v1/auth/status', () => HttpResponse.json({ auth_enabled: true, requires_setup: false })),
+        http.post('/api/v1/auth/logout', () => HttpResponse.json({})),
+      );
+      const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+      await waitFor(() => expect(result.current.authEnabled).toBe(true));
+      saveLoginReturn('/farm/print-plan?accoda=C-0099');
+
+      act(() => result.current.logout());
+      saveLoginReturn('/farm/print-plan'); // the protected page being left, on its way to /login
+      expect(sessionStorage.getItem('login_return_to')).toBeNull();
+      expect(takeLoginReturn()).toBe('/'); // the next login, maybe someone else's, goes home
     });
   });
 });

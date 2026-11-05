@@ -444,5 +444,15 @@ describe('PrintPlanPage', () => {
       expect(within(dialog).getByRole('alert')).toHaveTextContent('C-0099 is not in the plan');
       expect(within(dialog).getByLabelText('Print C-0121')).toBeChecked();
     });
+
+    it("keeps the link when the plan doesn't load, and says it opens once it does", async () => {
+      server.use(http.get('/api/v1/farm/plan', () => HttpResponse.json({ detail: 'Plan unavailable' }, { status: 500 })));
+      open('accoda=C-0121');
+      render(<PrintPlanPage />);
+      expect(await screen.findByText('The link to queue C-0121 opens when the plan loads')).toBeInTheDocument();
+      expect(screen.getByText(/Plan unavailable/)).toBeInTheDocument(); // the plan's own error, as before
+      expect(screen.queryByRole('dialog', { name: 'Queue: summary' })).not.toBeInTheDocument();
+      expect(window.location.search).toBe('?accoda=C-0121');
+    });
   });
 });

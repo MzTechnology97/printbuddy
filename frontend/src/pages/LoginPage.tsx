@@ -9,7 +9,7 @@ import { api, type LoginResponse, type OIDCProvider, type TokenPersistence } fro
 import { Card, CardHeader, CardContent } from '../components/Card';
 import { Button } from '../components/Button';
 import { appAssetPath } from '../utils/assetPaths';
-import { takeLoginReturn } from '../utils/loginReturn';
+import { clearLoginReturn, takeLoginReturn } from '../utils/loginReturn';
 
 type LoginStep = 'credentials' | '2fa' | 'reset-password';
 
@@ -186,6 +186,7 @@ export function LoginPage() {
       const errorMsg = KNOWN_OIDC_ERRORS[oidcError]
         ?? (oidcError.startsWith('token_exchange_') ? t('login.oidcErrors.tokenExchangeFailed') : t('login.oidcLoginFailed'));
       showToast(errorMsg, 'error');
+      clearLoginReturn(); // a failed login doesn't carry the page to the next one
       navigate('/login', { replace: true });
       return;
     }
@@ -210,11 +211,13 @@ export function LoginPage() {
           navigate(takeLoginReturn(), { replace: true });
         } else {
           showToast(t('login.oidcLoginFailed'), 'error');
+          clearLoginReturn();
           navigate('/login', { replace: true });
         }
       }).catch((err: unknown) => {
         console.error('OIDC token exchange failed', err);
         showToast(t('login.oidcLoginFailed'), 'error');
+        clearLoginReturn();
         navigate('/login', { replace: true });
       });
     }
