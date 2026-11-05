@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import json
 import logging
 import re
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 SLICE = "slice_failed"
 SIMILAR = 0.8  # difflib ratio of two brand keys that are probably the same brand misspelt
+SUMMARY_AFTER = 5  # more files than this with new problems in one round: one summary message
 _task: asyncio.Task | None = None
 
 
@@ -61,6 +63,9 @@ class FarmLibraryCheck(Base):
 
     library_file_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # What the checks depended on (imported profiles, printer models): checked again when it changes,
+    # so importing the profile or mapping the model clears the problem by itself.
+    env: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 def _now() -> datetime:
@@ -109,7 +114,12 @@ def known_brands(names: list[str], vendors: list[str]) -> dict[str, tuple[str, i
     for brand in [brand_from_name(n) for n in names] + vendors:
         if brand and brand_key(brand) not in ("", "generic"):
             seen.setdefault(brand_key(brand), Counter())[brand.strip()] += 1
-    return {key: (counts.most_common(1)[0][0], sum(counts.values())) for key, counts in seen.items()}
+    out = {}
+    for key, counts in seen.items():
+        top = counts.most_common(2)
+        tie = len(top) == 2 and top[0][1] == top[1][1]
+        out[key] = (None if tie else top[0][0], sum(counts.values()))  # a tie: no usual spelling to suggest
+    return out
 
 
 def brand_problem(profile: str, brands: dict[str, tuple[str, int]]) -> str | None:
@@ -121,6 +131,7 @@ def brand_problem(profile: str, brands: dict[str, tuple[str, int]]) -> str | Non
         return None
     key = brand_key(brand)
     usual, count = brands.get(key, (brand, 0))
+    usual = usual or brand
     near = [
         (other_count, other)
         for other_key, (other, other_count) in brands.items()
@@ -128,7 +139,7 @@ def brand_problem(profile: str, brands: dict[str, tuple[str, int]]) -> str | Non
     ]
     if near:
         return f"brand '{brand}' in '{profile}': did you mean '{max(near)[1]}'?"
-    if usual != brand:
+    if usual.lower() != brand.lower():  # capitals alone are not a problem
         return f"brand '{brand}' in '{profile}' is usually written '{usual}'"
     return None
 
@@ -160,7 +171,8 @@ def static_problems(
             if not profile or profile in told:
                 continue
             told.add(profile)
-            if profile not in presets:
+            # Orca's own system profiles cannot be imported (packed catalogue): not a problem.
+            if presets and profile not in presets and "@system" not in profile.lower():
                 found.append((plate, "unknown_profile", f"filament profile '{profile}' is not among the imported ones"))
             spelling = brand_problem(profile, brands)
             if spelling:
@@ -201,13 +213,13 @@ async def _replace(
     return new
 
 
-async def _tell(db: AsyncSession, file_id: int, new: list[FarmLibraryProblem]) -> None:
-    """One notification per file, only for problems it did not have."""
+async def _tell(db: AsyncSession, file_id: int, new: list[tuple[int | None, str, str]]) -> None:
+    """One notification per file, only for problems it did not have ((plate, code, message) each)."""
     if not new:
         return
     lib_file = await db.get(LibraryFile, file_id)
-    lines = [f"plate {p.plate}: {p.message}" if p.plate else p.message for p in new]
-    key = (file_id, tuple(sorted((p.plate or 0, p.code, p.message) for p in new)))
+    lines = [f"plate {plate}: {message}" if plate else message for plate, _, message in new]
+    key = (file_id, tuple(sorted((plate or 0, code, message) for plate, code, message in new)))
     notify.notify(
         notify.LIBRARY_PROBLEM,
         key,
@@ -217,17 +229,24 @@ async def _tell(db: AsyncSession, file_id: int, new: list[FarmLibraryProblem]) -
 
 
 async def record_slice(db: AsyncSession, file_id: int, plate: int | None, colour: str | None, error=None) -> None:
-    """The automatic re-slice of a plate ended: a failure is a problem of that plate, a success clears it."""
-    from backend.app.farm.slicing import explain
+    """The automatic re-slice of a plate ended: a failure is a problem of that plate, a success clears it.
 
-    plate = plate or 1
-    found = []
-    if error is not None:
-        reason = explain(str(getattr(error, "detail", None) or error))
-        found = [(plate, SLICE, f"slicing{f' in {colour}' if colour else ''} failed: {reason}")]
-    new = await _replace(db, file_id, {SLICE}, found, plates={plate})
-    await db.commit()
-    await _tell(db, file_id, new)
+    Bookkeeping only: it never raises (the re-slice keeps its own outcome and error), and it notifies
+    nothing (``farm_slicing_failed`` already does).
+    """
+    try:
+        from backend.app.farm.slicing import explain
+
+        plate = plate or 1
+        found = []
+        if error is not None:
+            reason = explain(str(getattr(error, "detail", None) or error))
+            found = [(plate, SLICE, f"slicing{f' in {colour}' if colour else ''} failed: {reason}")]
+        await _replace(db, file_id, {SLICE}, found, plates={plate})
+        await db.commit()
+    except Exception:
+        logger.exception("Library problems: re-slice outcome of file %s plate %s not recorded", file_id, plate)
+        await db.rollback()
 
 
 async def check_new_versions(db: AsyncSession) -> int:
@@ -243,36 +262,58 @@ async def check_new_versions(db: AsyncSession) -> int:
         .join(FarmLibraryFile, FarmLibraryFile.library_file_id == LibraryFile.id)
         .where(LibraryFile.file_type == "3mf", FarmLibraryFile.status == "ok", LibraryFile.deleted_at.is_(None))
     )
-    todo = [(f, s) for f, s in rows.all() if f.id not in checked or checked[f.id].sha256 != s.sha256]
-    if not todo:
-        return 0
     filaments = [p for p in (await db.execute(select(LocalPreset))).scalars() if p.preset_type == "filament"]
     presets = {p.name for p in filaments}
-    brands = known_brands([p.name for p in filaments], [p.filament_vendor for p in filaments if p.filament_vendor])
     resolver = await PrinterModelResolver.load(db)
-    for lib_file, state in todo:
-        try:
+    models = sorted(resolver.manual.items()) + sorted(resolver.by_canonical.items())  # incl. manual mappings
+    env = hashlib.sha256(json.dumps([sorted(presets), models]).encode()).hexdigest()
+    # Plain values: a rollback below expires every loaded object, which async code cannot reload lazily.
+    todo = [
+        (f.id, s.sha256, s.printer_model)
+        for f, s in rows.all()
+        if f.id not in checked or checked[f.id].sha256 != s.sha256 or checked[f.id].env != env
+    ]
+    if not todo:
+        return 0
+    brands = known_brands([p.name for p in filaments], [p.filament_vendor for p in filaments if p.filament_vendor])
+    told: dict[int, list[tuple[int | None, str, str]]] = {}
+    for file_id, sha, model in todo:
+        name = file_id
+        try:  # any failure on one file: that file is skipped this round, never the whole sweep
+            lib_file = await db.get(LibraryFile, file_id)
+            name = lib_file.filename
             await ensure_local(db, lib_file)
             cfg, objects, slots = await asyncio.to_thread(read_project, library_path(lib_file.file_path))
-        except (OSError, ValueError, KeyError, SyntaxError, zipfile.BadZipFile) as exc:
-            logger.warning("Library check: %s not read: %s", lib_file.filename, exc)
+            found = static_problems(
+                cfg,
+                objects,
+                slots,
+                model=model,
+                model_ok=resolver.resolve(model).target_model is not None,
+                presets=presets,
+                brands=brands,
+            )
+            new = await _replace(db, file_id, None, found)
+            row = await db.get(FarmLibraryCheck, file_id) or FarmLibraryCheck(library_file_id=file_id)
+            row.sha256, row.env = sha, env
+            db.add(row)
+            await db.commit()
+        except Exception as exc:
+            logger.warning("Library check: %s skipped: %s", name, exc)
+            await db.rollback()
             continue
-        model = state.printer_model
-        found = static_problems(
-            cfg,
-            objects,
-            slots,
-            model=model,
-            model_ok=resolver.resolve(model).target_model is not None,
-            presets=presets,
-            brands=brands,
+        if new:
+            told[file_id] = [(p.plate, p.code, p.message) for p in new]
+    if len(told) > SUMMARY_AFTER:  # e.g. the first round: one message, not dozens
+        notify.notify(
+            notify.LIBRARY_PROBLEM,
+            ("summary", tuple(sorted(told))),
+            filename=f"{len(told)} file",
+            problems=f"{len(told)} file da sistemare nella libreria: vedi Cosa stampare",
         )
-        new = await _replace(db, lib_file.id, None, found)
-        row = checked.get(lib_file.id) or FarmLibraryCheck(library_file_id=lib_file.id)
-        row.sha256 = state.sha256
-        db.add(row)
-        await db.commit()
-        await _tell(db, lib_file.id, new)
+    else:
+        for file_id, new in told.items():
+            await _tell(db, file_id, new)
     return len(todo)
 
 
