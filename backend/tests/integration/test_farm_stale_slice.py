@@ -382,3 +382,49 @@ async def test_model_queue_checks_before_assigning_a_printer(db_session, test_en
     q.slice_to("v2", "; second")
     await db_session.commit()
     assert await queue_check(test_engine, find_printer=q.printer_a.id) == [(q.item.id, q.output.id)]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_slice_moves_to_the_new_one_only_with_the_same_pieces(db_session, queued, tmp_path, monkeypatch):
+    """The queued output was kept and v2 sliced into a row of its own (``slicing.slice_embedded``)."""
+    from pathlib import Path
+
+    from backend.app.farm.jobs.models import FarmPrintJob
+    from backend.app.farm.plates.models import FarmPlate, FarmPlateYield
+
+    async def own_path(db, lib_file):
+        return Path(lib_file.file_path)
+
+    monkeypatch.setattr(service, "_local_path", own_path)
+    q = queued
+    plate = FarmPlate(library_file_id=q.project.id, plate_index=1, source_sha256="v1")
+    plate.yields = [FarmPlateYield(object_name="part", quantity=4)]
+    db_session.add(plate)
+    await db_session.flush()
+    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()  # noqa: E731
+    job = FarmPrintJob(component_code="C-0001", plate_ids=[plate.id], expected_pieces=4, status="queued")
+    job.queue_item_id, job.plate_id, job.pieces = q.item.id, plate.id, 4
+    job.queued_as = {"plate_sha256": "v1", "objects": {"part": 4}, "file_hash": sha(q.src)}
+    new_src = tmp_path / "part - 1a2b3c4d.gcode.3mf"
+    with zipfile.ZipFile(new_src, "w") as zf:
+        zf.writestr("Metadata/plate_1.gcode", "; second")
+    newer = LibraryFile(filename=new_src.name, file_path=str(new_src), file_type="gcode", file_size=1)
+    newer.source_type, newer.file_hash = "sliced", sha(new_src)
+    newer.file_metadata = {**q.output.file_metadata, "sliced_from_sha256": "v2"}
+    q.state.sha256 = "v2"
+    db_session.add_all([job, newer])
+    await db_session.commit()
+
+    assert await service.stale_slice_reason(db_session, q.item) == service.WAIT_NEW_SLICE  # v2's plates not read
+    plate.source_sha256 = "v2"
+    plate.yields[0].quantity = 6  # v2 prints other pieces on plate 1
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, q.item) == service.FAIL_PLATE_CHANGED
+    assert q.item.library_file_id == q.output.id
+
+    plate.yields[0].quantity = 4  # the same pieces, a better slice
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, q.item) is None
+    await db_session.refresh(job)
+    assert (q.item.library_file_id, job.queued_as["file_hash"]) == (newer.id, sha(new_src))
+    assert await service.stale_slice_reason(db_session, q.item) is None  # its new file checks out

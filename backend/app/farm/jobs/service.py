@@ -374,9 +374,63 @@ FAIL_NO_PROJECT = "The 3MF this was sliced from was removed from the library"
 FAIL_NO_OUTPUT = "The sliced file this G-code came from is gone: queue the plate again"
 FAIL_NO_GCODE = "The new slice has no G-code for this plate: queue the plate again"
 FAIL_PLATE_GONE = "This plate is no longer in the 3MF: queue another plate"
-FAIL_REASONS = (FAIL_NO_PROJECT, FAIL_NO_OUTPUT, FAIL_NO_GCODE, FAIL_PLATE_GONE)
+FAIL_PLATE_CHANGED = "The 3MF changed after queueing: this plate prints other pieces now. Queue it again"
+FAIL_FILE_CHANGED = "The file to print changed after queueing: queue the plate again"
+FAIL_REASONS = (FAIL_NO_PROJECT, FAIL_NO_OUTPUT, FAIL_NO_GCODE, FAIL_PLATE_GONE, FAIL_PLATE_CHANGED, FAIL_FILE_CHANGED)
 
 _reslice_asked: dict[tuple[int, str], float] = {}  # (project id, version) -> when a start asked to re-slice it
+
+
+async def fail_queued(db: AsyncSession, item: PrintQueueItem, reason: str) -> None:
+    """A queue item that never can start fails: the queue shows why, and so does its farm job's note."""
+    item.status, item.error_message, item.waiting_reason = "failed", reason, None
+    item.completed_at = datetime.now(timezone.utc)
+    job = await db.scalar(select(FarmPrintJob).where(FarmPrintJob.queue_item_id == item.id))
+    if job is not None:
+        job.note = reason[:255]
+    logger.warning("Queue item %s failed: %s", item.id, reason)
+
+
+async def fail_queued_jobs(db: AsyncSession, plate_ids: set[int], reason: str) -> None:
+    """Farm jobs of these plates still waiting in the queue fail now (``plates.refresh_plates``), not at their start."""
+    if not plate_ids:
+        return
+    rows = await db.execute(
+        select(PrintQueueItem)
+        .join(FarmPrintJob, FarmPrintJob.queue_item_id == PrintQueueItem.id)
+        .where(
+            FarmPrintJob.status == "queued", FarmPrintJob.plate_id.in_(plate_ids), PrintQueueItem.status == "pending"
+        )
+    )
+    for item in rows.scalars().all():
+        await fail_queued(db, item, reason)
+
+
+def _plate_objects(plate: FarmPlate) -> dict[str, int]:
+    return {y.object_name: y.quantity for y in plate.yields}
+
+
+async def job_change_reason(db: AsyncSession, job: FarmPrintJob) -> str | None:
+    """Why a queued farm job may not start: its plate left the 3MF, or prints other pieces than it was queued for."""
+    plate = await db.get(FarmPlate, job.plate_id) if job.plate_id else None
+    if plate is None:
+        return FAIL_PLATE_GONE
+    if job.queued_as is not None:
+        changed = _plate_objects(plate) != job.queued_as.get("objects")
+    else:  # queued before ``queued_as``: the pieces of its component it was queued for
+        comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))
+        changed = comp is not None and _pieces(plate, comp, await product_shapes(db)) != job.pieces
+    return FAIL_PLATE_CHANGED if changed else None
+
+
+async def _file_sha(db: AsyncSession, lib_file: LibraryFile) -> str | None:
+    return await asyncio.to_thread(_sha256_of, await _local_path(db, lib_file))
+
+
+async def _sends(db: AsyncSession, job: FarmPrintJob | None, lib_file: LibraryFile) -> None:
+    """The job now sends this file: a new slice of the same pieces (checked before), from the current 3MF."""
+    if job is not None and job.queued_as is not None:
+        job.queued_as = {**job.queued_as, "file_hash": await _file_sha(db, lib_file)}
 
 
 async def _changed_on_nas(db: AsyncSession, state: FarmLibraryFile) -> bool:
@@ -405,14 +459,29 @@ async def _changed_on_nas(db: AsyncSession, state: FarmLibraryFile) -> bool:
 
 
 async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | None:
-    """Why a queued farm output may not start: it was sliced from another version of its 3MF.
+    """Why a queued farm output may not start: it was sliced from another version of its 3MF, or
+    it is a farm job's and no longer prints what the job was queued for.
 
-    A project saved again is re-sliced in place (``farm.reslice``), so the item waits for that
-    (asked again here when it isn't under way); one saved after the last scan is seen by a stat
-    on the NAS and waits for the scan, asked now. A Klipper G-code extracted from an output sliced
-    again since is extracted again, into its own row. None: it may start, or it isn't a farm output.
+    A project saved again is re-sliced (``farm.reslice``), so the item waits for that (asked again
+    here when it isn't under way) and then sends the new slice; one saved after the last scan is
+    seen by a stat on the NAS and waits for the scan, asked now. A Klipper G-code extracted from
+    an output sliced again since is extracted again. A farm job's item fails when its plate left
+    the 3MF or prints other pieces now, or when the file it sends isn't the one queued (or the
+    new slice of the same pieces). None: it may start, or it isn't a farm output.
     A reason in ``FAIL_REASONS`` never clears: the item should fail.
     """
+    job = await db.scalar(select(FarmPrintJob).where(FarmPrintJob.queue_item_id == item.id))
+    if job is not None and (reason := await job_change_reason(db, job)):
+        return reason
+    reason = await _slice_reason(db, item, job)
+    if reason is None and job is not None and (want := (job.queued_as or {}).get("file_hash")):
+        sent = await db.get(LibraryFile, item.library_file_id)
+        if sent is None or await _file_sha(db, sent) != want:
+            return FAIL_FILE_CHANGED  # e.g. written over on the NAS: never sent in place of what was queued
+    return reason
+
+
+async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJob | None) -> str | None:
     lib_file = await db.scalar(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
     meta = (lib_file.file_metadata or {}) if lib_file else {}
     project_id = meta.get("sliced_from_library_file_id")
@@ -440,23 +509,23 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
         return WAIT_NAS_CHANGED
     out_meta = output.file_metadata or {}
     if out_meta.get("sliced_from_sha256") != state.sha256:
-        from backend.app.farm import reslice  # imports slicing, which imports this module
-        from backend.app.farm.slicing import plate_key
+        from backend.app.farm.slicing import previous_output  # slicing imports this module
 
-        plates = list((await db.execute(select(FarmPlate).where(FarmPlate.library_file_id == project_id))).scalars())
-        plate_no = plate_key(out_meta.get("sliced_plate"))  # 0: all plates, never a stored plate
-        if plate_no and plates and all(p.source_sha256 == state.sha256 for p in plates):  # this version's
-            if plate_no not in {p.plate_index for p in plates}:
-                return FAIL_PLATE_GONE  # the re-slice skips it: it would wait for good
-        if project_id in reslice._running:
-            return WAIT_NEW_SLICE
-        key = (project_id, state.sha256)
-        if time.monotonic() - _reslice_asked.get(key, -RESLICE_AFTER_SECONDS) >= RESLICE_AFTER_SECONDS:
-            await reslice.schedule(db, [project_id])
-            _reslice_asked[key] = time.monotonic()  # only once asked: a failed schedule is tried next check
-            if project_id in reslice._running:
-                return WAIT_NEW_SLICE
-        return WAIT_RESLICE_FAILED  # failed, or skipped (e.g. excluded): asked again after a while
+        newer = await previous_output(db, project_id, out_meta.get("sliced_plate"), out_meta.get("sliced_color"))
+        if newer is not None and (newer.file_metadata or {}).get("sliced_from_sha256") == state.sha256:
+            # Sliced again into a row of its own: the slice queued here was kept (``slicing.slice_embedded``).
+            plate = await db.get(FarmPlate, job.plate_id) if job is not None else None
+            if plate is not None and plate.source_sha256 != state.sha256:
+                return WAIT_NEW_SLICE  # the job's pieces are checked on the new version's plates, not read yet
+            if output is lib_file:
+                item.library_file_id = newer.id
+                await _sends(db, job, newer)
+                await db.commit()
+                logger.info("Queue item %d: moved to the new slice %s", item.id, newer.filename)
+                return None
+            output = newer  # a Klipper G-code: extracted from the new slice below
+        else:
+            return await _await_reslice(db, project_id, state, out_meta)
     if output is not lib_file and meta.get("extracted_from_hash") != output.file_hash:
         try:
             gcode = await gcode_for_klipper(db, output, await _local_path(db, output), meta.get("plate") or 1)
@@ -465,9 +534,31 @@ async def stale_slice_reason(db: AsyncSession, item: PrintQueueItem) -> str | No
         if gcode is None:
             return FAIL_NO_GCODE
         item.library_file_id = gcode.id
+        await _sends(db, job, gcode)
         await db.commit()
         logger.info("Queue item %d: G-code extracted again from the new slice of %s", item.id, output.filename)
     return None
+
+
+async def _await_reslice(db: AsyncSession, project_id: int, state: FarmLibraryFile, out_meta: dict) -> str:
+    """The output is from an older version of its 3MF and no newer slice exists: ask for it, or say why not."""
+    from backend.app.farm import reslice  # imports slicing, which imports this module
+    from backend.app.farm.slicing import plate_key
+
+    plates = list((await db.execute(select(FarmPlate).where(FarmPlate.library_file_id == project_id))).scalars())
+    plate_no = plate_key(out_meta.get("sliced_plate"))  # 0: all plates, never a stored plate
+    if plate_no and plates and all(p.source_sha256 == state.sha256 for p in plates):  # this version's
+        if plate_no not in {p.plate_index for p in plates}:
+            return FAIL_PLATE_GONE  # the re-slice skips it: it would wait for good
+    if project_id in reslice._running:
+        return WAIT_NEW_SLICE
+    key = (project_id, state.sha256)
+    if time.monotonic() - _reslice_asked.get(key, -RESLICE_AFTER_SECONDS) >= RESLICE_AFTER_SECONDS:
+        await reslice.schedule(db, [project_id])
+        _reslice_asked[key] = time.monotonic()  # only once asked: a failed schedule is tried next check
+        if project_id in reslice._running:
+            return WAIT_NEW_SLICE
+    return WAIT_RESLICE_FAILED  # failed, or skipped (e.g. excluded): asked again after a while
 
 
 def _matching_spool(printer: dict, materials: list[str], color_hex: str, tolerance: int) -> dict | None:
@@ -862,6 +953,11 @@ async def dispatch_once(db: AsyncSession) -> int:
                     await db.flush()
                     job.status, job.queue_item_id, job.printer_id = "queued", item.id, printer["id"]
                     job.plate_id, job.pieces = plate.id, _pieces(plate, comp, own)
+                    job.queued_as = {  # what this item prints: checked again before it starts
+                        "plate_sha256": plate.source_sha256,
+                        "objects": _plate_objects(plate),
+                        "file_hash": await _file_sha(db, send),
+                    }
                     job.note = None if fits else f"Load the {job.color} spool on {printer['name']}, then start it"[:255]
                     busy.add(printer["id"])
                     created += 1

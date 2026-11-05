@@ -1873,8 +1873,8 @@ class PrintScheduler:
 
     async def _farm_slice_waits(self, db: AsyncSession, item: PrintQueueItem) -> bool:
         """Fork (printfarm): True when the item must not start now: its farm output is from an older
-        version of its 3MF (it waits, the queue shows why) or never can be (it fails). A Klipper G-code
-        is extracted again from a new slice first."""
+        version of its 3MF (it waits, the queue shows why) or never can be (it fails), e.g. a farm job
+        whose plate prints other pieces now. A Klipper G-code is extracted again from a new slice first."""
         from backend.app.farm.jobs import service as farm_jobs  # imports this module
 
         try:
@@ -1888,12 +1888,8 @@ class PrintScheduler:
             logger.exception("Queue item %s: slice check failed", item.id)
             reason = farm_jobs.WAIT_CHECK_FAILED
         if reason in farm_jobs.FAIL_REASONS:
-            item.status = "failed"
-            item.error_message = reason
-            item.waiting_reason = None
-            item.completed_at = datetime.now(timezone.utc)
+            await farm_jobs.fail_queued(db, item, reason)  # its farm job's note says why too
             await db.commit()
-            logger.warning("Queue item %s failed: %s", item.id, reason)
             if item.printer_id:  # as _start_print does for a library file that is gone
                 await self._power_off_if_needed(db, item)
             return True

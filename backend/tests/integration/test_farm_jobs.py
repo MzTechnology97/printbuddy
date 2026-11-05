@@ -92,6 +92,7 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
         "snapshot": snapshot,
         "slicing": slicing_asked,
         "printers": (a1_one.id, a1_two.id, p1s.id),
+        "sliced_path": sliced_path,
     }
 
 
@@ -496,3 +497,106 @@ async def test_klipper_gcode_row_has_the_plate_time_grams_and_picture(db_session
     again = await service.gcode_for_klipper(db_session, sliced, src, 2)
     assert again.id == row.id and again.file_metadata["extracted_version"] == 2
     assert await service.gcode_for_klipper(db_session, sliced, src, 2) is again
+
+
+# ---------------------------------------------------------------- a job prints what it was queued for
+# Jobs queued on plates 4-7 of a 3MF; the 3MF was saved again with other pieces on plates 4 and 5 and
+# no plates 6 and 7, and the queue sent the new pieces under the old jobs' components.
+
+
+async def _queued_job(async_client, db_session, farm):
+    job = await accoda(async_client, farm["code"], farm["plates"])
+    assert await service.dispatch_once(db_session) == 1
+    job = await db_session.get(FarmPrintJob, job["id"])
+    return job, await db_session.get(PrintQueueItem, job.queue_item_id)
+
+
+async def _read_plates_again(db_session, monkeypatch, plates: list[tuple[int, dict]]):
+    """``refresh_plates`` on a new version of the A1 plate's 3MF holding these (plate number, objects)."""
+    from types import SimpleNamespace
+
+    from backend.app.farm.plates import service as plates_service
+
+    async def fake_read(read, path, parse):
+        return [plates_service.ParsedPlate(index=n, objects=objects) for n, objects in plates], 0.4
+
+    monkeypatch.setattr(plates_service, "access_run", fake_read)
+    project = SimpleNamespace(id=50, file_path="/nas/sopra.3mf", filename="sopra.3mf")
+    state = SimpleNamespace(sha256="v2", status="ok", printer_model="A1")
+    await plates_service.refresh_plates(db_session, project, state)
+
+
+async def _failed_with(async_client, db_session, item, reason):
+    await db_session.refresh(item)
+    assert (item.status, item.error_message) == ("failed", reason)
+    jobs = (await async_client.get(f"{API}/jobs")).json()  # the farm jobs page says why, not only the log
+    assert [(j["state"], j["note"]) for j in jobs] == [("failed", reason)]
+
+
+@pytest.mark.asyncio
+async def test_job_unchanged_since_queueing_starts_as_before(async_client, db_session, farm, test_engine):
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    job, item = await _queued_job(async_client, db_session, farm)
+    file_hash = hashlib.sha256(farm["sliced_path"].read_bytes()).hexdigest()
+    assert job.queued_as == {"plate_sha256": None, "objects": {"sopra": 15}, "file_hash": file_hash}
+    assert await queue_check(test_engine) == [(item.id, item.library_file_id)]
+
+
+@pytest.mark.asyncio
+async def test_plate_with_other_pieces_after_queueing_fails_its_job(
+    async_client, db_session, farm, monkeypatch, test_engine
+):
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    _, item = await _queued_job(async_client, db_session, farm)
+    await _read_plates_again(db_session, monkeypatch, [(2, {"mezza luna": 20})])
+    await _failed_with(async_client, db_session, item, service.FAIL_PLATE_CHANGED)
+    assert await queue_check(test_engine) == []
+
+
+@pytest.mark.asyncio
+async def test_plate_gone_after_queueing_fails_its_job(async_client, db_session, farm, monkeypatch, test_engine):
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    _, item = await _queued_job(async_client, db_session, farm)
+    await _read_plates_again(db_session, monkeypatch, [(3, {"sopra": 15})])  # plate 2 left the 3MF
+    await _failed_with(async_client, db_session, item, service.FAIL_PLATE_GONE)
+    assert await queue_check(test_engine) == []
+
+
+@pytest.mark.asyncio
+async def test_plate_changed_without_the_refresh_is_caught_at_the_start(async_client, db_session, farm, test_engine):
+    """The plates changed by another way than ``refresh_plates``: the start itself refuses."""
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    job, item = await _queued_job(async_client, db_session, farm)
+    plate = await db_session.get(FarmPlate, job.plate_id)
+    plate.yields[0].quantity = 8
+    await db_session.commit()
+    assert await queue_check(test_engine) == []
+    await _failed_with(async_client, db_session, item, service.FAIL_PLATE_CHANGED)
+
+
+@pytest.mark.asyncio
+async def test_sliced_file_changed_on_disk_is_never_sent(async_client, db_session, farm, test_engine):
+    """The file the queue item sends was written over (an export with the same name): the start refuses it."""
+    from backend.tests.integration.test_farm_stale_slice import queue_check
+
+    _, item = await _queued_job(async_client, db_session, farm)
+    with zipfile.ZipFile(farm["sliced_path"], "w") as zf:
+        zf.writestr("Metadata/plate_2.gcode", "G28 ; other pieces")
+    assert await queue_check(test_engine) == []
+    await _failed_with(async_client, db_session, item, service.FAIL_FILE_CHANGED)
+
+
+@pytest.mark.asyncio
+async def test_job_queued_before_the_snapshot_compares_its_pieces(async_client, db_session, farm):
+    job, item = await _queued_job(async_client, db_session, farm)
+    job.queued_as = None  # queued by the version before this check
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) is None
+    plate = await db_session.get(FarmPlate, job.plate_id)
+    plate.yields[0].quantity = 20
+    await db_session.commit()
+    assert await service.stale_slice_reason(db_session, item) == service.FAIL_PLATE_CHANGED
