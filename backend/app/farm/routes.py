@@ -238,5 +238,48 @@ async def slice_farm_file(library_file_id: int, body: FarmSliceRequest, db: Asyn
     return {"job_id": job.id, "status": job.status, "status_url": f"/api/v1/slice-jobs/{job.id}"}
 
 
+class SdFilesIn(BaseModel):
+    keep_days: int = Field(ge=1, le=365)
+    keep_printer_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+async def _sd_files(db: AsyncSession) -> dict:
+    """Bambu printers and whether each keeps its files on the SD after a print (reprint from the display)."""
+    from backend.app.farm import printer_files
+    from backend.app.models.printer import Printer
+    from backend.app.services.printer_providers.factory import normalize_provider
+
+    kept = await printer_files.kept_printers(db)
+    printers = (await db.execute(select(Printer).order_by(Printer.name))).scalars().all()
+    return {
+        "keep_days": await printer_files.keep_days(db),
+        "printers": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "model": p.model,
+                "keep": p.id in kept,
+                "ghost_print_risk": printer_files.ghost_print_risk(p.model),
+            }
+            for p in printers
+            if normalize_provider(p.provider) == "bambu"
+        ],
+    }
+
+
+@router.get("/sd-files", dependencies=[Depends(require_permission_if_auth_enabled(Permission.SETTINGS_READ))])
+async def get_sd_files(db: AsyncSession = Depends(get_db)) -> dict:
+    return await _sd_files(db)
+
+
+@router.put("/sd-files", dependencies=[Depends(require_permission_if_auth_enabled(Permission.SETTINGS_UPDATE))])
+async def put_sd_files(body: SdFilesIn, db: AsyncSession = Depends(get_db)) -> dict:
+    from backend.app.farm import printer_files
+
+    bambu = {p["id"] for p in (await _sd_files(db))["printers"]}
+    await printer_files.save_settings(db, body.keep_days, set(body.keep_printer_ids) & bambu)
+    return await _sd_files(db)
+
+
 router.include_router(plates_router)
 router.include_router(nas_router)

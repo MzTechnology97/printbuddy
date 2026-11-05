@@ -181,6 +181,13 @@ const en = {
     notProduction: 'Not production',
     tag: 'outside the queue: {{name}}',
   },
+  sdFiles: {
+    title: 'Files on the SD card (Bambu)',
+    intro: 'By default the file is deleted from the printer at the end of each print, so it cannot be reprinted from the display. Tick a printer to keep its files: reprints from the display then work. A file stays until the days below have passed since Printbuddy last sent it (a reprint from the display does not count), then it is deleted when the printer is idle.',
+    keep: 'Keep the file on the SD after the print (reprint from the display)',
+    ghostRisk: 'Warning: on this model a power cycle may start the last print again while its file is on the SD (ghost print).',
+    days: 'Delete unused files after (days)',
+  },
   spools: {
     title: 'Spools loaded by hand',
     intro: 'These Klipper printers have no CFS and cannot say which spool is loaded. Set material and colour here: Accoda uses them to pick the 3MF and check the colour, and the print starts by itself after the plate-clear OK. Update it whenever you change spool.',
@@ -548,6 +555,13 @@ const it: typeof en = {
     assign: 'Salva i pezzi',
     notProduction: 'Non è produzione',
     tag: 'fuori coda: {{name}}',
+  },
+  sdFiles: {
+    title: 'File sulla SD (Bambu)',
+    intro: 'Di base il file viene cancellato dalla stampante alla fine di ogni stampa, quindi non si può ristampare dal display. Spunta una stampante per tenere i suoi file: la ristampa dal display funziona. Un file resta finché non passano i giorni qui sotto dall\'ultimo invio da Printbuddy (una ristampa dal display non conta), poi viene cancellato quando la stampante è ferma.',
+    keep: 'Tieni il file sulla SD dopo la stampa (ristampa dal display)',
+    ghostRisk: 'Attenzione: su questo modello, spegnendo e riaccendendo, la stampante può far ripartire da sola l\'ultima stampa finché il suo file è sulla SD (stampa fantasma).',
+    days: 'Cancella i file non usati dopo (giorni)',
   },
   spools: {
     title: 'Bobine montate (indicate a mano)',

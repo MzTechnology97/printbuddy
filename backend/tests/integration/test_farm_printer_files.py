@@ -1,4 +1,4 @@
-"""Printfarm (fork): fingerprinted queue files on printers, reuse and 30-day clean-up. No printer is contacted."""
+"""Printfarm (fork): fingerprinted queue files on printers, reuse and clean-up of old ones. No printer is contacted."""
 
 from datetime import timedelta
 from unittest.mock import patch
@@ -70,7 +70,11 @@ async def test_cleanup_deletes_only_old_files_on_idle_printers(db_session, print
         deleted.append(remote_path)
         return True
 
+    async def on_printer(*args):
+        return {"vecchio__11111111.3mf", "recente__22222222.3mf", "vecchio__33333333.3mf"}
+
     with (
+        patch.object(printer_files, "_list_names", on_printer),
         patch("backend.app.services.bambu_ftp.delete_file_async", fake_delete),
         patch(
             "backend.app.services.print_scheduler.scheduler._is_printer_idle",

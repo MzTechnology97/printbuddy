@@ -4242,9 +4242,17 @@ async def on_print_complete(printer_id: int, data: dict):
                 result = await db.execute(select(Printer).where(Printer.id == printer_id))
                 printer = result.scalar_one_or_none()
 
+            # fork: a printer set to keep its files (reprint from the display) skips this delete;
+            # farm.printer_files.cleanup removes old ones from idle printers instead.
+            from backend.app.farm import printer_files as farm_printer_files
+
+            keep = printer is not None and await farm_printer_files.keeps_files(printer.id)
+            if keep:
+                logger.info("Keeping /%s on printer %s SD card (reprint from the display)", subtask_name, printer.name)
+
             # Only Bambu printers are reached over FTP; other providers would
             # just burn three connection-refused retries per extension here.
-            if printer and _should_attempt_bambu_ftp_archive(printer):
+            if printer and not keep and _should_attempt_bambu_ftp_archive(printer):
                 from backend.app.services.bambu_ftp import delete_file_async
 
                 # Try both .3mf and .gcode extensions — the printer may have either
