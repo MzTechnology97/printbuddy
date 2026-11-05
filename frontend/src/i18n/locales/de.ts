@@ -955,6 +955,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: 'Technische Details',
+      unknown: 'Grund vom Drucker nicht gemeldet',
+      phase: {
+        dispatch: 'Vor dem Senden',
+        upload: 'Upload zum Drucker',
+        start: 'Druckstart',
+        printing: 'Während des Drucks',
+      },
+      progress: 'bei {{progress}} %',
+      layer: 'Schicht {{layer}}',
+      layerOf: 'Schicht {{layer}} von {{total}}',
+      by: 'von {{name}}',
+      via: {
+        panel: 'über das Panel',
+        api: 'über API (Seller Hub, MCP)',
+      },
+      attempts: 'Startversuche: {{n}}',
+    },
     filamentShort: {
       rowBadge: 'Filament fuer die zugewiesene Spule reicht nicht',
       rowTooltip: 'Der Dispatcher hat diese Position markiert. Klicke auf Play, um den Pro-Slot-Fehlbestand zu sehen und zu entscheiden, ob trotzdem gedruckt werden soll.',

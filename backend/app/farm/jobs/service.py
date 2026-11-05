@@ -879,8 +879,8 @@ async def dispatch_once(db: AsyncSession) -> int:
     return created
 
 
-async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
-    """Cancel a job; its queue item too while it has not started."""
+async def cancel_job(db: AsyncSession, job: FarmPrintJob, who: dict | None = None) -> None:
+    """Cancel a job; its queue item too while it has not started (the queue history says by whom)."""
     if job.source:
         raise HTTPException(409, "A print outside the queue is not cancelled: say it is not production")
     if job.queue_item_id:
@@ -889,6 +889,9 @@ async def cancel_job(db: AsyncSession, job: FarmPrintJob) -> None:
             raise HTTPException(409, "Already printing: stop it from the printer or the queue")
         if item is not None and item.status == "pending":
             item.status = "cancelled"
+            item.completed_at = datetime.now(timezone.utc)
+            item.error_message = "Cancelled with its farm job"
+            item.failure_detail = {"phase": "dispatch", **(who or {})}
     job.status = "cancelled"
     await db.commit()
 

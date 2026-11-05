@@ -22,6 +22,7 @@ from backend.app.models.settings import Settings
 from backend.app.models.smart_plug import SmartPlug
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
+from backend.app.services import queue_failure  # fork: why an item failed, for the queue history
 from backend.app.services.bambu_ftp import (
     PrinterFTPBusyError,
     cache_3mf_download,
@@ -1888,10 +1889,8 @@ class PrintScheduler:
             logger.exception("Queue item %s: slice check failed", item.id)
             reason = farm_jobs.WAIT_CHECK_FAILED
         if reason in farm_jobs.FAIL_REASONS:
-            item.status = "failed"
-            item.error_message = reason
+            queue_failure.mark_failed(item, reason, "dispatch")
             item.waiting_reason = None
-            item.completed_at = datetime.now(timezone.utc)
             await db.commit()
             logger.warning("Queue item %s failed: %s", item.id, reason)
             if item.printer_id:  # as _start_print does for a library file that is gone
@@ -2097,9 +2096,7 @@ class PrintScheduler:
         result = await db.execute(select(Printer).where(Printer.id == item.printer_id))
         printer = result.scalar_one_or_none()
         if not printer:
-            item.status = "failed"
-            item.error_message = "Printer not found"
-            item.completed_at = datetime.now(timezone.utc)
+            queue_failure.mark_failed(item, "Printer not found", "dispatch")
             await db.commit()
             logger.error("Queue item %s: Printer %s not found", item.id, item.printer_id)
             await self._power_off_if_needed(db, item)
@@ -2107,9 +2104,7 @@ class PrintScheduler:
 
         # Check printer is connected
         if not printer_manager.is_connected(item.printer_id):
-            item.status = "failed"
-            item.error_message = "Printer not connected"
-            item.completed_at = datetime.now(timezone.utc)
+            queue_failure.mark_failed(item, "Printer not connected", "dispatch")
             await db.commit()
             logger.error("Queue item %s: Printer %s not connected", item.id, item.printer_id)
             await self._power_off_if_needed(db, item)
@@ -2120,15 +2115,14 @@ class PrintScheduler:
         library_file = None
         file_path = None
         filename = None
+        nas_log: list[str] = []
 
         if item.archive_id:
             # Print from archive
             result = await db.execute(select(PrintArchive).where(PrintArchive.id == item.archive_id))
             archive = result.scalar_one_or_none()
             if not archive:
-                item.status = "failed"
-                item.error_message = "Archive not found"
-                item.completed_at = datetime.now(timezone.utc)
+                queue_failure.mark_failed(item, "Archive not found", "dispatch")
                 await db.commit()
                 logger.error("Queue item %s: Archive %s not found", item.id, item.archive_id)
                 await self._power_off_if_needed(db, item)
@@ -2142,16 +2136,15 @@ class PrintScheduler:
             result = await db.execute(LibraryFile.active().where(LibraryFile.id == item.library_file_id))
             library_file = result.scalar_one_or_none()
             if not library_file:
-                item.status = "failed"
-                item.error_message = "Library file not found"
-                item.completed_at = datetime.now(timezone.utc)
+                queue_failure.mark_failed(item, "Library file not found", "dispatch")
                 await db.commit()
                 logger.error("Queue item %s: Library file %s not found", item.id, item.library_file_id)
                 await self._power_off_if_needed(db, item)
                 return
             from backend.app.farm.nas.cache import ensure_local  # fork: NAS files are fetched on use
 
-            await ensure_local(db, library_file)
+            with queue_failure.capture_logged_errors() as nas_log:  # why the NAS fetch failed, if it did
+                await ensure_local(db, library_file)
             # Library files store absolute paths
             lib_path = Path(library_file.file_path)
             file_path = lib_path if lib_path.is_absolute() else settings.base_dir / library_file.file_path
@@ -2183,9 +2176,7 @@ class PrintScheduler:
 
         else:
             # Neither archive nor library file specified
-            item.status = "failed"
-            item.error_message = "No source file specified"
-            item.completed_at = datetime.now(timezone.utc)
+            queue_failure.mark_failed(item, "No source file specified", "dispatch")
             await db.commit()
             logger.error("Queue item %s: No archive_id or library_file_id specified", item.id)
             await self._power_off_if_needed(db, item)
@@ -2193,9 +2184,13 @@ class PrintScheduler:
 
         # Check file exists on disk
         if not file_path.exists():
-            item.status = "failed"
-            item.error_message = "Source file not found on disk"
-            item.completed_at = datetime.now(timezone.utc)
+            on_nas = library_file is not None and library_file.is_external
+            queue_failure.mark_failed(
+                item,
+                "Source file not found on the NAS" if on_nas else "Source file not found on disk",
+                "dispatch",
+                technical=[str(file_path), *(nas_log if on_nas else [])],
+            )
             await db.commit()
             logger.error("Queue item %s: File not found: %s", item.id, file_path)
             await self._power_off_if_needed(db, item)
@@ -2265,22 +2260,24 @@ class PrintScheduler:
             logger.debug("Queue item %s: Delete failed (may not exist): %s", item.id, e)
 
         upload_error: Exception | None = None
+        upload_log: list[str] = []
         try:
-            uploaded = await self._upload_file_for_provider(
-                printer_id=item.printer_id,
-                provider=provider,
-                printer_name=printer.name,
-                printer_ip=printer.ip_address,
-                printer_access_code=printer.access_code,
-                file_path=file_path,
-                remote_path=remote_path,
-                printer_model=printer.model,
-                ftp_retry_enabled=ftp_retry_enabled,
-                ftp_retry_count=ftp_retry_count,
-                ftp_retry_delay=ftp_retry_delay,
-                ftp_timeout=ftp_timeout,
-                operation_name=f"Upload print to {printer.name}",
-            )
+            with queue_failure.capture_logged_errors() as upload_log:  # the FTP/HTTP errors, for the history
+                uploaded = await self._upload_file_for_provider(
+                    printer_id=item.printer_id,
+                    provider=provider,
+                    printer_name=printer.name,
+                    printer_ip=printer.ip_address,
+                    printer_access_code=printer.access_code,
+                    file_path=file_path,
+                    remote_path=remote_path,
+                    printer_model=printer.model,
+                    ftp_retry_enabled=ftp_retry_enabled,
+                    ftp_retry_count=ftp_retry_count,
+                    ftp_retry_delay=ftp_retry_delay,
+                    ftp_timeout=ftp_timeout,
+                    operation_name=f"Upload print to {printer.name}",
+                )
         except Exception as e:
             uploaded = False
             upload_error = e
@@ -2291,15 +2288,23 @@ class PrintScheduler:
             injected_path.unlink(missing_ok=True)
 
         if not uploaded:
+            # fork: the error the upload really hit (FTP code, HTTP status...), not only the generic advice
+            errors = [line.split(": ", 1)[1] for line in upload_log if line.startswith("ERROR: ")]
+            cause = str(upload_error) if upload_error else (errors[-1] if errors else None)
             error_msg = (
                 str(upload_error)
                 if isinstance(upload_error, PrinterFTPBusyError)
+                else f"Upload to the printer failed: {cause}"
+                if cause
                 else "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
                 "See server logs for detailed diagnostics."
             )
-            item.status = "failed"
-            item.error_message = error_msg
-            item.completed_at = datetime.now(timezone.utc)
+            queue_failure.mark_failed(
+                item,
+                error_msg,
+                "upload",
+                technical=[*upload_log, *([f"{type(upload_error).__name__}: {upload_error}"] if upload_error else [])],
+            )
             item.dispatching_at = None
             await db.commit()
             logger.error(
@@ -2363,19 +2368,20 @@ class PrintScheduler:
         pre_gcode_file = getattr(pre_status, "gcode_file", None) if pre_status else None
 
         # Start the print with AMS mapping, plate_id and print options
-        started = printer_manager.start_print(
-            item.printer_id,
-            remote_filename,
-            plate_id=item.plate_id or 1,
-            ams_mapping=ams_mapping,
-            bed_levelling=item.bed_levelling,
-            print_platform_type=item.print_platform_type,
-            flow_cali=item.flow_cali,
-            vibration_cali=item.vibration_cali,
-            layer_inspect=item.layer_inspect,
-            timelapse=item.timelapse,
-            use_ams=item.use_ams,
-        )
+        with queue_failure.capture_logged_errors() as start_log:  # fork: why the printer refused it, if it did
+            started = printer_manager.start_print(
+                item.printer_id,
+                remote_filename,
+                plate_id=item.plate_id or 1,
+                ams_mapping=ams_mapping,
+                bed_levelling=item.bed_levelling,
+                print_platform_type=item.print_platform_type,
+                flow_cali=item.flow_cali,
+                vibration_cali=item.vibration_cali,
+                layer_inspect=item.layer_inspect,
+                timelapse=item.timelapse,
+                use_ams=item.use_ams,
+            )
 
         if started:
             item.dispatching_at = None
@@ -2448,9 +2454,7 @@ class PrintScheduler:
                 pass  # Best-effort — don't fail the error handler
 
             # Print command failed - revert status
-            item.status = "failed"
-            item.error_message = "Failed to send print command to printer"
-            item.completed_at = datetime.now(timezone.utc)
+            queue_failure.mark_failed(item, "Failed to send print command to printer", "start", technical=start_log)
             item.dispatching_at = None
             await db.commit()
             logger.error(
@@ -2565,10 +2569,11 @@ class PrintScheduler:
             item.started_at = None
             item.dispatching_at = None
             if item.dispatch_attempts >= DISPATCH_MAX_ATTEMPTS:
-                item.status = "failed"
-                item.completed_at = datetime.now(timezone.utc)
-                item.error_message = (
-                    f"Printer did not acknowledge start command after {DISPATCH_MAX_ATTEMPTS} dispatch attempts"
+                queue_failure.mark_failed(
+                    item,
+                    f"Printer did not acknowledge start command after {DISPATCH_MAX_ATTEMPTS} dispatch attempts",
+                    "start",
+                    technical=[f"printer state stayed {pre_state}", f"subtask_id stayed {pre_subtask_id}"],
                 )
                 await db.commit()
                 return "gave_up"

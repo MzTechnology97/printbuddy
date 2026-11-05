@@ -955,6 +955,26 @@ export default {
 
   // Queue page
   queue: {
+    // fork: why a history item failed or was stopped (CompactHistoryRow)
+    failure: {
+      technical: '技術詳情',
+      unknown: '印表機未回報原因',
+      phase: {
+        dispatch: '傳送前',
+        upload: '上傳到印表機',
+        start: '開始列印',
+        printing: '列印過程中',
+      },
+      progress: '進度 {{progress}}%',
+      layer: '第 {{layer}} 層',
+      layerOf: '第 {{layer}} 層，共 {{total}} 層',
+      by: '由 {{name}}',
+      via: {
+        panel: '來自面板',
+        api: '透過 API (Seller Hub, MCP)',
+      },
+      attempts: '啟動嘗試次數：{{n}}',
+    },
     filamentShort: {
       rowBadge: '所分配料盤的線材不足',
       rowTooltip: '調度程式已標記此項目。點擊播放查看各槽位的不足量，並決定是否仍要列印。',

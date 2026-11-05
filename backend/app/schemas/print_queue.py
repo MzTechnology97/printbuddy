@@ -140,6 +140,8 @@ class PrintQueueItemResponse(BaseModel):
     started_at: UTCDatetime
     completed_at: UTCDatetime
     error_message: str | None
+    failure_detail: dict | None = None  # fork: phase, progress, who, technical lines (services.queue_failure)
+    dispatch_attempts: int = 0  # fork: starts the printer didn't acknowledge
     created_at: UTCDatetime
 
     # Nested info for UI (populated in route)
