@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api, getAuthToken, setAuthToken } from '../api/client';
 import type { LoginResponse, Permission, TokenPersistence, UserResponse } from '../api/client';
 import { appAssetPath, appBasePath } from '../utils/assetPaths';
+import { clearLoginReturn } from '../utils/loginReturn';
 
 interface AuthContextType {
   user: UserResponse | null;
@@ -134,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = () => {
+    clearLoginReturn({ loggingOut: true }); // the next login, maybe someone else's, starts from home
     setAuthToken(null);
     setUser(null);
     api.logout().catch(() => {

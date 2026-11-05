@@ -1,6 +1,6 @@
 // Printfarm (fork): what to print, per component, in Seller Hub's order of urgency (phase 3).
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -336,11 +336,12 @@ function StockNote({ c, limiting }: { c: FarmPlanComponent; limiting: boolean })
  *
  * Like upstream's print dialog: which components, the printer with what it has loaded, its AMS/CFS
  * slots and when to start. The farm still picks the 3MF by material and slices what is missing. */
-export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
+export function AccodaSummary({ components, onClose, onDone, byHand = false, notes = [] }: {
   components: FarmPlanComponent[];
   onClose: () => void;
   onDone: () => void;
   byHand?: boolean;
+  notes?: string[]; // why some asked-for components are not here (a link's)
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -417,6 +418,7 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
         </div>
         <div className="p-4 space-y-4 overflow-y-auto">
           <p className="text-sm text-bambu-gray">{t('farm.jobs.summaryIntro')}</p>
+          {notes.length > 0 && <LinkNotes notes={notes} />}
           {usable.length > 1 && (
             <div className="flex flex-wrap items-center gap-2 text-xs text-bambu-gray">
               {t('farm.jobs.pickHint')}
@@ -537,6 +539,38 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false }: {
   );
 }
 
+/** Why components a link asked for can't be queued. */
+function LinkNotes({ notes, onClose }: { notes: string[]; onClose?: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div role="alert" className="text-sm text-amber-400 bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 flex items-start gap-2">
+      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+      <ul className="flex-1 space-y-1">{notes.map((n) => <li key={n}>{n}</li>)}</ul>
+      {onClose && (
+        <button type="button" onClick={onClose} className="p-0.5 rounded hover:bg-bambu-dark"
+          aria-label={t('farm.plan.link.dismiss')}>
+          <X className="w-4 h-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Seller Hub's link ``?accoda=C-0099,C-0100``: the components to queue, and why the others can't be. */
+function linkedComponents(param: string, rows: FarmPlanComponent[], t: TFunction) {
+  const codes = [...new Set(param.split(',').map((c) => c.trim().toUpperCase()).filter(Boolean))];
+  const usable: FarmPlanComponent[] = [];
+  const notes: string[] = codes.length ? [] : [t('farm.plan.link.empty')];
+  for (const code of codes) {
+    const c = rows.find((r) => r.code.toUpperCase() === code);
+    if (!c) notes.push(t('farm.plan.link.notInPlan', { code }));
+    else if (!c.plates.length) notes.push(t('farm.plan.link.noPlates', { code }));
+    else if (c.missing <= 0) notes.push(t('farm.plan.link.covered', { code }));
+    else usable.push(c); // what the card's Queue button allows
+  }
+  return { usable, notes };
+}
+
 const MATERIALS = ['PLA', 'PETG', 'ASA', 'ABS', 'TPU', 'PA', 'PC'];
 
 function SpoolRow({ s, colors }: { s: FarmPrinterSpool; colors: string[] }) {
@@ -654,6 +688,21 @@ export function PrintPlanPage() {
   const plan = useQuery({ queryKey: ['farm', 'plan'], queryFn: farmApi.getPlan, refetchInterval: 60_000 });
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
   const rows = plan.data?.components || [];
+  const [params, setParams] = useSearchParams();
+  const linked = params.get('accoda'); // the contract with Seller Hub: don't rename
+  const [linkNotes, setLinkNotes] = useState<string[]>([]);
+  // Opened from a link: once the plan is in, the same summary as the Queue button; then the link is
+  // dropped from the URL so a refresh doesn't open it again.
+  useEffect(() => {
+    if (linked === null || !plan.data) return;
+    const { usable, notes } = linkedComponents(linked, plan.data.components, t);
+    setLinkNotes(notes);
+    if (usable.length) setSummary(usable);
+    setParams((p) => {
+      p.delete('accoda');
+      return p;
+    }, { replace: true });
+  }, [linked, plan.data, setParams, t]);
 
   return (
     <div className="p-4 md:p-8 space-y-6">
@@ -674,7 +723,10 @@ export function PrintPlanPage() {
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
       <JobsList />
       <SpoolsCard />
-      {summary && <AccodaSummary components={summary} onClose={() => setSummary(null)} onDone={() => setSelected(new Set())} />}
+      {summary ? (
+        <AccodaSummary components={summary} notes={linkNotes} onDone={() => setSelected(new Set())}
+          onClose={() => { setSummary(null); setLinkNotes([]); }} />
+      ) : linkNotes.length > 0 && <LinkNotes notes={linkNotes} onClose={() => setLinkNotes([])} />}
       {plan.data?.error && (
         <p className="text-sm text-amber-400 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" />
@@ -685,7 +737,11 @@ export function PrintPlanPage() {
       {plan.isLoading ? (
         <Loader2 className="w-8 h-8 animate-spin text-bambu-green" />
       ) : plan.error ? (
-        <p className="text-red-400">{(plan.error as Error).message}</p>
+        <>
+          <p className="text-red-400">{(plan.error as Error).message}</p>
+          {/* The link stays in the URL: it opens once the plan loads (a refresh tries again). */}
+          {linked !== null && <LinkNotes notes={[t('farm.plan.link.waitPlan', { codes: linked })]} />}
+        </>
       ) : rows.length === 0 ? (
         <p className="text-bambu-gray">{t('farm.plan.nothing')}</p>
       ) : (

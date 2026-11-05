@@ -1,5 +1,5 @@
-import { Component, type ReactNode, type ErrorInfo } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Component, useEffect, type ReactNode, type ErrorInfo } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/Layout';
 import { PrintersPage } from './pages/PrintersPage';
@@ -30,6 +30,7 @@ import { GCodeViewerPage } from './pages/GCodeViewerPage';
 import { FarmCommandCenterPage } from './pages/FarmCommandCenterPage';
 import { PrintFarmMonitorPage } from './pages/PrintFarmMonitorPage';
 import { appBasePath } from './utils/assetPaths';
+import { saveLoginReturn } from './utils/loginReturn';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useBrowserTabPrintProgress } from './hooks/useBrowserTabPrintProgress';
 import { useStreamTokenSync } from './hooks/useCameraStreamToken';
@@ -92,6 +93,14 @@ function WebSocketProvider({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** To the login, remembering the page asked for (with its query) so the login comes back to it. */
+function ToLogin() {
+  const location = useLocation();
+  const path = location.pathname + location.search + location.hash;
+  useEffect(() => saveLoginReturn(path), [path]);
+  return <Navigate to="/login" replace />;
+}
+
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { authEnabled, loading, user } = useAuth();
 
@@ -100,7 +109,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (authEnabled && !user) {
-    return <Navigate to="/login" replace />;
+    return <ToLogin />;
   }
 
   return <>{children}</>;
@@ -124,7 +133,7 @@ function PermissionRoute({ permission, children }: { permission: string; childre
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <ToLogin />;
   }
 
   if (!hasPermission(permission as Parameters<typeof hasPermission>[0])) {

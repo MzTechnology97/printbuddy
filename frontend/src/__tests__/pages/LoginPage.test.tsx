@@ -579,6 +579,38 @@ describe('LoginPage', () => {
       expect(vi.mocked(localStorage.setItem)).not.toHaveBeenCalledWith('auth_token', expect.any(String));
     });
 
+    it('comes back to the page that asked for the login after OIDC', async () => {
+      sessionStorage.setItem('login_return_to', '/farm/print-plan?accoda=C-0099');
+      server.use(
+        http.post('/api/v1/auth/oidc/exchange', () =>
+          HttpResponse.json({ access_token: 'oidc-token', token_type: 'bearer', user: mockUser })
+        )
+      );
+      window.location.hash = '#oidc_token=test-exchange-token';
+      render(<LoginPage />);
+      await waitFor(() =>
+        expect(window.location.pathname + window.location.search).toBe('/farm/print-plan?accoda=C-0099')
+      );
+      expect(sessionStorage.getItem('login_return_to')).toBeNull();
+    });
+
+    it('forgets the page to come back to when the OIDC login fails', async () => {
+      sessionStorage.setItem('login_return_to', '/farm/print-plan?accoda=C-0099');
+      window.history.pushState({}, '', '/login?oidc_error=invalid_state');
+      render(<LoginPage />);
+      await waitFor(() => expect(sessionStorage.getItem('login_return_to')).toBeNull());
+      expect(window.location.pathname).toBe('/login');
+    });
+
+    it('forgets the page to come back to when the OIDC exchange fails', async () => {
+      sessionStorage.setItem('login_return_to', '/farm/print-plan?accoda=C-0099');
+      server.use(http.post('/api/v1/auth/oidc/exchange', () => HttpResponse.json({ detail: 'no' }, { status: 500 })));
+      window.location.hash = '#oidc_token=test-exchange-token';
+      render(<LoginPage />);
+      await waitFor(() => expect(sessionStorage.getItem('login_return_to')).toBeNull());
+      expect(window.location.pathname).toBe('/login');
+    });
+
     it('shows error toast when OIDC exchange returns unexpected response shape', async () => {
       sessionStorage.setItem('auth_remember_me', '1');
       server.use(
