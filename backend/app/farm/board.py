@@ -561,6 +561,7 @@ def _back_to_waiting(job: FarmPrintJob, note: str) -> None:
     job.queued_as = None
     job.printer_id = (job.queue_options or {}).get("printer_id")  # a printer chosen by hand stays, auto stays auto
     job.note = note
+    job.outcome = job.finished_at = job.archive_id = None  # the end of its last print, kept by ``outcome``
 
 
 async def _slice_again(db: AsyncSession, job: FarmPrintJob, slicing, *, force: bool) -> int:

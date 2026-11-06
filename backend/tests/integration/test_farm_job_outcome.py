@@ -123,7 +123,11 @@ async def test_the_end_of_a_queue_print_finds_its_archive_whatever_name_the_prin
     assert without_fingerprint("Sovol-Zero-plate-1__bfcb55b1.gcode") == "Sovol-Zero-plate-1.gcode"
     assert without_fingerprint("no-fingerprint.gcode.3mf") == "no-fingerprint.gcode.3mf"
     # ...the printing queue item knows its archive.
-    assert await outcome.queue_print_archive(db_session, printer.id) == archive.id
+    assert await outcome.queue_print_archive(db_session, printer.id) == archive.id  # no name reported
+    sent = ["Maniglia_-_plate_2__68c1997a", "/data/Metadata/plate_2.gcode"]
+    assert await outcome.queue_print_archive(db_session, printer.id, sent) == archive.id
+    # A queue item left hanging "printing" never takes a print by hand or outside the queue.
+    assert await outcome.queue_print_archive(db_session, printer.id, ["Gancio__1a2b3c4d", "Gancio.gcode"]) is None
     other = await printer_factory(name="P1S", model="P1S")
     assert await outcome.queue_print_archive(db_session, other.id) is None
 
@@ -149,3 +153,57 @@ async def test_archives_left_printing_are_closed_with_their_queue_item_end(
     assert (rows[stuck_failed.id].status, rows[stuck_failed.id].failure_reason) == ("failed", "Spaghetti")
     assert rows[still.id].status == "printing"  # still printing: untouched
     assert await outcome.close_stale_archives(db_session) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_archive_reprinted_now_is_never_closed(db_session, printer_factory, archive_factory):
+    printer = await printer_factory(name="A1", model="A1")
+    reprinted = await archive_factory(printer.id, status="printing")
+    await queued_job(db_session, printer.id, "completed", reprinted.id, completed_at=utc(hours=5))  # its first print
+    await queued_job(db_session, printer.id, "printing", reprinted.id)  # printed again from the archive, right now
+    assert await outcome.close_stale_archives(db_session) == 0
+    await db_session.refresh(reprinted)
+    assert reprinted.status == "printing"
+
+
+@pytest.mark.asyncio
+async def test_an_end_without_a_time_is_still_seen_by_a_since_reader(async_client, db_session, printer_factory):
+    printer = await printer_factory(name="A1", model="A1")
+    since = datetime.now(timezone.utc) - timedelta(minutes=1)
+    job, item = await queued_job(db_session, printer.id, "completed")  # completed_at never written
+    assert (await async_client.delete(f"/api/v1/queue/{item.id}")).status_code == 200
+    batches = (await async_client.get(f"{API}/jobs", params={"state": "completed", "since": since.isoformat()})).json()
+    assert job.id in {b["id"] for b in batches}
+
+
+@pytest.mark.asyncio
+async def test_a_job_back_to_waiting_forgets_its_last_end(async_client, db_session, printer_factory):
+    from unittest.mock import AsyncMock, patch
+
+    printer = await printer_factory(name="A1", model="A1")
+    job, item = await queued_job(db_session, printer.id, "failed", completed_at=utc(hours=1))
+    assert (await async_client.delete(f"/api/v1/queue/{item.id}")).status_code == 200
+    await db_session.refresh(job)
+    assert job.outcome == "failed"
+    with patch("backend.app.farm.slicing.ask_variant_slicing", AsyncMock(return_value=True)):
+        assert (await async_client.post(f"{API}/board/job:{job.id}/reslice")).status_code == 200
+    await db_session.refresh(job)
+    assert (job.status, job.outcome, job.finished_at, job.archive_id) == ("waiting", None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_many_items_deleted_at_once_all_keep_their_outcome(db_session, printer_factory):
+    printer = await printer_factory(name="A1", model="A1")
+    items = [PrintQueueItem(printer_id=printer.id, position=n, status="completed") for n in range(outcome.CHUNK + 20)]
+    db_session.add_all(items)
+    await db_session.flush()
+    db_session.add_all(
+        FarmPrintJob(component_code="C-0071", plate_ids=[1], expected_pieces=1, status="queued", queue_item_id=i.id)
+        for i in items
+    )
+    await db_session.commit()
+    for item in items:
+        await db_session.delete(item)
+    await db_session.commit()
+    kept = (await db_session.execute(select(FarmPrintJob.outcome))).scalars().all()
+    assert len(kept) == outcome.CHUNK + 20 and set(kept) == {"completed"}

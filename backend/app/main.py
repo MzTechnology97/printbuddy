@@ -3109,7 +3109,7 @@ async def on_print_start(printer_id: int, data: dict):
             # the name the file was sent under (``__<sha8>``, farm.printer_files), the archive the library one.
             from backend.app.farm.jobs.outcome import queue_print_archive
 
-            linked = await queue_print_archive(db, printer_id)
+            linked = await queue_print_archive(db, printer_id, [subtask_name, filename])
             existing_archive = await db.get(PrintArchive, linked) if linked else None
         if existing_archive is None:
             from backend.app.farm.printer_files import without_fingerprint
@@ -4191,7 +4191,7 @@ async def on_print_complete(printer_id: int, data: dict):
             async with async_session() as db:
                 from backend.app.farm.jobs.outcome import queue_print_archive
 
-                archive_id = await queue_print_archive(db, printer_id)
+                archive_id = await queue_print_archive(db, printer_id, [subtask_name, filename])
                 if archive_id:
                     logger.info("Found archive %s through the printing queue item", archive_id)
         except Exception:
