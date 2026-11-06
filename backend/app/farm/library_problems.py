@@ -2,12 +2,14 @@
 
 Two sources, both by file and plate:
 
-* checks without slicing, on every new version (sha) of a farm 3MF, run by a sweep in its own task:
-  a plate without objects, a printer model no farm printer has, a filament profile not among the
-  imported ones (``slicer_filaments``), a brand spelt unlike most profiles spell it or close to a more
-  common brand (with the likely name), a filament slot without a colour;
+* checks without slicing, on every new version (sha) of a production 3MF, run by a sweep in its own
+  task: a plate without objects, a printer model no farm printer has;
 * the automatic re-slice of a changed project (``reslice``): each plate's outcome, a failure with
   its reason explained (``slicing.explain``).
+
+Only what stops a print: profile names and brand spellings are not checked (the print works with them),
+nor the colours of the filament slots (a job takes the component's colour; a colour variant with no
+filament of that colour already stops with its reason). Only production 3MFs (:func:`production_files`).
 
 A problem goes away by itself when the file is fixed and checked again (or re-sliced). A file with a
 new problem is notified once (``farm_library_problem``), not once per plate.
@@ -16,31 +18,29 @@ new problem is notified once (``farm_library_problem``), not once per plate.
 from __future__ import annotations
 
 import asyncio
-import difflib
 import hashlib
 import json
 import logging
-import re
 import zipfile
-from collections import Counter
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
-from sqlalchemy import DateTime, Integer, String, select
+from sqlalchemy import DateTime, Integer, String, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core import database
 from backend.app.core.database import Base
 from backend.app.farm import notify
-from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.models.library import LibraryFile
 
 logger = logging.getLogger(__name__)
 
 SLICE = "slice_failed"
-SIMILAR = 0.8  # difflib ratio of two brand keys that are probably the same brand misspelt
+EMPTY = "empty_plate"
+MODEL = "printer_model"
+CODES = (SLICE, EMPTY, MODEL)  # any other code stored by an older version is dropped
 SUMMARY_AFTER = 5  # more files than this with new problems in one round: one summary message
 _task: asyncio.Task | None = None
 
@@ -63,8 +63,8 @@ class FarmLibraryCheck(Base):
 
     library_file_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # What the checks depended on (imported profiles, printer models): checked again when it changes,
-    # so importing the profile or mapping the model clears the problem by itself.
+    # What the checks depended on (the printer models): checked again when it changes, so mapping the
+    # model clears the problem by itself.
     env: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
@@ -75,108 +75,30 @@ def _now() -> datetime:
 # ---------------------------------------------------------------- checks without slicing
 
 
-def read_project(path) -> tuple[dict, dict[int, int], dict[int, set[int]]]:
-    """Blocking: project settings, objects per plate, filament slots per plate (1-based)."""
+def read_project(path) -> dict[int, int]:
+    """Blocking: the number of objects on each plate."""
     from backend.app.farm import variants
 
     with zipfile.ZipFile(path) as zf:
         try:
-            cfg = json.loads(zf.read(PROJECT_SETTINGS_ENTRY))
-        except (KeyError, ValueError):
-            cfg = {}
-        try:
             root = ET.fromstring(zf.read(variants.MODEL_SETTINGS_ENTRY))
         except KeyError:
-            return cfg, {}, {}
+            return {}
     plates = [
         int(m.get("value"))
         for p in root.findall("plate")
         for m in p.findall("metadata")
         if m.get("key") == "plater_id" and (m.get("value") or "").isdigit()
     ]
-    objects = {n: len(variants._plate_objects(root, n)) for n in plates}
-    slots = {n: {s for s in variants.plate_filaments(path, n) if s > 0} for n in plates if objects[n]}
-    return cfg, objects, slots
+    return {n: len(variants._plate_objects(root, n)) for n in plates}
 
 
-def _slot(cfg: dict, name: str, slot: int) -> str:
-    values = cfg.get(name)
-    if isinstance(values, list) and 0 < slot <= len(values):
-        return str(values[slot - 1] or "").strip()
-    return ""
-
-
-def known_brands(names: list[str], vendors: list[str]) -> dict[str, tuple[str, int]]:
-    """brand key -> (the spelling most use, how many profiles use it), from profile names and vendor fields."""
-    from backend.app.farm.auto_spools import brand_from_name, brand_key
-
-    seen: dict[str, Counter] = {}
-    for brand in [brand_from_name(n) for n in names] + vendors:
-        if brand and brand_key(brand) not in ("", "generic"):
-            seen.setdefault(brand_key(brand), Counter())[brand.strip()] += 1
-    out = {}
-    for key, counts in seen.items():
-        top = counts.most_common(2)
-        tie = len(top) == 2 and top[0][1] == top[1][1]
-        out[key] = (None if tie else top[0][0], sum(counts.values()))  # a tie: no usual spelling to suggest
-    return out
-
-
-def brand_problem(profile: str, brands: dict[str, tuple[str, int]]) -> str | None:
-    """A brand written unlike most (Sunlu/SUNLU), or close to a more used one (Quidi/Qidi)."""
-    from backend.app.farm.auto_spools import brand_from_name, brand_key
-
-    brand = brand_from_name(profile)
-    if not brand:
-        return None
-    key = brand_key(brand)
-    usual, count = brands.get(key, (brand, 0))
-    usual = usual or brand
-    near = [
-        (other_count, other)
-        for other_key, (other, other_count) in brands.items()
-        if other_key != key and other_count > count and difflib.SequenceMatcher(None, key, other_key).ratio() >= SIMILAR
-    ]
-    if near:
-        return f"brand '{brand}' in '{profile}': did you mean '{max(near)[1]}'?"
-    if usual.lower() != brand.lower():  # capitals alone are not a problem
-        return f"brand '{brand}' in '{profile}' is usually written '{usual}'"
-    return None
-
-
-def static_problems(
-    cfg: dict,
-    objects: dict[int, int],
-    slots: dict[int, set[int]],
-    *,
-    model: str | None,
-    model_ok: bool,
-    presets: set[str],
-    brands: dict[str, tuple[str, int]],
-) -> list[tuple[int | None, str, str]]:
+def static_problems(objects: dict[int, int], *, model: str | None, model_ok: bool) -> list[tuple[int | None, str, str]]:
     """``(plate, code, message)`` of a project, from what it holds (no slicing)."""
     found: list[tuple[int | None, str, str]] = []
     if model and not model_ok:
-        found.append((None, "printer_model", f"printer model {model} has no printer in the farm"))
-    for plate, count in sorted(objects.items()):
-        if not count:
-            found.append((plate, "empty_plate", f"plate {plate} has no objects"))
-    told: set[str] = set()
-    for plate, used in sorted(slots.items()):
-        for slot in sorted(used):
-            profile = _slot(cfg, "filament_settings_id", slot)
-            colour = _slot(cfg, "filament_colour", slot).lstrip("#")
-            if not re.fullmatch(r"[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", colour):
-                found.append((plate, "no_colour", f"filament {slot} ({profile or 'no profile'}) has no colour"))
-            if not profile or profile in told:
-                continue
-            told.add(profile)
-            # Orca's own system profiles cannot be imported (packed catalogue): not a problem.
-            if presets and profile not in presets and "@system" not in profile.lower():
-                found.append((plate, "unknown_profile", f"filament profile '{profile}' is not among the imported ones"))
-            spelling = brand_problem(profile, brands)
-            if spelling:
-                found.append((plate, "brand_spelling", spelling))
+        found.append((None, MODEL, f"printer model {model} has no printer in the farm"))
+    found += [(plate, EMPTY, f"plate {plate} has no objects") for plate, count in sorted(objects.items()) if not count]
     return found
 
 
@@ -213,6 +135,20 @@ async def _replace(
     return new
 
 
+async def production_files(db: AsyncSession) -> set[int]:
+    """3MFs the farm prints from: a confirmed plate, or in a product's folders (not excluded by it).
+
+    Only these are checked; the rest of the library (tests, downloads) is not the farm's business.
+    """
+    from backend.app.farm.plates.models import FarmPlate
+    from backend.app.farm.products.folders import file_products
+
+    confirmed = set(
+        (await db.execute(select(FarmPlate.library_file_id).where(FarmPlate.status == "confirmed"))).scalars()
+    )
+    return confirmed | set(await file_products(db))
+
+
 async def _tell(db: AsyncSession, file_id: int, new: list[tuple[int | None, str, str]]) -> None:
     """One notification per file, only for problems it did not have ((plate, code, message) each)."""
     if not new:
@@ -237,6 +173,8 @@ async def record_slice(db: AsyncSession, file_id: int, plate: int | None, colour
     try:
         from backend.app.farm.slicing import explain
 
+        if file_id not in await production_files(db):
+            return
         plate = plate or 1
         found = []
         if error is not None:
@@ -254,28 +192,31 @@ async def check_new_versions(db: AsyncSession) -> int:
     from backend.app.farm.nas.access import library_path
     from backend.app.farm.nas.cache import ensure_local
     from backend.app.farm.plates.printer_map import PrinterModelResolver
-    from backend.app.models.local_preset import LocalPreset
 
+    production = await production_files(db)
+    # A file that is not (or no longer) the farm's: its problems go, unannounced, and it is checked
+    # again from scratch if it becomes one. So do the problems this version no longer checks.
+    for table in (FarmLibraryProblem, FarmLibraryCheck):
+        await db.execute(delete(table).where(table.library_file_id.notin_(production)))
+    await db.execute(delete(FarmLibraryProblem).where(FarmLibraryProblem.code.notin_(CODES)))
+    await db.commit()
     checked = {c.library_file_id: c for c in (await db.execute(select(FarmLibraryCheck))).scalars()}
     rows = await db.execute(
         select(LibraryFile, FarmLibraryFile)
         .join(FarmLibraryFile, FarmLibraryFile.library_file_id == LibraryFile.id)
         .where(LibraryFile.file_type == "3mf", FarmLibraryFile.status == "ok", LibraryFile.deleted_at.is_(None))
     )
-    filaments = [p for p in (await db.execute(select(LocalPreset))).scalars() if p.preset_type == "filament"]
-    presets = {p.name for p in filaments}
     resolver = await PrinterModelResolver.load(db)
     models = sorted(resolver.manual.items()) + sorted(resolver.by_canonical.items())  # incl. manual mappings
-    env = hashlib.sha256(json.dumps([sorted(presets), models]).encode()).hexdigest()
+    env = hashlib.sha256(json.dumps(models).encode()).hexdigest()
     # Plain values: a rollback below expires every loaded object, which async code cannot reload lazily.
     todo = [
         (f.id, s.sha256, s.printer_model)
         for f, s in rows.all()
-        if f.id not in checked or checked[f.id].sha256 != s.sha256 or checked[f.id].env != env
+        if f.id in production and (f.id not in checked or checked[f.id].sha256 != s.sha256 or checked[f.id].env != env)
     ]
     if not todo:
         return 0
-    brands = known_brands([p.name for p in filaments], [p.filament_vendor for p in filaments if p.filament_vendor])
     told: dict[int, list[tuple[int | None, str, str]]] = {}
     for file_id, sha, model in todo:
         name = file_id
@@ -283,16 +224,8 @@ async def check_new_versions(db: AsyncSession) -> int:
             lib_file = await db.get(LibraryFile, file_id)
             name = lib_file.filename
             await ensure_local(db, lib_file)
-            cfg, objects, slots = await asyncio.to_thread(read_project, library_path(lib_file.file_path))
-            found = static_problems(
-                cfg,
-                objects,
-                slots,
-                model=model,
-                model_ok=resolver.resolve(model).target_model is not None,
-                presets=presets,
-                brands=brands,
-            )
+            objects = await asyncio.to_thread(read_project, library_path(lib_file.file_path))
+            found = static_problems(objects, model=model, model_ok=resolver.resolve(model).target_model is not None)
             new = await _replace(db, file_id, None, found)
             row = await db.get(FarmLibraryCheck, file_id) or FarmLibraryCheck(library_file_id=file_id)
             row.sha256, row.env = sha, env
@@ -318,10 +251,11 @@ async def check_new_versions(db: AsyncSession) -> int:
 
 
 async def list_problems(db: AsyncSession) -> list[dict]:
+    production = await production_files(db)  # also before the next round has cleaned up
     rows = await db.execute(
         select(FarmLibraryProblem, LibraryFile)
         .join(LibraryFile, LibraryFile.id == FarmLibraryProblem.library_file_id)
-        .where(LibraryFile.deleted_at.is_(None))
+        .where(LibraryFile.deleted_at.is_(None), LibraryFile.id.in_(production), FarmLibraryProblem.code.in_(CODES))
         .order_by(FarmLibraryProblem.since.desc())
     )
     return [
