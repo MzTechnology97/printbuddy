@@ -3930,6 +3930,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: 'Quando imprimir',
+    asap: 'Assim que possível',
+    scheduled: 'Agendada',
+    invalidDateTime: 'Informe uma data e hora válidas',
+    requirePreviousSuccess: 'Iniciar só se a impressão anterior tiver dado certo',
+    powerOffWhenDone: 'Desligar a impressora ao terminar',
+    helpAsap: 'A impressão começa assim que a impressora estiver livre.',
+    helpScheduled: 'A impressão começa no horário agendado se a impressora estiver livre; se estiver ocupada, espera até ela ficar livre.',
+    helpManual: 'A impressão entra na fila, mas não começa sozinha: use o botão Iniciar para liberá-la.',
     title: 'Iniciar Impressão',
     selectPrinter: 'Selecionar Impressora',
     selectPlate: 'Selecionar Placa',

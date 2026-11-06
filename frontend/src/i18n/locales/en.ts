@@ -3953,6 +3953,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: 'When to print',
+    asap: 'ASAP',
+    scheduled: 'Scheduled',
+    invalidDateTime: 'Please enter a valid date and time',
+    requirePreviousSuccess: 'Only start if previous print succeeded',
+    powerOffWhenDone: 'Power off printer when done',
+    helpAsap: 'Print will start as soon as the printer is idle.',
+    helpScheduled: 'Print will start at the scheduled time if the printer is idle. If busy, it will wait until the printer becomes available.',
+    helpManual: 'Print will be staged but won\'t start automatically. Use the Start button to release it to the queue.',
     title: 'Start Print',
     selectPrinter: 'Select Printer',
     selectPlate: 'Select Plate',

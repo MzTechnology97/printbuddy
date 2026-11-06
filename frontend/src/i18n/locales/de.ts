@@ -3942,6 +3942,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: 'Wann drucken',
+    asap: 'So bald wie möglich',
+    scheduled: 'Geplant',
+    invalidDateTime: 'Bitte gültiges Datum und Uhrzeit eingeben',
+    requirePreviousSuccess: 'Nur starten, wenn der vorherige Druck erfolgreich war',
+    powerOffWhenDone: 'Drucker nach Abschluss ausschalten',
+    helpAsap: 'Der Druck startet, sobald der Drucker frei ist.',
+    helpScheduled: 'Der Druck startet zur geplanten Zeit, wenn der Drucker frei ist; ist er belegt, wartet er, bis er frei wird.',
+    helpManual: 'Der Druck wird eingereiht, startet aber nicht automatisch: Mit der Start-Schaltfläche gibst du ihn frei.',
     title: 'Druck starten',
     selectPrinter: 'Drucker auswählen',
     selectPlate: 'Platte auswählen',
