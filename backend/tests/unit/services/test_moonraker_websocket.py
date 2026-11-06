@@ -122,3 +122,23 @@ def test_websocket_url_follows_the_moonraker_url():
         MoonrakerPrinterClient("https://printer.local/moonraker/")._ws_url()
         == "wss://printer.local/moonraker/websocket"
     )
+
+
+def test_websocket_backoff_starts_again_after_a_working_connection():
+    client = MoonrakerPrinterClient("http://printer.local:7125")
+    sessions = iter(["fail", "fail", "fail", "subscribed", "fail", "fail"])
+    waits = []
+
+    def session():
+        if next(sessions) == "subscribed":
+            client._ws_subscribed = True  # as _ws_subscribe does, then the link drops
+        raise OSError("dropped")
+
+    def wait(delay):
+        waits.append(delay)
+        return len(waits) == 6  # stop after six retries
+
+    client._ws_session = session
+    client._ws_stop.wait = wait
+    client._ws_run()
+    assert waits == [2.0, 4.0, 8.0, 2.0, 4.0, 8.0]

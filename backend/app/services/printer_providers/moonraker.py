@@ -676,6 +676,7 @@ class MoonrakerPrinterClient:
         self._ws_stop = threading.Event()
         self._ws_thread: threading.Thread | None = None
         self._ws_conn: Any = None  # the open websocket, closed by stop_websocket
+        self._ws_subscribed = False  # this connection got its subscription (resets the backoff)
         self._ws_objects: list[str] = []  # every printer object, as printer.objects.list gives them
         self._ws_status: dict[str, dict[str, Any]] = {}  # the subscribed objects, kept up to date
         self._ws_live = False
@@ -1552,11 +1553,13 @@ class MoonrakerPrinterClient:
     def _ws_run(self) -> None:
         delay = 2.0
         while not self._ws_stop.is_set():
+            self._ws_subscribed = False
             try:
                 self._ws_session()
-                delay = 2.0
             except Exception as exc:  # noqa: BLE001 - any failure: back to HTTP, retry later
                 logger.debug("Moonraker websocket %s: %s", self.base_url, exc)
+            if self._ws_subscribed:  # it worked before dropping: the backoff starts again
+                delay = 2.0
             with self._ws_lock:
                 self._ws_live = False
                 self._ws_conn = None
@@ -1614,6 +1617,7 @@ class MoonrakerPrinterClient:
             self._ws_status = {name: dict(values) for name, values in status.items() if isinstance(values, dict)}
             self._ws_seen = time.monotonic()
             self._ws_live = True
+        self._ws_subscribed = True
 
     def _ws_handle(self, message: dict[str, Any]) -> bool:
         """Merge one notification into the cache; True when Klipper restarted and must be subscribed again."""
