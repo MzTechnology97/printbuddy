@@ -3360,7 +3360,19 @@ class BambuMQTTClient:
             vibration_cali: Vibration compensation calibration
             layer_inspect: First layer AI inspection
             use_ams: Use AMS for automatic filament changes
+
+        Returns False without sending anything when the printer is busy (upstream #2598).
         """
+        # Every start (queue, manual, webhook, virtual printer) comes through here. A project_file sent while the
+        # printer prints is answered with 0500_4004 "device busy", and on an A1 that cancels the running print.
+        if self.state.state in ("PREPARE", "SLICING", "RUNNING", "PAUSE"):
+            logger.warning(
+                "[%s] start_print refused: printer busy (gcode_state=%s), %s not sent",
+                self.serial_number,
+                self.state.state,
+                filename,
+            )
+            return False
         if self._client and self.state.connected:
             # Bambu print command format — matches Bambu Studio's format.
             # The calibration/leveling fields (timelapse, bed_leveling,

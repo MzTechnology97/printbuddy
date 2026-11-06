@@ -56,6 +56,14 @@ _ACTIVE_PRINT_STATES: frozenset[str] = frozenset({"PREPARE", "SLICING", "RUNNING
 # whose print command never lands.
 DISPATCH_MAX_ATTEMPTS = 3
 
+# A printer that refused an upload (card full or missing, access code, file service down, Moonraker unreachable)
+# gets no jobs for this long, doubling with each refusal in a row up to the cap (upstream #3210, #3409). The job
+# stays pending: failing it left the printer idle, so the next job went to it and failed the same way.
+UPLOAD_REFUSED_BACKOFF_SECONDS = 300
+UPLOAD_REFUSED_BACKOFF_MAX_SECONDS = 3600
+# In the waiting reason of a job kept after a refused upload: it is cleared when an upload gets through.
+UPLOAD_REFUSED_MARK = "Kept in the queue, sent again automatically"
+
 # Filament type equivalence groups — types within the same group are
 # interchangeable on the printer side (Bambu Lab firmware treats them as compatible).
 _FILAMENT_TYPE_GROUPS: list[list[str]] = [
@@ -116,6 +124,10 @@ class PrintScheduler:
         # Matches the watchdog timeout (90 s) plus a safety margin so the
         # watchdog runs first on the unhappy path.
         self._dispatch_max_hold = 180.0
+        # Printers whose last upload never reached them (#3210): printer_id -> monotonic time they may get a job
+        # again, and how many uploads in a row they refused (sets the next wait; reset by an upload that works).
+        self._upload_backoff: dict[int, float] = {}
+        self._upload_refusals: dict[int, int] = {}
 
     async def run(self):
         """Main loop - check queue every interval."""
@@ -230,6 +242,8 @@ class PrintScheduler:
             for held_printer_id in list(self._dispatch_holds.keys()):
                 if self._printer_in_dispatch_hold(held_printer_id):
                     busy_printers.add(held_printer_id)
+            # A printer that refused its last upload waits out its backoff: every job of it stays queued (#3210).
+            busy_printers |= self.printers_refusing_uploads()
 
             # Log skip reasons once per queue check (not per item)
             skip_reasons: dict[str, int] = {}
@@ -471,6 +485,7 @@ class PrintScheduler:
 
                         # Compute AMS mapping for the assigned printer if not already set
                         # This is critical for model-based jobs where mapping wasn't computed upfront
+                        mapping_computed_here = not item.ams_mapping
                         if not item.ams_mapping:
                             computed_mapping = await self._compute_ams_mapping_for_printer(db, printer_id, item)
                             if computed_mapping:
@@ -486,6 +501,13 @@ class PrintScheduler:
 
                         await self._start_print(db, item)
                         busy_printers.add(printer_id)
+                        if item.status == "pending":
+                            # Not sent: the printer turned busy or refused the file. Back to the pool, so another
+                            # printer of the model can take it; a mapping worked out for this printer goes too.
+                            item.printer_id = None
+                            if mapping_computed_here:
+                                item.ams_mapping = None
+                            await db.commit()
 
                         # SJF starvation guard: mark model-based items that were jumped
                         if sjf_enabled and item.print_time_seconds is not None:
@@ -2112,6 +2134,12 @@ class PrintScheduler:
             await self._power_off_if_needed(db, item)
             return
 
+        # Busy-printer guard (upstream #2598): the idle check treats FINISH as idle, and a printer can still report
+        # FINISH after it took a start, or start something else meanwhile. Read the live state once more before
+        # the upload (which deletes and rewrites the file): a busy printer keeps the item pending for a later tick.
+        if self._printer_busy(item.printer_id):
+            return
+
         # Determine source: archive or library file
         archive = None
         library_file = None
@@ -2322,29 +2350,23 @@ class PrintScheduler:
                 else "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
                 "See server logs for detailed diagnostics."
             )
-            queue_failure.mark_failed(
+            # The file never reached the printer: only this item waits, and the printer gets no job until its
+            # backoff ends, instead of failing this item and then every next one the same way (#3210, #3409).
+            await self._hold_after_refused_upload(
+                db,
                 item,
+                printer,
                 error_msg,
-                "upload",
                 technical=[*upload_log, *([f"{type(upload_error).__name__}: {upload_error}"] if upload_error else [])],
-            )
-            item.dispatching_at = None
-            await db.commit()
-            logger.error(
-                f"Queue item {item.id}: FTP upload failed - printer={printer.name}, model={printer.model}, "
-                f"ip={printer.ip_address}. Check logs above for storage diagnostics and specific error codes."
-            )
-
-            # Send failure notification
-            await notification_service.on_queue_job_failed(
                 job_name=filename.replace(".gcode.3mf", "").replace(".3mf", ""),
-                printer_id=printer.id,
-                printer_name=printer.name,
-                reason="Failed to upload file to printer",
-                db=db,
             )
-            await self._power_off_if_needed(db, item)
             return
+
+        # The printer took a file: a run of refused uploads is over, and so is the reason this item waited for.
+        self._upload_refusals.pop(item.printer_id, None)
+        self._upload_backoff.pop(item.printer_id, None)
+        if item.waiting_reason and UPLOAD_REFUSED_MARK in item.waiting_reason:
+            item.waiting_reason = None
 
         # Parse AMS mapping if stored
         ams_mapping = None
@@ -2472,6 +2494,13 @@ class PrintScheduler:
                 )
             except Exception:
                 pass  # Don't fail if MQTT fails
+        elif self._printer_busy(item.printer_id):
+            # The printer turned busy while the file was uploading, and start_print refused to send the start
+            # (#2598): a deferral, not a failure. The file stays on the card: the printer may be printing it.
+            item.status = "pending"
+            item.started_at = None
+            item.dispatching_at = None
+            await db.commit()
         else:
             # Clean up uploaded file from SD card to prevent phantom prints
             try:
@@ -2505,6 +2534,76 @@ class PrintScheduler:
             )
 
             await self._power_off_if_needed(db, item)
+
+    def _printer_busy(self, printer_id: int) -> bool:
+        """The printer is printing, paused or starting a print now, so it must not be sent a start (#2598)."""
+        state = getattr(printer_manager.get_status(printer_id), "state", None)
+        if state in _ACTIVE_PRINT_STATES:
+            logger.info("Printer %s is busy (state=%s): its queue item stays pending (#2598)", printer_id, state)
+            return True
+        return False
+
+    def printers_refusing_uploads(self) -> set[int]:
+        """Printers still in their backoff after a refused upload (#3210); expired backoffs are dropped."""
+        now = time.monotonic()
+        for printer_id, retry_at in list(self._upload_backoff.items()):
+            if now >= retry_at:
+                del self._upload_backoff[printer_id]
+        return set(self._upload_backoff)
+
+    async def _hold_after_refused_upload(
+        self,
+        db: AsyncSession,
+        item: PrintQueueItem,
+        printer: Printer,
+        error_msg: str,
+        *,
+        technical: list[str],
+        job_name: str,
+    ) -> None:
+        """The upload never reached the printer: this item stays pending with the reason, the printer sits out.
+
+        Only the item being sent is touched, and it is not failed: the printer refuses every file the same way
+        (card full or missing, access code, file service down), so failing it only moved the refusal to the
+        next item (upstream #3210, #3409). The printer waits 5 minutes, doubling with each refusal in a row up
+        to an hour; the first upload that gets through resets it. `dispatch_attempts` is not charged.
+        """
+        refusals = self._upload_refusals.get(printer.id, 0) + 1
+        self._upload_refusals[printer.id] = refusals
+        backoff = min(UPLOAD_REFUSED_BACKOFF_SECONDS * 2 ** (refusals - 1), UPLOAD_REFUSED_BACKOFF_MAX_SECONDS)
+        self._upload_backoff[printer.id] = time.monotonic() + backoff
+        reason = f"{printer.name} did not take the file: {error_msg}. {UPLOAD_REFUSED_MARK}"[:1000]
+        item.waiting_reason = reason
+        item.dispatching_at = None
+        await db.commit()
+        logger.warning(
+            "Queue item %s: upload to %s (printer %s) refused, refusal %d in a row: kept pending, "
+            "the printer gets no job for %ds. %s",
+            item.id,
+            printer.name,
+            printer.id,
+            refusals,
+            backoff,
+            error_msg,
+        )
+        farm_job_events.record(
+            "upload_failed",
+            reason,
+            queue_item_id=item.id,
+            printer_id=printer.id,
+            level="warning",
+            detail={"refusals": refusals, "retry_in_seconds": backoff, "technical": technical},
+        )
+        if refusals == 1:  # one notification per run of refusals, not one per retry
+            try:
+                await notification_service.on_queue_job_waiting(
+                    job_name=job_name,
+                    target_model=item.target_model or printer.model or "",
+                    waiting_reason=reason,
+                    db=db,
+                )
+            except Exception as e:  # the job is safe in the queue either way
+                logger.warning("Waiting notification failed for queue item %s: %s", item.id, e)
 
     @staticmethod
     def _estimated_time(archive: PrintArchive | None, library_file: LibraryFile | None) -> int | None:
