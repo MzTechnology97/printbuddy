@@ -1139,6 +1139,8 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
         "stg_cur_name": get_derived_status_name(state, model),
         # Printable objects count for skip objects feature
         "printable_objects_count": len(state.printable_objects),
+        # fork: Klipper (Moonraker) only: live flow %, pressure advance and smooth time
+        "klipper_tuning": getattr(state, "klipper_tuning", None),
         # Fan speeds (0-100 percentage, None if not available)
         "cooling_fan_speed": state.cooling_fan_speed,
         "big_fan1_speed": state.big_fan1_speed,

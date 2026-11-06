@@ -1136,6 +1136,7 @@ async def get_printer_status(
         mc_print_sub_stage=state.mc_print_sub_stage,
         last_ams_update=state.last_ams_update,
         printable_objects_count=len(state.printable_objects),
+        klipper_tuning=getattr(state, "klipper_tuning", None),
         cooling_fan_speed=state.cooling_fan_speed,
         big_fan1_speed=state.big_fan1_speed,
         big_fan2_speed=state.big_fan2_speed,
@@ -4792,3 +4793,91 @@ async def klipper_console_send(
     if not ok:
         raise HTTPException(500, "Failed to send the command")
     return {"success": True}
+
+
+@router.post("/{printer_id}/klipper/flow")
+async def klipper_flow(
+    printer_id: int,
+    percent: int = Query(..., description="Extrusion multiplier, 50-150%"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flow (M221), live during the print."""
+    set_flow = await _klipper_client(db, printer_id, "set_flow")
+    try:
+        ok = await asyncio.to_thread(set_flow, percent)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not reach the printer's Moonraker") from exc
+    if not ok:
+        raise HTTPException(500, "Failed to set the flow")
+    return {"success": True}
+
+
+@router.post("/{printer_id}/klipper/pressure-advance")
+async def klipper_pressure_advance(
+    printer_id: int,
+    value: float = Query(..., description="Pressure advance, 0-1 s"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pressure advance, live; the config's value comes back at the next Klipper restart."""
+    set_pa = await _klipper_client(db, printer_id, "set_pressure_advance")
+    try:
+        ok = await asyncio.to_thread(set_pa, value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not reach the printer's Moonraker") from exc
+    if not ok:
+        raise HTTPException(500, "Failed to set the pressure advance")
+    return {"success": True}
+
+
+@router.get("/{printer_id}/klipper/bed-mesh")
+async def klipper_bed_mesh(
+    printer_id: int,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
+    db: AsyncSession = Depends(get_db),
+):
+    """The active bed mesh (probed heights in mm) and the saved profiles."""
+    bed_mesh = await _klipper_client(db, printer_id, "bed_mesh")
+    try:
+        return await asyncio.to_thread(bed_mesh)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not read the printer's bed mesh") from exc
+
+
+@router.post("/{printer_id}/klipper/bed-mesh/calibrate")
+async def klipper_bed_mesh_calibrate(
+    printer_id: int,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Home and probe a new mesh (minutes, with the bed heating as it is): never during a print."""
+    calibrate = await _klipper_client(db, printer_id, "calibrate_bed_mesh")
+    state = printer_manager.get_status(printer_id)
+    if state is not None and state.state in ("RUNNING", "PAUSE"):
+        raise HTTPException(409, "The printer is printing: calibrate the mesh when it is idle")
+    try:
+        ok = await asyncio.to_thread(calibrate)
+    except httpx.HTTPError as exc:
+        raise HTTPException(400, "Klipper refused the calibration: see the console") from exc
+    if not ok:
+        raise HTTPException(500, "Failed to start the calibration")
+    return {"success": True}
+
+
+@router.get("/{printer_id}/klipper/versions")
+async def klipper_versions(
+    printer_id: int,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Klipper's and Moonraker's versions (read only: Printbuddy never updates them)."""
+    versions = await _klipper_client(db, printer_id, "versions")
+    try:
+        return await asyncio.to_thread(versions)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not read the printer's versions") from exc

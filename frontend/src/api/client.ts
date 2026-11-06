@@ -458,6 +458,8 @@ export interface PrinterStatus {
   airduct_mode: number;
   // Print speed level (1=silent, 2=standard, 3=sport, 4=ludicrous)
   speed_level: number;
+  // fork: Klipper (Moonraker) only: live flow %, pressure advance and smooth time
+  klipper_tuning?: { flow: number | null; pressure_advance: number | null; smooth_time: number | null } | null;
   // Chamber light on/off
   chamber_light: boolean;
   // Active extruder for dual nozzle (0=right, 1=left)
@@ -3830,6 +3832,24 @@ export const api = {
     request<{ success: boolean; message: string }>(
       `/printers/${printerId}/temperature/chamber?target=${target}`,
       { method: 'POST' }
+    ),
+  klipperSetFlow: (printerId: number, percent: number) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/flow?percent=${percent}`, { method: 'POST' }),
+  klipperSetPressureAdvance: (printerId: number, value: number) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/pressure-advance?value=${value}`, { method: 'POST' }),
+  klipperBedMesh: (printerId: number) =>
+    request<{
+      profile_name?: string | null;
+      mesh_min?: number[] | null;
+      mesh_max?: number[] | null;
+      probed_matrix?: number[][];
+      profiles?: string[];
+    }>(`/printers/${printerId}/klipper/bed-mesh`),
+  klipperCalibrateBedMesh: (printerId: number) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/bed-mesh/calibrate`, { method: 'POST' }),
+  klipperVersions: (printerId: number) =>
+    request<{ klipper: string | null; moonraker: string | null; api: string | null; hostname: string | null }>(
+      `/printers/${printerId}/klipper/versions`
     ),
   klipperMacros: (printerId: number) =>
     request<{ macros: string[] }>(`/printers/${printerId}/klipper/macros`),
