@@ -14,6 +14,7 @@ from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from backend.app.core.auth import (
     check_permission,
     get_api_key,
     require_permission_if_auth_enabled,
+    security,
 )
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
@@ -73,6 +75,22 @@ async def _reader(
 
 
 _read = Depends(_reader)
+
+
+_projects_create_check = require_permission_if_auth_enabled(Permission.PROJECTS_CREATE)
+_queue_create_check = require_permission_if_auth_enabled(Permission.QUEUE_CREATE)
+
+
+async def _cover_syncer(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> None:
+    """Seller Hub syncs covers with its API key, which needs ``can_queue``; people still need PROJECTS_CREATE.
+
+    PROJECTS_CREATE is admin-only for keys, and mapping it to a scope would also open product creation.
+    """
+    check = _queue_create_check if await caller_is_api_key(credentials, x_api_key) else _projects_create_check
+    await check(credentials, x_api_key)
 
 
 def _clean(value: str, limit: int) -> str:
@@ -1126,7 +1144,7 @@ class CoverSyncIn(BaseModel):
     items: list[CoverIn] = Field(max_length=10_000)
 
 
-@router.post("/products/covers/sync", dependencies=[_create])
+@router.post("/products/covers/sync", dependencies=[Depends(_cover_syncer)])
 async def sync_covers(body: CoverSyncIn, db: AsyncSession = Depends(get_db)) -> dict:
     """Follow Seller Hub's listing photos: ``items`` maps SKUs/ASINs to their Amazon image.
 
