@@ -62,7 +62,7 @@ from backend.app.services.printer_manager import (
     supports_drying,
 )
 from backend.app.services.printer_providers.factory import create_printer_client, normalize_provider
-from backend.app.services.printer_providers.moonraker import create_moonraker_client
+from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient, create_moonraker_client
 from backend.app.utils.filament_ids import effective_bambu_material, generic_bambu_filament_id
 from backend.app.utils.http import build_content_disposition
 
@@ -3515,6 +3515,30 @@ async def debug_simulate_print_complete(
 # =============================================================================
 
 
+def _klipper_conflict(client, action: str) -> str | None:
+    return client.print_control_conflict(action) if isinstance(client, MoonrakerPrinterClient) else None
+
+
+def _run_print_control(client, action: str) -> None:
+    """Pause, resume or stop; a state that rules it out, or the printer refusing it, is a 409 for the UI.
+
+    fork: ported from upstream's 50ff85d45. A Klipper printer's state (live from Moonraker's websocket)
+    rules the control out before anything is sent.
+    """
+    if conflict := _klipper_conflict(client, action):
+        raise HTTPException(409, conflict)
+    try:
+        success = getattr(client, f"{action}_print")()
+    except httpx.HTTPStatusError as exc:
+        state = getattr(getattr(client, "state", None), "state", None) or "unknown"
+        if 400 <= exc.response.status_code < 500:
+            raise HTTPException(409, f"The printer refused to {action} the print (state: {state})") from exc
+        raise HTTPException(502, f"The printer returned an error for {action} (state: {state})") from exc
+    if not success:
+        conflict = _klipper_conflict(client, action)  # the state changed between the check and the command
+        raise HTTPException(409 if conflict else 500, conflict or f"Failed to {action} print")
+
+
 @router.post("/{printer_id}/print/stop")
 async def stop_print(
     printer_id: int,
@@ -3531,9 +3555,7 @@ async def stop_print(
     if not client:
         raise HTTPException(400, "Printer not connected")
 
-    success = client.stop_print()
-    if not success:
-        raise HTTPException(500, "Failed to stop print")
+    _run_print_control(client, "stop")
 
     # Mark this printer as user-stopped so on_print_complete reclassifies
     # the resulting "failed"/"aborted" MQTT status as "cancelled" — otherwise
@@ -3601,9 +3623,7 @@ async def pause_print(
     if not client:
         raise HTTPException(400, "Printer not connected")
 
-    success = client.pause_print()
-    if not success:
-        raise HTTPException(500, "Failed to pause print")
+    _run_print_control(client, "pause")
 
     return {"success": True, "message": "Print pause command sent"}
 
@@ -3624,9 +3644,7 @@ async def resume_print(
     if not client:
         raise HTTPException(400, "Printer not connected")
 
-    success = client.resume_print()
-    if not success:
-        raise HTTPException(500, "Failed to resume print")
+    _run_print_control(client, "resume")
 
     return {"success": True, "message": "Print resume command sent"}
 

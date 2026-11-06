@@ -23,6 +23,14 @@ _WS_STALE_SECONDS = 10.0  # no message for this long: the cache is not trusted, 
 _WS_IDLE_SECONDS = 5.0  # nothing received for this long: ask server.info to keep the link checked
 _WS_MAX_RETRY_SECONDS = 60.0
 
+# fork: the states each print control applies in, and why it can't otherwise (the UI shows it with a 409)
+_PRINT_CONTROL_STATES = {"pause": {"RUNNING"}, "resume": {"PAUSE"}, "stop": {"RUNNING", "PAUSE"}}
+_PRINT_CONTROL_CONFLICT = {
+    "pause": "Cannot pause: the printer is {state}, not printing",
+    "resume": "Cannot resume: the printer is {state}, not paused",
+    "stop": "Cannot cancel: the printer is {state}, with no print running or paused",
+}
+
 
 @dataclass
 class MoonrakerPrinterState:
@@ -2119,17 +2127,51 @@ class MoonrakerPrinterClient:
             raise
         return True
 
-    def stop_print(self) -> bool:
-        self._post("printer/print/cancel", {})
+    # --- fork: print controls guarded by the live state (the websocket's, #124); ported from upstream's
+    # 868b02fb9 and 50ff85d45. Emergency stop and firmware restart stay unguarded: they must always go through.
+
+    def print_control_conflict(self, action: str) -> str | None:
+        """Why the printer's state rules out ``action`` (pause, resume, stop); None before the first status."""
+        if not self._has_status_sample or self.state.state in _PRINT_CONTROL_STATES[action]:
+            return None
+        return _PRINT_CONTROL_CONFLICT[action].format(state=self.state.state)
+
+    def _print_control_done(self, action: str) -> bool:
+        """The printer is already where ``action`` leads: paused, printing again, or with no print to cancel."""
+        state = self.state.state
+        if action == "stop":
+            return state not in _PRINT_CONTROL_STATES["stop"]
+        return state == {"pause": "PAUSE", "resume": "RUNNING"}[action]
+
+    def _print_control(self, action: str, path: str) -> bool:
+        if self.print_control_conflict(action):
+            # Nothing is sent. Already done (an idle printer has nothing to cancel) is a success, so the queue's
+            # stop and the plate check keep working; otherwise False.
+            return self._print_control_done(action)
+        try:
+            self._post(path, {})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            # A 400 can be a race (paused from the printer's screen meanwhile): read the state again before failing.
+            try:
+                with self._status_lock:
+                    self.request_status_update()
+            except Exception as refresh_exc:
+                logger.warning("Moonraker status refresh after a refused %s failed: %s", action, refresh_exc)
+                raise exc from refresh_exc
+            if not self._print_control_done(action):
+                raise
         return True
+
+    def stop_print(self) -> bool:
+        return self._print_control("stop", "printer/print/cancel")
 
     def pause_print(self) -> bool:
-        self._post("printer/print/pause", {})
-        return True
+        return self._print_control("pause", "printer/print/pause")
 
     def resume_print(self) -> bool:
-        self._post("printer/print/resume", {})
-        return True
+        return self._print_control("resume", "printer/print/resume")
 
 
 def create_moonraker_client(printer: Any, **callbacks: Any) -> MoonrakerPrinterClient:  # noqa: ARG001

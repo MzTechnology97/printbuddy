@@ -7,6 +7,7 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import unquote
 
+import httpx
 import pytest
 from httpx import AsyncClient
 from PIL import Image
@@ -3912,3 +3913,121 @@ async def test_klipper_control_posts_need_their_permissions_with_auth_enabled(
         assert (await posts["console"](bearer(console_user))).status_code == 200
 
     assert client.sent == ["M141 S40", "START_PRINT", "M115"]
+
+
+class TestPrintControlConflicts:
+    """fork: print controls ruled out by the printer's state, or refused by it, are a 409 (upstream's 50ff85d45)."""
+
+    @staticmethod
+    def _klipper(state: str, posted: list, error: Exception | None = None):
+        from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient
+
+        client = MoonrakerPrinterClient("http://klipper.local:7125")
+        client._has_status_sample = True
+        client.state.state = state
+
+        def post(path, payload):
+            posted.append(path)
+            if error is not None:
+                raise error
+            return {}
+
+        client._post = post
+        client.request_status_update = lambda: True  # the state the test set stays the printer's state
+        return client
+
+    @staticmethod
+    def _http_error(status: int) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", "http://klipper.local:7125/printer/print/x")
+        return httpx.HTTPStatusError(str(status), request=request, response=httpx.Response(status, request=request))
+
+    async def _post(self, async_client, printer_factory, client, action):
+        printer = await printer_factory(name="Klipper")
+        with patch("backend.app.api.routes.printers.printer_manager") as mock_pm:
+            mock_pm.get_client.return_value = client
+            return await async_client.post(f"/api/v1/printers/{printer.id}/print/{action}")
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("action", "state"),
+        [
+            ("pause", "IDLE"),
+            ("pause", "PAUSE"),
+            ("pause", "FINISH"),
+            ("resume", "RUNNING"),
+            ("resume", "IDLE"),
+            ("stop", "IDLE"),
+            ("stop", "FINISH"),
+            ("stop", "FAILED"),
+        ],
+    )
+    async def test_klipper_state_rules_the_control_out_before_sending(
+        self, async_client: AsyncClient, printer_factory, action, state
+    ):
+        posted = []
+        response = await self._post(async_client, printer_factory, self._klipper(state, posted), action)
+        assert response.status_code == 409
+        assert state in response.json()["detail"]
+        assert posted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("action", "state", "path"),
+        [
+            ("pause", "RUNNING", "printer/print/pause"),
+            ("resume", "PAUSE", "printer/print/resume"),
+            ("stop", "RUNNING", "printer/print/cancel"),
+            ("stop", "PAUSE", "printer/print/cancel"),
+        ],
+    )
+    async def test_klipper_control_in_its_state_is_sent(
+        self, async_client: AsyncClient, printer_factory, action, state, path
+    ):
+        posted = []
+        response = await self._post(async_client, printer_factory, self._klipper(state, posted), action)
+        assert response.status_code == 200
+        assert posted == [path]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(("action", "state"), [("pause", "RUNNING"), ("resume", "PAUSE"), ("stop", "RUNNING")])
+    async def test_klipper_refusal_is_409_and_a_server_error_502(
+        self, async_client: AsyncClient, printer_factory, action, state
+    ):
+        refused = self._klipper(state, [], error=self._http_error(400))
+        response = await self._post(async_client, printer_factory, refused, action)
+        assert response.status_code == 409
+        assert state in response.json()["detail"]
+
+        broken = self._klipper(state, [], error=self._http_error(500))
+        assert (await self._post(async_client, printer_factory, broken, action)).status_code == 502
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_klipper_emergency_stop_is_not_guarded_by_the_print_state(
+        self, async_client: AsyncClient, printer_factory
+    ):
+        from backend.app.services.printer_manager import printer_manager
+
+        printer = await printer_factory(name="K1", provider="klipper", api_url="http://k1.local:7125")
+        posted = []
+        with patch.dict(printer_manager._clients, {printer.id: self._klipper("IDLE", posted)}):
+            stop = await async_client.post(f"/api/v1/printers/{printer.id}/klipper/emergency-stop")
+        assert stop.status_code == 200
+        assert posted == ["printer/emergency_stop"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize("action", ["pause", "resume", "stop"])
+    async def test_other_providers_keep_their_answers(self, async_client: AsyncClient, printer_factory, action):
+        failing = MagicMock(**{f"{action}_print.return_value": False})
+        failing.state.state = "IDLE"
+        assert (await self._post(async_client, printer_factory, failing, action)).status_code == 500
+
+        rejecting = MagicMock(**{f"{action}_print.side_effect": self._http_error(400)})
+        rejecting.state.state = "RUNNING"
+        response = await self._post(async_client, printer_factory, rejecting, action)
+        assert response.status_code == 409
+        assert "RUNNING" in response.json()["detail"]
