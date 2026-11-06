@@ -350,13 +350,32 @@ def extract_nozzle_mapping_from_3mf(zf: zipfile.ZipFile) -> dict[int, int] | Non
             nozzle_counts = [n.partition("#")[2] for n in stats_str.split("|")]
             active_extruders.append(1 if any(c not in ("0", "") for c in nozzle_counts) else 0)
 
-        if sum(active_extruders) == 1:
+        # Parse slice_info once: needed by both the single-active shortcut
+        # (to verify the slice is actually single-group, #1825) and Priority 1.
+        si_root: ET.Element | None = None
+        distinct_group_ids: set[int] = set()
+        if "Metadata/slice_info.config" in zf.namelist():
+            si_content = zf.read("Metadata/slice_info.config").decode()
+            si_root = ET.fromstring(si_content)
+            for filament_elem in si_root.findall(".//filament"):
+                gid = filament_elem.get("group_id")
+                if gid is not None:
+                    try:
+                        distinct_group_ids.add(int(gid))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Single-active shortcut: only safe when the slice actually uses one
+        # group. extruder_nozzle_stats can under-report a second installed
+        # nozzle when its volume-type differs from the profile's enumerated
+        # types (HT-AMS / High-Flow asymmetry on H2D, #1825); without this
+        # guard the shortcut collapses a real multi-extruder slice onto one
+        # nozzle and the group_id mapping below is skipped.
+        if sum(active_extruders) == 1 and len(distinct_group_ids) <= 1:
             nozzle_mapping: dict[int, int] = {}
             active_idx = active_extruders.index(1)
             target_extruder = int(physical_extruder_map[active_idx])
-            if "Metadata/slice_info.config" in zf.namelist():
-                si_content = zf.read("Metadata/slice_info.config").decode()
-                si_root = ET.fromstring(si_content)
+            if si_root is not None:
                 for filament_elem in si_root.findall(".//filament"):
                     try:
                         nozzle_mapping[int(filament_elem.get("id"))] = target_extruder
@@ -367,9 +386,7 @@ def extract_nozzle_mapping_from_3mf(zf: zipfile.ZipFile) -> dict[int, int] | Non
         # Priority 1: Use group_id from slice_info filament elements.
         # This reflects the actual slicer assignment (respects "Auto For Flush").
         nozzle_mapping: dict[int, int] = {}
-        if "Metadata/slice_info.config" in zf.namelist():
-            si_content = zf.read("Metadata/slice_info.config").decode()
-            si_root = ET.fromstring(si_content)
+        if si_root is not None:
             for filament_elem in si_root.findall(".//filament"):
                 group_id_str = filament_elem.get("group_id")
                 filament_id_str = filament_elem.get("id")
