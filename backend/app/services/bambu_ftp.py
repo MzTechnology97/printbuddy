@@ -7,7 +7,9 @@ import socket
 import ssl
 import threading
 import time
+import weakref
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from ftplib import FTP, FTP_TLS  # nosec B402
 from io import BytesIO
 from pathlib import Path
@@ -815,6 +817,50 @@ def clear_3mf_cache(printer_id: int | None = None, delete_files: bool = True) ->
         _threemf_path_cache.pop(key, None)
 
 
+# One FTPS transfer at a time per printer (upstream #2957/#2529). A
+# P1S/A1 serving a print off its SD card drops the slicer and MQTT when two
+# transfers overlap, and two STORs to one path corrupt the file. Keyed per event
+# loop because an asyncio.Lock binds to the loop that first awaits it.
+_transfer_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+# Downloads wait this long for the printer, then go anyway: a print losing its
+# 3MF archive to queueing is worse than the contention. Uploads always wait.
+_DOWNLOAD_GATE_WAIT_SECONDS = 30.0
+
+# How long a timed-out transfer may take to let go of the printer's socket
+# before the lock passes on. An upload's unwind includes the 226 wait and the
+# partial-file delete.
+_TRANSFER_UNWIND_SECONDS = 60.0
+
+
+@asynccontextmanager
+async def _printer_transfer(ip_address: str, wait: float | None = None):
+    """Hold this printer's transfer lock for the block; ``wait`` makes it a soft gate.
+
+    Not re-entrant: never call another transfer helper while holding it.
+    """
+    lock = _transfer_locks.setdefault(asyncio.get_running_loop(), {}).setdefault(ip_address, asyncio.Lock())
+    held = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=wait)
+        held = True
+    except TimeoutError:
+        logger.warning("Printer %s still busy with another FTP transfer after %ss, going ahead", ip_address, wait)
+    try:
+        yield
+    finally:
+        if held:
+            lock.release()
+
+
+def _retrieve_result(fut: asyncio.Future) -> None:
+    """Read an abandoned worker's outcome so asyncio does not log it as never retrieved."""
+    if not fut.cancelled():
+        fut.exception()
+
+
 async def download_file_async(
     ip_address: str,
     access_code: str,
@@ -910,23 +956,24 @@ async def download_file_async(
             )
             return False
 
-    # Check if we have a cached mode for this printer
-    cached_mode = BambuFTPClient._mode_cache.get(ip_address)
+    # The gate spans the prot_c fallback: both are attempts at one transfer.
+    async with _printer_transfer(ip_address, _DOWNLOAD_GATE_WAIT_SECONDS):
+        cached_mode = BambuFTPClient._mode_cache.get(ip_address)
 
-    if cached_mode:
-        force_prot_c = cached_mode == "prot_c"
-        return await _run(force_prot_c)
+        if cached_mode:
+            force_prot_c = cached_mode == "prot_c"
+            return await _run(force_prot_c)
 
-    # No cached mode - try prot_p first
-    if await _run(False):
-        return True
+        # No cached mode - try prot_p first
+        if await _run(False):
+            return True
 
-    # Download failed - for A1 models, try prot_c fallback
-    if is_a1:
-        logger.info("FTP download failed with prot_p for A1 model, trying prot_c fallback...")
-        return await _run(True)
+        # Download failed - for A1 models, try prot_c fallback
+        if is_a1:
+            logger.info("FTP download failed with prot_p for A1 model, trying prot_c fallback...")
+            return await _run(True)
 
-    return False
+        return False
 
 
 async def download_file_try_paths_async(
@@ -936,16 +983,21 @@ async def download_file_try_paths_async(
     local_path: Path,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 90.0,
 ) -> bool:
     """Try downloading a file from multiple paths using a single connection.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall cap, including the wait for a free executor thread (#2572)
     """
     loop = asyncio.get_event_loop()
+    abandoned = threading.Event()
 
     def _download():
+        if abandoned.is_set():
+            return False
         client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
         if not client.connect():
             return False
@@ -955,6 +1007,8 @@ async def download_file_try_paths_async(
             # this function's whole purpose is to walk a list of candidates
             # over one connection. Only a real transport error should bubble.
             for remote_path in remote_paths:
+                if abandoned.is_set():
+                    return False
                 try:
                     # False is a failed transfer, not a missing file: the
                     # other paths would fail the same way (A1 data channel).
@@ -965,7 +1019,18 @@ async def download_file_try_paths_async(
         finally:
             client.disconnect()
 
-    return await loop.run_in_executor(None, _download)
+    async with _printer_transfer(ip_address, _DOWNLOAD_GATE_WAIT_SECONDS):
+        worker = loop.run_in_executor(None, _download)
+        worker.add_done_callback(_retrieve_result)
+        try:
+            return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+        except TimeoutError:
+            logger.warning("FTP download_try_paths exceeded its %ss cap for %s", timeout, ip_address)
+            abandoned.set()
+            # The thread cannot be cancelled: keep the printer until it lets go
+            # of the socket (bounded) so the next transfer does not overlap it.
+            await asyncio.wait({worker}, timeout=_TRANSFER_UNWIND_SECONDS)
+            return False
 
 
 async def upload_file_async(
@@ -996,8 +1061,18 @@ async def upload_file_async(
     loop = asyncio.get_event_loop()
     is_a1 = printer_model in BambuFTPClient.A1_MODELS if printer_model else False
 
+    def _progress(abandoned: threading.Event, sent: int, total: int) -> None:
+        # Raising here is upload_file's stop path: it ends the send loop and
+        # deletes the partial file from the printer.
+        if abandoned.is_set():
+            raise TimeoutError(f"upload of {remote_path} exceeded its {timeout}s timeout")
+        if progress_callback:
+            progress_callback(sent, total)
+
     # fork: the threads run in this context, so the queue history sees what they log (services.queue_failure)
-    def _upload(force_prot_c: bool = False) -> bool:
+    def _upload(force_prot_c: bool, abandoned: threading.Event) -> bool:
+        if abandoned.is_set():
+            return False
         mode_str = "prot_c" if force_prot_c else "prot_p"
         logger.info(
             f"FTP connecting to {ip_address} for upload (model={printer_model}, "
@@ -1009,7 +1084,7 @@ async def upload_file_async(
         if client.connect():
             logger.info("FTP connected to %s", ip_address)
             try:
-                result = client.upload_file(local_path, remote_path, progress_callback)
+                result = client.upload_file(local_path, remote_path, lambda n, total: _progress(abandoned, n, total))
                 if result:
                     # Cache the working mode
                     BambuFTPClient.cache_mode(ip_address, mode_str)
@@ -1021,34 +1096,37 @@ async def upload_file_async(
             raise PrinterFTPBusyError(PrinterFTPBusyError.MESSAGE)
         return False
 
+    async def _attempt(force_prot_c: bool) -> bool:
+        abandoned = threading.Event()
+        worker = loop.run_in_executor(None, contextvars.copy_context().run, _upload, force_prot_c, abandoned)
+        worker.add_done_callback(_retrieve_result)
+        try:
+            return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+        except TimeoutError:
+            # wait_for cannot stop the thread; signal it and wait (bounded) so
+            # the next upload or with_ftp_retry attempt never streams beside it.
+            abandoned.set()
+            await asyncio.wait({worker}, timeout=_TRANSFER_UNWIND_SECONDS)
+            raise
+
     try:
-        # Check if we have a cached mode for this printer
-        cached_mode = BambuFTPClient._mode_cache.get(ip_address)
+        async with _printer_transfer(ip_address):
+            # Check if we have a cached mode for this printer
+            cached_mode = BambuFTPClient._mode_cache.get(ip_address)
 
-        if cached_mode:
-            # Use cached mode
-            force_prot_c = cached_mode == "prot_c"
-            return await asyncio.wait_for(
-                loop.run_in_executor(None, contextvars.copy_context().run, _upload, force_prot_c), timeout=timeout
-            )
+            if cached_mode:
+                return await _attempt(cached_mode == "prot_c")
 
-        # No cached mode - try prot_p first
-        result = await asyncio.wait_for(
-            loop.run_in_executor(None, contextvars.copy_context().run, _upload, False), timeout=timeout
-        )
+            # No cached mode - try prot_p first
+            if await _attempt(False):
+                return True
 
-        if result:
-            return True
+            # Upload failed - for A1 models, try prot_c fallback
+            if is_a1:
+                logger.info("FTP upload failed with prot_p for A1 model, trying prot_c fallback...")
+                return await _attempt(True)
 
-        # Upload failed - for A1 models, try prot_c fallback
-        if is_a1:
-            logger.info("FTP upload failed with prot_p for A1 model, trying prot_c fallback...")
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, contextvars.copy_context().run, _upload, True), timeout=timeout
-            )
-            return result
-
-        return False
+            return False
 
     except TimeoutError:
         logger.warning("FTP upload timed out after %ss for %s", timeout, remote_path)
@@ -1093,12 +1171,14 @@ async def delete_file_async(
     remote_path: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 60.0,
 ) -> bool:
     """Async wrapper for deleting a file.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall cap, including the wait for a free executor thread (#2572)
     """
     loop = asyncio.get_event_loop()
 
@@ -1111,7 +1191,11 @@ async def delete_file_async(
                 client.disconnect()
         return False
 
-    return await loop.run_in_executor(None, _delete)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _delete), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP delete_file timed out after %ss for %s", timeout, remote_path)
+        return False
 
 
 async def download_file_bytes_async(
@@ -1120,12 +1204,18 @@ async def download_file_bytes_async(
     remote_path: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 900.0,
 ) -> bytes | None:
     """Async wrapper for downloading file as bytes.
+
+    Outside the transfer lock, as upstream: file-browser previews must not queue
+    behind a long upload.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall cap (#2572); generous because timelapse videos run to
+            tens of MB and the socket timeout already catches a dead link
     """
     loop = asyncio.get_event_loop()
 
@@ -1138,7 +1228,11 @@ async def download_file_bytes_async(
                 client.disconnect()
         return None
 
-    return await loop.run_in_executor(None, _download)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP download_file_bytes timed out after %ss for %s", timeout, remote_path)
+        return None
 
 
 async def get_storage_info_async(
@@ -1146,12 +1240,14 @@ async def get_storage_info_async(
     access_code: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 60.0,
 ) -> dict | None:
     """Async wrapper for getting storage info.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall cap, including the wait for a free executor thread (#2572)
     """
     loop = asyncio.get_event_loop()
 
@@ -1164,7 +1260,11 @@ async def get_storage_info_async(
                 client.disconnect()
         return None
 
-    return await loop.run_in_executor(None, _get_storage)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _get_storage), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP get_storage_info timed out after %ss for %s", timeout, ip_address)
+        return None
 
 
 async def get_ftp_retry_settings() -> tuple[bool, int, float, float]:

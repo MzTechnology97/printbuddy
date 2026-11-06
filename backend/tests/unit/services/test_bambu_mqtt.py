@@ -5,9 +5,17 @@ These tests focus on timelapse tracking during prints.
 """
 
 import json
+import threading
 import time
 
 import pytest
+
+
+def _join_retire_threads():
+    """The old paho client is torn down on its own thread (#3068); wait for it."""
+    for t in threading.enumerate():
+        if t.name.startswith("mqtt-retire-"):
+            t.join(timeout=2)
 
 
 class TestTimelapseTracking:
@@ -4226,8 +4234,9 @@ class TestStaleReconnect:
         mqtt_client._disconnection_event = None
 
         mqtt_client.disconnect(timeout=0.01)
+        _join_retire_threads()
 
-        original.disconnect.assert_called_once()
+        original.disconnect.assert_called()
         sock.close.assert_called_once()
         original.loop_stop.assert_called_once()
         assert mqtt_client._client is None
@@ -4752,6 +4761,7 @@ class TestForceReconnectRouting:
             mqtt_client.force_reconnect_stale_session("test")
 
         asyncio.run(_trigger())
+        _join_retire_threads()
         original.disconnect.assert_called()
         original.loop_stop.assert_called()
         # connect() stub didn't repopulate _client, so it's None — the contract
@@ -4795,6 +4805,7 @@ class TestHardResetClientDirect:
         loop_stop (network thread exits, taking its QoS 1 queue with it)."""
         original = mqtt_client._client
         mqtt_client._hard_reset_client()
+        _join_retire_threads()
         original.disconnect.assert_called()
         original.loop_stop.assert_called()
 
@@ -4813,9 +4824,45 @@ class TestHardResetClientDirect:
         original.disconnect.side_effect = RuntimeError("boom")
         # No exception escapes the call (test would fail if it did).
         mqtt_client._hard_reset_client()
+        _join_retire_threads()
         # loop_stop is still attempted after the disconnect failure.
         original.loop_stop.assert_called()
         assert mqtt_client._client is None
+
+    def test_wedged_network_thread_does_not_block_caller(self, mqtt_client):
+        """#3068: loop_stop() joins paho's network thread with no timeout. A
+        printer that answers TCP and trickles its TLS handshake keeps that join
+        open indefinitely, and the hard reset runs on the event loop."""
+        original = mqtt_client._client
+        release = threading.Event()
+        original.loop_stop.side_effect = lambda: release.wait(10)
+        try:
+            started = time.monotonic()
+            mqtt_client._hard_reset_client()
+            assert time.monotonic() - started < 1.0
+            # Callbacks are detached inline, so a zombie that finishes its
+            # handshake later cannot report itself connected.
+            assert original.on_connect is None
+            assert original.on_message is None
+        finally:
+            release.set()
+            _join_retire_threads()
+
+    def test_wedged_network_thread_does_not_block_disconnect(self, mqtt_client):
+        """disconnect() (printer edited/deleted/disconnected by hand) must not
+        join a wedged network thread either."""
+        original = mqtt_client._client
+        release = threading.Event()
+        original.loop_stop.side_effect = lambda: release.wait(10)
+        try:
+            started = time.monotonic()
+            mqtt_client.disconnect(timeout=0.01)
+            assert time.monotonic() - started < 1.0
+            assert mqtt_client._client is None
+            assert mqtt_client.state.connected is False
+        finally:
+            release.set()
+            _join_retire_threads()
 
 
 class TestStartPrintRecordsDispatchedPlate:
