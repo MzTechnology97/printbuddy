@@ -314,7 +314,8 @@ async def _commit(db: AsyncSession, jobs: list[FarmPrintJob]) -> None:
             hint = "Sembra: " + joiner.join(f"{p['component_code']} {p['name']} ×{p['pieces']}" for p in job.proposal)
         else:
             hint = "Nessuna proposta: scegli prodotto e pezzi in Cosa stampare."
-        detail = f"{printer or 'Stampante'}: {job.outside_name} stampato fuori coda. {hint}"
+        where = "dalla coda come stampa normale" if await _from_plain_queue(db, job.source) else "fuori coda"
+        detail = f"{printer or 'Stampante'}: {job.outside_name} stampato {where}. {hint}"
         notify.notify(
             notify.BATCH_TO_ASSIGN,
             job.source,
@@ -325,18 +326,32 @@ async def _commit(db: AsyncSession, jobs: list[FarmPrintJob]) -> None:
         )
 
 
+async def _from_plain_queue(db: AsyncSession, source: str | None) -> bool:
+    """Whether an archive's print was sent from the queue (without a farm job): the notice says so."""
+    kind, _, raw = (source or "").partition(":")
+    if kind != "archive" or not raw.isdigit():
+        return False
+    return bool(await db.scalar(select(PrintQueueItem.id).where(PrintQueueItem.archive_id == int(raw)).limit(1)))
+
+
 async def _seen(db: AsyncSession, source: str) -> bool:
     return bool(await db.scalar(select(FarmPrintJob.id).where(FarmPrintJob.source == source).limit(1)))
 
 
 async def scan_archives(db: AsyncSession) -> int:
-    """Completed archives no farm job printed, since the first scan: their jobs. Returns how many prints."""
+    """Completed archives no farm job printed, since the first scan: their jobs. Returns how many prints.
+
+    Prints from the queue sent as plain prints (from the library, a reprint) are among them: recognised, they
+    are batches at once; else to assign, as those outside the queue.
+    """
     since = await _since(db)
     queue_archives = (
         select(PrintQueueItem.archive_id)
         .join(FarmPrintJob, FarmPrintJob.queue_item_id == PrintQueueItem.id)
         .where(PrintQueueItem.archive_id.isnot(None))
     )
+    # An Accoda job whose queue item was deleted keeps its archive (``outcome``): never counted a second time
+    kept_archives = select(FarmPrintJob.archive_id).where(FarmPrintJob.archive_id.isnot(None))
     rows = await db.execute(
         select(PrintArchive)
         .where(
@@ -344,6 +359,7 @@ async def scan_archives(db: AsyncSession) -> int:
             PrintArchive.completed_at >= since,
             PrintArchive.deleted_at.is_(None),
             PrintArchive.id.not_in(queue_archives),
+            PrintArchive.id.not_in(kept_archives),
         )
         .order_by(PrintArchive.completed_at)
     )
