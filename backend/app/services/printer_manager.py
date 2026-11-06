@@ -490,6 +490,8 @@ class PrinterManager:
         else:
             # HTTP providers connect with blocking requests; keep them off the event loop.
             await asyncio.to_thread(client.connect)
+            if callable(getattr(client, "start_websocket", None)):
+                client.start_websocket()  # fork: Moonraker pushes its status instead of being polled over HTTP
         self._clients[printer_id] = client
         self._models[printer_id] = printer.model  # Cache model for feature detection
         self._printer_info[printer_id] = PrinterInfo(printer.name, printer.serial_number, provider)
