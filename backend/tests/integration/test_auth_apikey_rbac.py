@@ -222,6 +222,13 @@ class TestApiKeyScopeAllowlist:
             ("delete", "/api/v1/farm/jobs/1"),
             ("delete", "/api/v1/queue/1"),
             ("get", "/api/v1/printers/"),
+            # Seller Hub's calls
+            ("get", "/api/v1/farm/products"),
+            ("get", "/api/v1/farm/components"),
+            ("get", "/api/v1/farm/components/C-0001/image"),
+            ("get", "/api/v1/farm/jobs?state=completed"),
+            ("get", "/api/v1/farm/plan"),
+            ("post", "/api/v1/farm/products/covers/sync"),
         ],
     )
     async def test_key_without_scopes_is_refused(self, async_client: AsyncClient, db_session, method, path):
@@ -240,6 +247,15 @@ class TestApiKeyScopeAllowlist:
             ({"can_queue": True}, "post", "/api/v1/farm/jobs", True),
             ({"can_queue": True}, "delete", "/api/v1/farm/jobs/999999", True),
             ({"can_read_status": True}, "get", "/api/v1/farm/jobs", True),
+            # Seller Hub: reads with can_read_status, writes (covers, MCP jobs) with can_queue
+            ({"can_read_status": True}, "get", "/api/v1/farm/products", True),
+            ({"can_read_status": True}, "get", "/api/v1/farm/components", True),
+            ({"can_read_status": True}, "get", "/api/v1/farm/components/C-0001/image", True),
+            ({"can_read_status": True}, "get", "/api/v1/farm/jobs?state=completed&since=2026-01-01", True),
+            ({"can_read_status": True}, "get", "/api/v1/farm/plan", True),
+            ({"can_read_status": True}, "post", "/api/v1/farm/products/covers/sync", False),
+            ({"can_queue": True}, "post", "/api/v1/farm/products/covers/sync", True),
+            ({"can_queue": True}, "post", "/api/v1/farm/products", False),  # product creation stays admin-only
         ],
     )
     async def test_scope_grants_only_its_routes(
