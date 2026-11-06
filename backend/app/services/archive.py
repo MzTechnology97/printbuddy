@@ -16,6 +16,7 @@ from backend.app.core.config import settings
 from backend.app.models.archive import PrintArchive
 from backend.app.models.filament import Filament
 from backend.app.models.printer import Printer
+from backend.app.utils.safe_path import PathTraversalError, safe_join_under
 
 logger = logging.getLogger(__name__)
 
@@ -1452,8 +1453,14 @@ class ArchiveService:
         archive_dir = file_path.parent
 
         # Save timelapse - use thread pool to avoid blocking event loop
-        # (timelapse files can be 100MB+, sync write blocks for seconds)
-        timelapse_file = archive_dir / filename
+        # (timelapse files can be 100MB+, sync write blocks for seconds).
+        # ``filename`` comes from the printer's FTP listing or a query param: keep it in the archive dir.
+        try:
+            safe_join_under(archive_dir, filename, http=False)
+        except PathTraversalError:
+            logger.warning("Refusing timelapse with unsafe filename %r for archive %s", filename, archive_id)
+            return False
+        timelapse_file = archive_dir / filename  # unresolved: relative_to(base_dir) below needs the same form
         await asyncio.to_thread(timelapse_file.write_bytes, timelapse_data)
 
         # Update archive record

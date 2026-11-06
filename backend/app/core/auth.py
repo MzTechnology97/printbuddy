@@ -24,6 +24,76 @@ from backend.app.models.user import User
 
 logger = logging.getLogger(__name__)
 
+# API keys are allowlist-based (ported from Bambuddy 0.2.4.5, GHSA-r2qv-8222-hqg3):
+# a key may only use a permission listed here, and only when the named scope flag
+# is set on the key. Anything unmapped is admin-only. Library and inventory writes
+# use can_queue (upstream split them into new flags backfilled from can_queue).
+_APIKEY_SCOPE_BY_PERMISSION: dict[str, str] = {
+    **{
+        p.value: "can_read_status"
+        for p in (
+            Permission.PRINTERS_READ,
+            Permission.ARCHIVES_READ,
+            Permission.QUEUE_READ,
+            Permission.LIBRARY_READ,
+            Permission.PROJECTS_READ,
+            Permission.FILAMENTS_READ,
+            Permission.INVENTORY_READ,
+            Permission.INVENTORY_VIEW_ASSIGNMENTS,
+            Permission.INVENTORY_FORECAST_READ,
+            Permission.SMART_PLUGS_READ,
+            Permission.CAMERA_VIEW,
+            Permission.MAINTENANCE_READ,
+            Permission.KPROFILES_READ,
+            Permission.NOTIFICATIONS_READ,
+            Permission.NOTIFICATION_TEMPLATES_READ,
+            Permission.EXTERNAL_LINKS_READ,
+            Permission.FIRMWARE_READ,
+            Permission.AMS_HISTORY_READ,
+            Permission.STATS_READ,
+            Permission.STATS_FILTER_BY_USER,
+            Permission.SYSTEM_READ,
+            Permission.SETTINGS_READ,  # SpoolBuddy kiosk reads the UI language
+            Permission.MAKERWORLD_VIEW,
+            Permission.WEBSOCKET_CONNECT,
+        )
+    },
+    **{
+        p.value: "can_queue"
+        for p in (
+            Permission.QUEUE_CREATE,
+            Permission.QUEUE_UPDATE_OWN,
+            Permission.QUEUE_UPDATE_ALL,
+            Permission.QUEUE_DELETE_OWN,
+            Permission.QUEUE_DELETE_ALL,
+            Permission.QUEUE_REORDER,
+            Permission.ARCHIVES_REPRINT_OWN,
+            Permission.ARCHIVES_REPRINT_ALL,
+            Permission.LIBRARY_UPLOAD,
+            Permission.LIBRARY_UPDATE_OWN,
+            Permission.LIBRARY_DELETE_OWN,
+            Permission.MAKERWORLD_IMPORT,
+            Permission.INVENTORY_CREATE,
+            Permission.INVENTORY_UPDATE,
+            Permission.INVENTORY_DELETE,
+            Permission.INVENTORY_FORECAST_WRITE,
+        )
+    },
+    **{
+        p.value: "can_control_printer"
+        for p in (
+            Permission.PRINTERS_CONTROL,
+            Permission.PRINTERS_FILES,
+            Permission.PRINTERS_AMS_RFID,
+            Permission.PRINTERS_CLEAR_PLATE,
+            Permission.SMART_PLUGS_CONTROL,
+        )
+    },
+    Permission.CLOUD_AUTH.value: "can_access_cloud",
+}
+
+# Explicitly admin-only. Redundant with the allowlist (unmapped = denied); the
+# tests use it to make sure none of these ever gets mapped.
 _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
     {
         Permission.SETTINGS_UPDATE,
@@ -49,14 +119,29 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
 )
 
 
-def _check_apikey_permissions(perm_strings: list[str]) -> None:
-    """Raise 403 if any required permission is admin-only (not accessible via API key)."""
-    denied = _APIKEY_DENIED_PERMISSIONS.intersection(perm_strings)
-    if denied:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API keys cannot be used for administrative operations",
-        )
+def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, require_any: bool = False) -> None:
+    """Raise 403 unless the key's scopes grant all (``require_any``: at least one) of ``perm_strings``."""
+    failure = HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API keys need an explicit permission")
+    for perm in perm_strings:
+        scope = _APIKEY_SCOPE_BY_PERMISSION.get(perm)
+        if scope is None:
+            failure = HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="API keys cannot be used for administrative operations",
+            )
+        elif not getattr(api_key, scope, False):
+            failure = HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key does not have '{scope}' permission",
+            )
+        elif require_any:
+            return
+        else:
+            continue
+        if not require_any:
+            raise failure
+    if require_any or not perm_strings:
+        raise failure
 
 
 def require_energy_cost_update():
@@ -304,6 +389,47 @@ async def create_camera_stream_token() -> str:
         )
         await db.commit()
     return token
+
+
+# --- WebSocket tokens (Bambuddy 0.2.4.5) ---
+# Browsers can't send an Authorization header on the WebSocket handshake, so the
+# SPA mints one of these via POST /auth/ws-token and passes it as ?token=.
+WEBSOCKET_TOKEN_EXPIRE_MINUTES = 60
+
+
+async def create_websocket_token() -> str:
+    """Create a reusable token for ``/api/v1/ws`` (survives reconnects until it expires)."""
+    now = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(24)
+    async with async_session() as db:
+        await db.execute(
+            delete(AuthEphemeralToken).where(
+                AuthEphemeralToken.token_type == "websocket",
+                AuthEphemeralToken.expires_at < now,
+            )
+        )
+        db.add(
+            AuthEphemeralToken(
+                token=token,
+                token_type="websocket",
+                expires_at=now + timedelta(minutes=WEBSOCKET_TOKEN_EXPIRE_MINUTES),
+            )
+        )
+        await db.commit()
+    return token
+
+
+async def verify_websocket_token(token: str) -> bool:
+    """True when ``token`` is an unexpired WebSocket token (not consumed)."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(AuthEphemeralToken.id).where(
+                AuthEphemeralToken.token == token,
+                AuthEphemeralToken.token_type == "websocket",
+                AuthEphemeralToken.expires_at > datetime.now(timezone.utc),
+            )
+        )
+        return result.first() is not None
 
 
 async def verify_camera_stream_token(token: str) -> bool:
@@ -920,7 +1046,7 @@ def require_permission(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(perm_strings)
+                    _check_apikey_permissions(api_key, perm_strings)
                     return None  # API key valid, allow access
 
             credentials_exception = HTTPException(
@@ -937,7 +1063,7 @@ def require_permission(*permissions: str | Permission):
             if token.startswith("bb_"):
                 api_key = await _validate_api_key(db, token)
                 if api_key:
-                    _check_apikey_permissions(perm_strings)
+                    _check_apikey_permissions(api_key, perm_strings)
                     return None  # API key valid, allow access
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1010,7 +1136,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(perm_strings)
+                    _check_apikey_permissions(api_key, perm_strings)
                     return None  # API key valid, allow access
 
             # Check for Bearer token (could be JWT or API key)
@@ -1020,7 +1146,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(perm_strings)
+                        _check_apikey_permissions(api_key, perm_strings)
                         return None  # API key valid, allow access
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1110,6 +1236,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
+                    _check_apikey_permissions(api_key, perm_strings, require_any=True)
                     return None
 
             if credentials is not None:
@@ -1117,6 +1244,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
+                        _check_apikey_permissions(api_key, perm_strings, require_any=True)
                         return None
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1216,7 +1344,8 @@ def require_ownership_permission(
     - User with `all_permission` can modify any item
     - User with `own_permission` can only modify items where created_by_id == user.id
     - Ownerless items (created_by_id = null) require `all_permission`
-    - API keys (via X-API-Key header or Bearer bb_xxx) get full access (can_modify_all=True)
+    - API keys (via X-API-Key header or Bearer bb_xxx) need the scope that grants
+      `all_permission` (OWN/ALL pairs share a scope), then get can_modify_all=True
 
     Returns:
         A dependency function that returns (user, can_modify_all).
@@ -1244,7 +1373,8 @@ def require_ownership_permission(
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    return None, True  # API key valid, allow all
+                    _check_apikey_permissions(api_key, [all_perm])
+                    return None, True
 
             # Check for Bearer token (could be JWT or API key)
             if credentials is not None:
@@ -1253,7 +1383,8 @@ def require_ownership_permission(
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        return None, True  # API key valid, allow all
+                        _check_apikey_permissions(api_key, [all_perm])
+                        return None, True
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Invalid API key",

@@ -41,6 +41,7 @@ from backend.app.schemas.project import (
     TimelineEvent,
 )
 from backend.app.utils.http import build_content_disposition
+from backend.app.utils.safe_path import safe_join_under
 
 logger = logging.getLogger(__name__)
 
@@ -1828,6 +1829,8 @@ async def import_project_file(
         folder_name = folder_data.get("name")
         if not folder_name:
             continue
+        # project.json is untrusted: an absolute or ``..`` name would write outside the library
+        folder_path = safe_join_under(library_dir, folder_name)
 
         # Check if folder exists
         existing_result = await db.execute(
@@ -1855,7 +1858,6 @@ async def import_project_file(
             await db.flush()
 
             # Create folder on disk
-            folder_path = library_dir / folder_name
             folder_path.mkdir(parents=True, exist_ok=True)
 
         # Import files for this folder from ZIP
@@ -1870,8 +1872,8 @@ async def import_project_file(
             if not relative_path:
                 continue
 
-            # Write file to disk
-            file_disk_path = library_dir / folder_name / relative_path
+            # Write file to disk; ZIP entry names may carry ``..`` segments
+            file_disk_path = safe_join_under(library_dir, folder_name, *Path(relative_path).parts)
             file_disk_path.parent.mkdir(parents=True, exist_ok=True)
             file_disk_path.write_bytes(file_content)
 

@@ -30,6 +30,7 @@ from backend.app.schemas.print_log import PrintLogResponse
 from backend.app.schemas.slicer import SliceRequest
 from backend.app.services.archive import ArchiveService
 from backend.app.utils.http import build_content_disposition
+from backend.app.utils.safe_path import safe_join_under
 from backend.app.utils.threemf_tools import (
     extract_embedded_presets_from_3mf,
     extract_nozzle_mapping_from_3mf,
@@ -2463,8 +2464,12 @@ async def get_photo(
     if not archive:
         raise HTTPException(404, "Archive not found")
 
+    # Only photos recorded on the archive (upload names them by UUID) are served.
+    if not archive.photos or filename not in archive.photos:
+        raise HTTPException(404, "Photo not found")
+
     archive_dir = settings.base_dir / Path(archive.file_path).parent
-    photo_path = archive_dir / "photos" / filename
+    photo_path = safe_join_under(archive_dir / "photos", filename)
 
     if not photo_path.exists():
         raise HTTPException(404, "Photo not found")
@@ -2500,7 +2505,7 @@ async def delete_photo(
 
     # Delete file
     archive_dir = settings.base_dir / Path(archive.file_path).parent
-    photo_path = archive_dir / "photos" / filename
+    photo_path = safe_join_under(archive_dir / "photos", filename)
     if photo_path.exists():
         photo_path.unlink()
 

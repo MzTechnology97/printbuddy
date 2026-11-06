@@ -5703,6 +5703,10 @@ export const api = {
       method: 'DELETE',
     }),
 
+  // /api/v1/ws token: browsers can't send headers on a WebSocket handshake
+  getWebSocketToken: () =>
+    request<{ token: string }>('/auth/ws-token', { method: 'POST' }),
+
   // Camera
   getCameraStreamToken: () =>
     request<{ token: string }>('/printers/camera/stream-token', { method: 'POST' }),

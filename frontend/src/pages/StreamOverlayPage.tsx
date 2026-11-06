@@ -145,27 +145,36 @@ export function StreamOverlayPage() {
   useEffect(() => {
     if (!id) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/v1/ws`;
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket | null = null;
+    let cancelled = false;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'printer_status' && data.printer_id === id) {
-          queryClient.setQueryData(['printerStatus', id], data.status);
+    (async () => {
+      // With auth enabled /ws needs a token; without one the server refuses and polling carries on.
+      const token = await api.getWebSocketToken().then((r) => r.token, () => undefined);
+      if (cancelled) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+      ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/ws${tokenParam}`);
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'printer_status' && data.printer_id === id) {
+            queryClient.setQueryData(['printerStatus', id], data.status);
+          }
+        } catch {
+          // Ignore parse errors
         }
-      } catch {
-        // Ignore parse errors
-      }
-    };
+      };
 
-    ws.onerror = () => {
-      // WebSocket error - polling will continue as fallback
-    };
+      ws.onerror = () => {
+        // WebSocket error - polling will continue as fallback
+      };
+    })();
 
     return () => {
-      ws.close();
+      cancelled = true;
+      ws?.close();
     };
   }, [id, queryClient]);
 

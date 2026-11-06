@@ -25,6 +25,7 @@ from backend.app.core.auth import (
     authenticate_user,
     authenticate_user_by_email,
     create_access_token,
+    create_websocket_token,
     get_current_active_user,
     get_password_hash,
     get_user_by_email,
@@ -590,6 +591,14 @@ async def get_current_user_info(
         detail="Authentication required",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+@router.post("/ws-token")
+async def mint_websocket_token(
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.WEBSOCKET_CONNECT),
+):
+    """Mint a 60-minute token for ``/api/v1/ws?token=`` (WebSocket handshakes can't carry headers)."""
+    return {"token": await create_websocket_token()}
 
 
 @router.post("/logout")
