@@ -212,7 +212,7 @@ const en = {
   },
   problems: {
     title: 'Library problems',
-    intro: 'Saved 3MFs that will not work. Each one goes away by itself once the file is fixed and saved again.',
+    intro: 'Production 3MFs that will not print. Each one goes away by itself once the file is fixed and saved again.',
     plate: 'Plate {{n}}',
     since: 'since {{at}}',
     open: 'Open the plates in Products',
@@ -679,7 +679,7 @@ const it: typeof en = {
   },
   problems: {
     title: 'Problemi della libreria',
-    intro: 'I 3MF salvati che non funzioneranno. Ognuno sparisce da solo quando il file viene corretto e salvato di nuovo.',
+    intro: 'I 3MF di produzione che non si stamperanno. Ognuno sparisce da solo quando il file viene corretto e salvato di nuovo.',
     plate: 'Piatto {{n}}',
     since: 'dal {{at}}',
     open: 'Apri i piatti in Prodotti',

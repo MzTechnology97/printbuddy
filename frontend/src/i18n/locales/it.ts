@@ -4828,7 +4828,7 @@ export default {
     farmFileCorrupt: 'File non integro',
     farmFileCorruptDescription: 'Un file di stampa nella cartella della farm o del NAS è danneggiato',
     farmLibraryProblem: 'Problema della libreria',
-    farmLibraryProblemDescription: 'Un 3MF salvato in libreria non funzionerà (slicing, profilo, modello di stampante, piatto vuoto)',
+    farmLibraryProblemDescription: 'Un 3MF di produzione in libreria non si stamperà (slicing, modello di stampante, piatto vuoto)',
     farmPlateToClear: 'Piatto da liberare',
     farmPlateToClearDescription: 'Una stampante ha finito e il lavoro della farm aspetta il suo piatto',
     farmComponentUrgent: 'Componente urgente bloccato',

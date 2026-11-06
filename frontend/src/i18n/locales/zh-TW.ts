@@ -4827,7 +4827,7 @@ export default {
     farmFileCorrupt: '農場檔案損壞',
     farmFileCorruptDescription: '農場或 NAS 資料夾中的列印檔案已損壞',
     farmLibraryProblem: '資料庫問題',
-    farmLibraryProblemDescription: '資料庫中儲存的 3MF 無法使用（切片、設定檔、印表機型號、空盤）',
+    farmLibraryProblemDescription: '資料庫中的生產用 3MF 無法列印（切片、印表機型號、空盤）',
     farmPlateToClear: '待清理列印板',
     farmPlateToClearDescription: '印表機已完成，農場工作正在等待清理列印板',
     farmComponentUrgent: '緊急零件受阻',

@@ -4839,7 +4839,7 @@ export default {
     farmFileCorrupt: 'Farm-Datei beschädigt',
     farmFileCorruptDescription: 'Eine Druckdatei im Farm- oder NAS-Ordner ist beschädigt',
     farmLibraryProblem: 'Bibliotheksproblem',
-    farmLibraryProblemDescription: 'Eine in der Bibliothek gespeicherte 3MF-Datei wird nicht funktionieren (Slicing, Profil, Druckermodell, leere Platte)',
+    farmLibraryProblemDescription: 'Eine Produktions-3MF-Datei in der Bibliothek lässt sich nicht drucken (Slicing, Druckermodell, leere Platte)',
     farmPlateToClear: 'Druckplatte räumen',
     farmPlateToClearDescription: 'Ein Drucker ist fertig und Farm-Aufträge warten auf seine Platte',
     farmComponentUrgent: 'Dringendes Bauteil blockiert',
