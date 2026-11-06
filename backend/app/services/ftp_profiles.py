@@ -75,12 +75,20 @@ _PROFILES: dict[str, FTPProfile] = {
     "P2S": FTPProfile(
         cap_tls_v1_2=True,
     ),
+    # X2D firmware 01.01.00.00 fails the implicit-FTPS handshake on :990
+    # with WRONG_VERSION_NUMBER, so the 3MF never downloads: the archive
+    # lands empty and filament use isn't tracked (upstream #1638, 0.2.4.6).
+    # Upstream calls this cap a trial, not a confirmed root cause.
+    "X2D": FTPProfile(
+        cap_tls_v1_2=True,
+    ),
 }
 
 # SSDP internal codes that should resolve to a display-name profile.
 # Mirrors the same map in :mod:`camera_profiles`.
 _MODEL_ALIASES: dict[str, str] = {
     "N7": "P2S",  # P2S internal SSDP code
+    "N6": "X2D",  # X2D internal SSDP code
 }
 
 
