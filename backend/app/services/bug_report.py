@@ -4,7 +4,7 @@ import json
 import time
 from urllib.parse import urlencode
 
-from backend.app.core.config import GITHUB_REPO
+from backend.app.core.config import BUG_REPORT_REPO
 from backend.app.core.database import async_session
 from backend.app.models.bug_report import BugReport
 
@@ -64,7 +64,7 @@ def _build_issue_body(
 def _build_issue_url(description: str, body: str) -> str:
     """Build a prefilled GitHub issue URL for manual submission."""
     title_seed = " ".join(description.split())[:80] or "Bug report"
-    return f"https://github.com/{GITHUB_REPO}/issues/new?" + urlencode(
+    return f"https://github.com/{BUG_REPORT_REPO}/issues/new?" + urlencode(
         {
             "title": f"Bug report: {title_seed}",
             "body": body,
@@ -103,7 +103,7 @@ async def submit_report(
             # The full prefilled URL can exceed the DB column size; keep the
             # stable issue creation endpoint in history and return the full URL
             # only to the user in the response.
-            github_issue_url=f"https://github.com/{GITHUB_REPO}/issues/new",
+            github_issue_url=f"https://github.com/{BUG_REPORT_REPO}/issues/new",
             status="prepared",
             email_sent=False,
         )

@@ -2968,7 +2968,7 @@ export interface UpdateCheckResult {
   message?: string;
   is_docker?: boolean;
   is_ha_addon?: boolean;
-  update_method?: 'docker' | 'git' | 'ha_addon';
+  update_method?: 'docker' | 'git' | 'ha_addon' | 'manual';
 }
 
 export interface UpdateStatus {

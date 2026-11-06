@@ -886,7 +886,7 @@ export function SettingsPage() {
   const applyUpdateMutation = useMutation({
     mutationFn: api.applyUpdate,
     onSuccess: (data) => {
-      if (data.is_ha_addon || data.is_docker) {
+      if (!data.success) {
         showToast(data.message, 'error');
       } else {
         refetchUpdateStatus();
@@ -2534,6 +2534,10 @@ export function SettingsPage() {
                     ) : updateStatus?.status === 'error' ? (
                       <div className="mt-3 p-2 bg-red-500/20 rounded text-sm text-red-400">
                         {updateStatus.error || updateStatus.message}
+                      </div>
+                    ) : updateCheck?.update_method === 'manual' ? (
+                      <div className="mt-3 p-3 bg-bambu-dark-tertiary rounded-lg">
+                        <p className="text-sm text-bambu-gray">{updateCheck.message}</p>
                       </div>
                     ) : updateCheck?.is_ha_addon ? (
                       <div className="mt-3 p-3 bg-bambu-dark-tertiary rounded-lg">
