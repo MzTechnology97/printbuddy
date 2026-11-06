@@ -3930,6 +3930,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: 'Quando stampare',
+    asap: 'Appena possibile',
+    scheduled: 'Programmata',
+    invalidDateTime: 'Inserisci una data e un\'ora valide',
+    requirePreviousSuccess: 'Avvia solo se la stampa precedente è riuscita',
+    powerOffWhenDone: 'Spegni la stampante a fine stampa',
+    helpAsap: 'La stampa parte appena la stampante è libera.',
+    helpScheduled: 'La stampa parte all\'ora programmata se la stampante è libera; se è occupata, aspetta che si liberi.',
+    helpManual: 'La stampa entra in coda ma non parte da sola: usa il pulsante Avvia per farla partire.',
     title: 'Avvia stampa',
     selectPrinter: 'Seleziona stampante',
     selectPlate: 'Seleziona piatto',

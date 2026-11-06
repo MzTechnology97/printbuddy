@@ -3929,6 +3929,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: '何时打印',
+    asap: '尽快',
+    scheduled: '定时',
+    invalidDateTime: '请输入有效的日期和时间',
+    requirePreviousSuccess: '仅在上一次打印成功时开始',
+    powerOffWhenDone: '完成后关闭打印机',
+    helpAsap: '打印机空闲后立即开始打印。',
+    helpScheduled: '到达定时时间且打印机空闲时开始打印；若打印机忙，则等待其空闲。',
+    helpManual: '打印会进入队列，但不会自动开始：请使用“开始”按钮启动。',
     title: '开始打印',
     selectPrinter: '选择打印机',
     selectPlate: '选择板',

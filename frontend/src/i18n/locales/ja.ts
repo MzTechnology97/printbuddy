@@ -3942,6 +3942,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: '印刷のタイミング',
+    asap: 'できるだけ早く',
+    scheduled: '予約',
+    invalidDateTime: '有効な日付と時刻を入力してください',
+    requirePreviousSuccess: '前回の印刷が成功した場合のみ開始',
+    powerOffWhenDone: '完了後にプリンターの電源を切る',
+    helpAsap: 'プリンターが空き次第、印刷を開始します。',
+    helpScheduled: '予約時刻にプリンターが空いていれば印刷を開始します。使用中の場合は空くまで待ちます。',
+    helpManual: '印刷はキューに入りますが自動では開始しません。開始ボタンで開始してください。',
     title: '印刷を開始',
     selectPrinter: 'プリンターを選択',
     selectPlate: 'プレートを選択',

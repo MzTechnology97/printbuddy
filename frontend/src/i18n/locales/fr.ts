@@ -3931,6 +3931,15 @@ export default {
 
   // Print modal
   printModal: {
+    whenToPrint: 'Quand imprimer',
+    asap: 'Dès que possible',
+    scheduled: 'Planifiée',
+    invalidDateTime: 'Saisissez une date et une heure valides',
+    requirePreviousSuccess: 'Démarrer seulement si l\'impression précédente a réussi',
+    powerOffWhenDone: 'Éteindre l\'imprimante à la fin',
+    helpAsap: 'L\'impression démarre dès que l\'imprimante est libre.',
+    helpScheduled: 'L\'impression démarre à l\'heure prévue si l\'imprimante est libre ; si elle est occupée, elle attend qu\'elle se libère.',
+    helpManual: 'L\'impression est mise en file mais ne démarre pas seule : utilisez le bouton Démarrer pour la lancer.',
     title: 'Lancer l\'impression',
     selectPrinter: 'Choisir l\'imprimante',
     selectPlate: 'Choisir le plateau',

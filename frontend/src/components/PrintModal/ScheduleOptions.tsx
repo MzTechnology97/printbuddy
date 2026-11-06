@@ -122,7 +122,7 @@ export function ScheduleOptionsPanel({
     <div className="space-y-4">
       {/* Schedule type */}
       <div>
-        <label className="block text-sm text-bambu-gray mb-2">When to print</label>
+        <label className="block text-sm text-bambu-gray mb-2">{t('printModal.whenToPrint', 'When to print')}</label>
         <div className="flex gap-2">
           <button
             type="button"
@@ -134,7 +134,7 @@ export function ScheduleOptionsPanel({
             onClick={() => handleScheduleTypeChange('asap')}
           >
             <Clock className="w-4 h-4" />
-            ASAP
+            {t('printModal.asap', 'ASAP')}
           </button>
           <button
             type="button"
@@ -146,7 +146,7 @@ export function ScheduleOptionsPanel({
             onClick={() => handleScheduleTypeChange('scheduled')}
           >
             <Calendar className="w-4 h-4" />
-            Scheduled
+            {t('printModal.scheduled', 'Scheduled')}
           </button>
           <button
             type="button"
@@ -185,7 +185,7 @@ export function ScheduleOptionsPanel({
                 type="button"
                 onClick={openCalendar}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-bambu-gray hover:text-white"
-                title="Open calendar"
+                title={t('printModal.openCalendar', 'Open calendar')}
               >
                 <Calendar className="w-4 h-4" />
               </button>
@@ -216,7 +216,7 @@ export function ScheduleOptionsPanel({
           </div>
           {(!isDateValid || !isTimeValid) && (
             <p className="mt-1 text-xs text-red-400">
-              Please enter a valid date and time
+              {t('printModal.invalidDateTime', 'Please enter a valid date and time')}
             </p>
           )}
         </div>
@@ -232,7 +232,7 @@ export function ScheduleOptionsPanel({
           className="rounded border-bambu-dark-tertiary bg-bambu-dark text-bambu-green focus:ring-bambu-green"
         />
         <label htmlFor="requirePrevious" className="text-sm text-bambu-gray">
-          Only start if previous print succeeded
+          {t('printModal.requirePreviousSuccess', 'Only start if previous print succeeded')}
         </label>
       </div>
 
@@ -248,7 +248,7 @@ export function ScheduleOptionsPanel({
         />
         <label htmlFor="autoOffAfter" className={`text-sm flex items-center gap-1 ${canControlPrinter ? 'text-bambu-gray' : 'text-bambu-gray/50'}`}>
           <Power className="w-3.5 h-3.5" />
-          Power off printer when done
+          {t('printModal.powerOffWhenDone', 'Power off printer when done')}
         </label>
       </div>
 
@@ -341,10 +341,10 @@ export function ScheduleOptionsPanel({
       {/* Help text */}
       <p className="text-xs text-bambu-gray">
         {options.scheduleType === 'asap'
-          ? 'Print will start as soon as the printer is idle.'
+          ? t('printModal.helpAsap', 'Print will start as soon as the printer is idle.')
           : options.scheduleType === 'scheduled'
-          ? 'Print will start at the scheduled time if the printer is idle. If busy, it will wait until the printer becomes available.'
-          : "Print will be staged but won't start automatically. Use the Start button to release it to the queue."}
+          ? t('printModal.helpScheduled', 'Print will start at the scheduled time if the printer is idle. If busy, it will wait until the printer becomes available.')
+          : t('printModal.helpManual', "Print will be staged but won't start automatically. Use the Start button to release it to the queue.")}
       </p>
     </div>
   );

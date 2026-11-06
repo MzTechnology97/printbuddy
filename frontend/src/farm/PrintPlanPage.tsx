@@ -746,7 +746,6 @@ export function AccodaSummary({ components, onClose, onDone, byHand = false, not
           )}
           {usable.length > 0 && (
             <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-white">{t('farm.jobs.when')}</h3>
               <ScheduleOptionsPanel options={schedule} onChange={setSchedule}
                 dateFormat={settings.data?.date_format || 'system'} timeFormat={settings.data?.time_format || 'system'}
                 canControlPrinter={hasPermission('printers:control')} showStagger={false}
