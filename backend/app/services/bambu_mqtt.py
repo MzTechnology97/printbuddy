@@ -66,6 +66,8 @@ _HMS_USER_ACTION_CODES: frozenset[str] = frozenset(
     {
         "0300_400C",  # "The task was canceled."
         "0500_400E",  # "Printing was cancelled."
+        # fork: a task refused because one is printing (another app sent it); the running print is unaffected
+        "0500_4004",  # "Device is busy and cannot start new task."
     }
 )
 
