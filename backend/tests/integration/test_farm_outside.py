@@ -399,6 +399,48 @@ async def test_a_print_to_assign_is_notified(async_client, db_session, farm, far
 
 
 @pytest.mark.asyncio
+async def test_a_plain_print_from_the_queue_counts_like_one_outside_it(
+    async_client, db_session, farm, farm_notifications
+):
+    from backend.app.farm import notify
+
+    a1 = farm["a1"]
+    known = archive(a1, "copia.gcode.3mf", OUTPUT_HASH, ended=at(10))  # a sliced output sent from the library
+    unknown = archive(a1, "Gancio.3mf", ended=at(11))
+    db_session.add_all([known, unknown])
+    await db_session.flush()
+    plain = [
+        PrintQueueItem(printer_id=a1, archive_id=a.id, status="completed", completed_at=a.completed_at)
+        for a in (known, unknown)
+    ]
+    db_session.add_all(plain)
+    await db_session.commit()
+    assert await outside.scan_archives(db_session) == 2
+
+    # Recognised: a batch at once, no assigning by hand; not recognised: to assign, said to come from the queue.
+    batches = await completed(async_client)
+    assert [(b["outside_queue"], b["print_name"], b["pieces"]) for b in batches if b["id"] != farm["queued"]] == [
+        (True, "copia.gcode.3mf", 15)
+    ]
+    for task in list(notify._tasks):
+        await task
+    [(_, values)] = farm_notifications
+    assert values["detail"].startswith("A1 uno: Gancio.3mf stampato dalla coda come stampa normale.")
+
+    # Deleting the queue items (clear history) loses nothing; Accoda's own print is never counted a second time,
+    # even once its queue item is gone.
+    accoda_item = (await db_session.get(FarmPrintJob, farm["queued"])).queue_item_id
+    for item_id in [i.id for i in plain] + [accoda_item]:
+        assert (await async_client.delete(f"/api/v1/queue/{item_id}")).status_code == 200
+    assert await outside.scan_archives(db_session) == 0
+    after = await completed(async_client)
+    assert sorted((b["id"] == farm["queued"], b["print_name"]) for b in after) == [
+        (False, "copia.gcode.3mf"),
+        (True, None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_klipper_history_is_read_page_by_page_from_a_cursor(async_client, db_session, farm, monkeypatch):
     from backend.app.api.routes.settings import get_setting
     from backend.app.services.printer_manager import printer_manager

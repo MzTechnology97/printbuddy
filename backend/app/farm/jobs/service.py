@@ -69,6 +69,7 @@ from backend.app.services.printer_providers.factory import normalize_provider
 logger = logging.getLogger(__name__)
 
 from backend.app.farm import job_events  # noqa: E402  fork: the queue page's timeline
+from backend.app.farm.jobs import outcome  # noqa: E402  a job keeps its outcome when its queue item goes
 
 TICK_SECONDS = 30
 HISTORY_EVERY_SECONDS = 10 * 60  # Klipper prints done while Printbuddy was off
@@ -1185,6 +1186,7 @@ class FarmJobDispatcher:
                         last_cleanup = time.monotonic()
                         await printer_files.cleanup(db)
                         await _guarded(db, "job events clean-up", job_events.cleanup)
+                        await _guarded(db, "archives left printing", outcome.close_stale_archives)
             except asyncio.CancelledError:
                 break
             except Exception:  # pragma: no cover - defensive, keep the loop alive

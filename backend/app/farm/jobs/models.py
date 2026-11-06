@@ -52,6 +52,9 @@ class FarmPrintJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # its end, UTC
     listed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # when it became a batch, UTC
     proposal: Mapped[list | None] = mapped_column(JSON, nullable=True)  # to_assign: components its name suggests
+    # How its print ended, kept when its queue item is deleted (``outcome``): completed / failed / cancelled
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    archive_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -69,5 +72,7 @@ add_columns(
         "excluded": "JSON",
         "printed_pieces": "INTEGER",
         "queued_as": "JSON",
+        "outcome": "VARCHAR(16)",
+        "archive_id": "INTEGER",
     },
 )

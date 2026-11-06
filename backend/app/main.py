@@ -3105,20 +3105,25 @@ async def on_print_start(printer_id: int, data: dict):
         # Fallback match: name-based lookup. Kept as-is for prints whose
         # subtask_id is missing ("0" / local / non-cloud prints).
         if existing_archive is None:
+            # fork: a queue print's own archive first. After a restart the name can't match: the printer reports
+            # the name the file was sent under (``__<sha8>``, farm.printer_files), the archive the library one.
+            from backend.app.farm.jobs.outcome import queue_print_archive
+
+            linked = await queue_print_archive(db, printer_id, [subtask_name, filename])
+            existing_archive = await db.get(PrintArchive, linked) if linked else None
+        if existing_archive is None:
+            from backend.app.farm.printer_files import without_fingerprint
+
             check_name = subtask_name or filename.split("/")[-1].replace(".gcode", "").replace(".3mf", "")
+            names = list(dict.fromkeys([check_name, without_fingerprint(check_name)]))  # fork: also unfingerprinted
             existing = await db.execute(
                 select(PrintArchive)
                 .where(PrintArchive.printer_id == printer_id)
                 .where(PrintArchive.status == "printing")
                 .where(
                     or_(
-                        PrintArchive.print_name == check_name,
-                        PrintArchive.filename.in_(
-                            [
-                                f"{check_name}.3mf",
-                                f"{check_name}.gcode.3mf",
-                            ]
-                        ),
+                        PrintArchive.print_name.in_(names),
+                        PrintArchive.filename.in_([f"{n}{ext}" for n in names for ext in (".3mf", ".gcode.3mf")]),
                     )
                 )
                 .order_by(PrintArchive.created_at.desc())
@@ -4180,20 +4185,35 @@ async def on_print_complete(printer_id: int, data: dict):
             break
 
     if not archive_id:
+        # fork: a queue print's own archive. The printer reports the name it was sent under, which carries the
+        # file's fingerprint (``__<sha8>``, farm.printer_files): the archive knows the library name.
+        try:
+            async with async_session() as db:
+                from backend.app.farm.jobs.outcome import queue_print_archive
+
+                archive_id = await queue_print_archive(db, printer_id, [subtask_name, filename])
+                if archive_id:
+                    logger.info("Found archive %s through the printing queue item", archive_id)
+        except Exception:
+            logger.exception("Archive lookup through the queue item failed")
+
+    if not archive_id:
         # Try to find by filename or subtask_name if not tracked (for prints started before app)
         async with async_session() as db:
+            from backend.app.farm.printer_files import without_fingerprint
             from backend.app.models.archive import PrintArchive
 
             # Try matching by subtask_name (stored as print_name) first
             if subtask_name:
+                plain = without_fingerprint(subtask_name)  # fork: the name it was archived under
                 result = await db.execute(
                     select(PrintArchive)
                     .where(PrintArchive.printer_id == printer_id)
                     .where(PrintArchive.status == "printing")
                     .where(
                         or_(
-                            PrintArchive.print_name.ilike(f"%{subtask_name}%"),
-                            PrintArchive.filename.ilike(f"%{subtask_name}%"),
+                            PrintArchive.print_name.ilike(f"%{plain}%"),
+                            PrintArchive.filename.ilike(f"%{plain}%"),
                         )
                     )
                     .order_by(PrintArchive.created_at.desc())

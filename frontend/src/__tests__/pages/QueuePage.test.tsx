@@ -164,6 +164,17 @@ describe('QueuePage', () => {
     expect(screen.queryByText('Nothing to fix.')).not.toBeInTheDocument();
   });
 
+  // fork: "clear history" says how many farm jobs it touches (each keeps its outcome)
+  it('warns how many farm jobs clearing the history touches', async () => {
+    server.use(
+      http.get('/api/v1/farm/jobs/history-links', () => HttpResponse.json({ jobs: 2, completed: 1 })),
+    );
+    const user = userEvent.setup();
+    render(<QueuePage />);
+    await user.click(await screen.findByRole('button', { name: /Clear History/ }));
+    expect(await screen.findByText(/2 of them are farm jobs \(1 finished batches for Seller Hub\)/)).toBeInTheDocument();
+  });
+
   describe('rendering', () => {
     it('renders the page title', async () => {
       render(<QueuePage />);
