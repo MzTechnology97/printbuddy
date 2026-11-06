@@ -953,3 +953,53 @@ class TestProjectExportImport:
         response = await async_client.post("/api/v1/projects/import/file", files=files)
         assert response.status_code == 400
         assert "Invalid JSON" in response.json()["detail"]
+
+
+class TestProjectImportPathTraversal:
+    """A crafted project ZIP must not write outside the library (Bambuddy 0.2.4.5)."""
+
+    @staticmethod
+    async def _import(async_client: AsyncClient, folder: str, entries: dict[str, bytes]):
+        import io
+        import json
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("project.json", json.dumps({"name": "imported", "linked_folders": [{"name": folder}]}))
+            for name, data in entries.items():
+                zf.writestr(name, data)
+        buf.seek(0)
+        return await async_client.post(
+            "/api/v1/projects/import/file", files={"file": ("p.zip", buf, "application/zip")}
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_absolute_folder_name_rejected(self, async_client: AsyncClient, tmp_path):
+        outside = (tmp_path / "outside").as_posix()
+        response = await self._import(async_client, outside, {f"files/{outside}/evil.pth": b"x"})
+        assert response.status_code == 400, response.text
+        assert not (tmp_path / "outside").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("folder", "entry"),
+        [("../../../evil", "files/../../../evil/x.txt"), ("ok", "files/ok/../../../evil/x.txt")],
+    )
+    async def test_dotdot_rejected(self, async_client: AsyncClient, folder, entry):
+        response = await self._import(async_client, folder, {entry: b"x"})
+        assert response.status_code == 400, response.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_nested_entry_still_imports(self, async_client: AsyncClient):
+        import shutil
+
+        from backend.app.api.routes.library import get_library_dir
+
+        response = await self._import(async_client, "OkFolder", {"files/OkFolder/sub/inside.txt": b"hello"})
+        assert response.status_code == 200, response.text
+        assert (get_library_dir() / "OkFolder" / "sub" / "inside.txt").read_bytes() == b"hello"
+        shutil.rmtree(get_library_dir() / "OkFolder")
