@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
 import type { Printer, PrinterStatus } from '../api/client';
 import { KlipperMacrosConsole } from './KlipperMacrosConsole';
+import { KlipperSafetyControls } from './KlipperSafety';
 
 type ToastType = 'success' | 'error' | 'warning' | 'info' | 'loading';
 
@@ -613,6 +614,8 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
             Disable steppers
           </button>
         </div>
+
+        <KlipperSafetyControls printerId={printer.id} showToast={showToast} />
       </div>
 
       <KlipperMacrosConsole printerId={printer.id} connected={status?.connected} showToast={showToast} />

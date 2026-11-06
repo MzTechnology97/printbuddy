@@ -497,6 +497,8 @@ class PrinterStatus(BaseModel):
     connection_details: dict[str, Any] | None = None
     # Developer LAN mode: True = enabled, False = disabled (MQTT encryption), None = unknown
     developer_mode: bool | None = None
+    # fork: Klipper (Moonraker) only: {state, message, filament_runout}; None for other printers
+    klipper: dict[str, Any] | None = None
     # Queue: printer is awaiting the user to acknowledge the build plate is cleared
     # after a finished/failed print. Persisted across restarts (#961).
     awaiting_plate_clear: bool = False

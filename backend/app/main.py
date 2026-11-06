@@ -400,6 +400,8 @@ _notified_hms_errors: dict[int, set[str]] = {}
 # Used to debounce clearing — prevents flapping errors from re-triggering notifications
 _hms_last_seen: dict[int, float] = {}
 _HMS_CLEAR_GRACE_SECONDS = 30.0
+# fork: printer_id -> the Klipper error or runout last notified, so each goes out once
+_notified_klipper_alert: dict[int, str] = {}
 
 # Track timelapse file baselines at print start: {printer_id: set of video filenames}
 # Used for snapshot-diff detection at print completion
@@ -1331,6 +1333,46 @@ def _should_send_progress_milestone(
     return False
 
 
+def _klipper_alert(state) -> tuple[str, str] | None:
+    """(error type, detail) to notify for a Klipper printer: Klipper not ready, or a pause for filament runout."""
+    klipper = getattr(state, "klipper", None) or {}
+    if klipper.get("state") not in (None, "ready", "startup"):
+        message = (klipper.get("message") or "").strip().splitlines()
+        return f"Klipper {klipper['state']}", message[0] if message else "Klipper is not ready: restart the firmware"
+    if klipper.get("filament_runout"):
+        return "Filament runout", "The print is paused: load the filament, then resume"
+    return None
+
+
+async def _notify_klipper_alert(printer_id: int, state) -> None:
+    """fork: notify a Klipper error or a filament runout once, as a printer error (its photo attached)."""
+    alert = _klipper_alert(state)
+    if alert is None:
+        _notified_klipper_alert.pop(printer_id, None)
+        return
+    key = "\n".join(alert)
+    if _notified_klipper_alert.get(printer_id) == key:
+        return
+    _notified_klipper_alert[printer_id] = key
+    log = logging.getLogger(__name__)
+    try:
+        async with async_session() as db:
+            from backend.app.models.printer import Printer
+
+            printer = (await db.execute(select(Printer).where(Printer.id == printer_id))).scalar_one_or_none()
+            image = await _capture_snapshot_for_notification(printer_id, printer, log)
+            await notification_service.on_printer_error(
+                printer_id,
+                printer.name if printer else f"Printer {printer_id}",
+                alert[0],
+                db,
+                alert[1],
+                image_data=image,
+            )
+    except Exception as e:
+        log.warning("Klipper alert notification failed: %s", e)
+
+
 async def on_printer_status_change(printer_id: int, state: PrinterState):
     """Handle printer status changes - broadcast via WebSocket."""
     # Only broadcast if something meaningful changed (reduce WebSocket spam)
@@ -1412,7 +1454,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
         f"{state.stg_cur}:{bed_target}:{nozzle_target}:"
         f"{state.cooling_fan_speed}:{state.big_fan1_speed}:{state.big_fan2_speed}:"
         f"{state.chamber_light}:{state.active_extruder}:{state.tray_now}:{vt_tray_key}:"
-        f"{ams_dry_key}:{ams_tray_key}:{state.door_open}"
+        f"{ams_dry_key}:{ams_tray_key}:{state.door_open}:{getattr(state, 'klipper', None)}"  # fork: Klipper
     )
 
     # MQTT relay - publish status (before dedup check - always publish to MQTT)
@@ -1583,6 +1625,8 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
         _reset_progress_notification_tracking(printer_id, clear_job_key=True)
         _print_almost_done_notified[printer_id] = False
         _first_layer_notified[printer_id] = False
+
+    await _notify_klipper_alert(printer_id, state)  # fork: Klipper errors and filament runout
 
     # HMS error codes that should not trigger notifications even though they
     # have known descriptions (e.g. user-initiated actions, not real errors).

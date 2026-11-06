@@ -61,6 +61,8 @@ class MoonrakerPrinterState:
     heatbreak_fan_speed: int | None = None
     firmware_version: str | None = None
     developer_mode: bool | None = None
+    # fork: {"state": Klipper's webhooks state, "message": why it is not ready, "filament_runout": paused for it}
+    klipper: dict[str, Any] | None = None
 
 
 def _map_moonraker_state(raw_state: Any) -> str:
@@ -381,6 +383,18 @@ def _moonraker_light_is_on(values: Any) -> bool:
 def _moonraker_chamber_heater(available: list[str]) -> str | None:
     """The chamber's ``heater_generic`` (``chamber_heater`` on a K2, K1 or Zero), if the printer has one."""
     return next((n for n in available if n.startswith("heater_generic ") and "chamber" in n.lower()), None)
+
+
+def _moonraker_filament_sensors(available: list[str]) -> list[str]:
+    return [name for name in available if name.split(" ", 1)[0] in ("filament_switch_sensor", "filament_motion_sensor")]
+
+
+def _filament_runout(status: dict[str, Any], sensors: list[str]) -> bool:
+    """An enabled filament sensor sees no filament (a disabled one reads True or stale values)."""
+    return any(
+        isinstance(values, dict) and values.get("enabled", True) and values.get("filament_detected") is False
+        for values in (status.get(name) for name in sensors)
+    )
 
 
 def _moonraker_speed_level(gcode_move: Any) -> int | None:
@@ -1515,15 +1529,53 @@ class MoonrakerPrinterClient:
             if self.on_print_complete:
                 self.on_print_complete(payload)
 
+    def _klippy_not_ready(self, previous_state: str | None) -> bool:
+        """Moonraker answers but Klipper doesn't (config error, MCU lost, starting): in error, not offline."""
+        try:
+            klippy = str(self._get("server/info").get("klippy_state") or "")
+        except Exception:  # noqa: BLE001 - Moonraker unreachable too: offline
+            return False
+        if klippy == "ready":
+            return False
+        try:
+            message = self._get("printer/info").get("state_message")
+        except Exception:  # noqa: BLE001 - Klippy not connected at all: no message to read
+            message = None
+        self.state.connected = True
+        self.state.klipper = {
+            "state": klippy or "disconnected",
+            "message": str(message or "").strip() or None,
+            "filament_runout": False,
+        }
+        if klippy != "startup":  # a restart in progress keeps the last state for a few seconds
+            self.state.state = "FAILED"
+            self.state.progress = 0.0
+            self.state.remaining_time = 0
+        self._emit_status_callbacks(previous_state)
+        self._last_state = self.state.state
+        self._has_status_sample = True
+        return True
+
     def request_status_update(self) -> bool:
         previous_state = self._last_state if self._has_status_sample else None
-        status = self._query_objects(
-            ["webhooks", "print_stats", "virtual_sdcard", "display_status", "extruder", "heater_bed", "gcode_move"]
-        )
+        try:
+            status = self._query_objects(
+                ["webhooks", "print_stats", "virtual_sdcard", "display_status", "extruder", "heater_bed", "gcode_move"]
+            )
+        except httpx.HTTPStatusError:
+            if self._klippy_not_ready(previous_state):
+                return True
+            raise
         try:
             available_objects = self._available_objects()
         except Exception:  # noqa: BLE001 - optional object discovery must not break core status polling
             available_objects = []
+        sensors = _moonraker_filament_sensors(available_objects)
+        if sensors:
+            try:
+                status.update(self._query_objects(sensors))
+            except Exception:  # noqa: BLE001 - the runout check is optional
+                pass
         fan_status = self._query_fan_status(available_objects)
         if fan_status:
             status.update(fan_status)
@@ -1563,6 +1615,15 @@ class MoonrakerPrinterClient:
 
         raw_state = print_stats.get("state") or self.state.state
         self.state.state = _map_moonraker_state(raw_state)
+        webhooks = status.get("webhooks") if isinstance(status.get("webhooks"), dict) else {}
+        klippy = str(webhooks.get("state") or "ready")
+        if klippy in ("shutdown", "error"):  # e.g. an MCU shutdown while idle leaves print_stats on standby
+            self.state.state = "FAILED"
+        self.state.klipper = {
+            "state": klippy,
+            "message": None if klippy == "ready" else str(webhooks.get("state_message") or "").strip() or None,
+            "filament_runout": self.state.state == "PAUSE" and _filament_runout(status, sensors),
+        }
         reported_file = print_stats.get("filename") or virtual_sdcard.get("file_path")
         if reported_file:
             self.state.gcode_file = str(reported_file)
@@ -1672,6 +1733,16 @@ class MoonrakerPrinterClient:
             # once; if Moonraker is reachable afterwards, treat the command as
             # accepted rather than surfacing a false UI failure.
             self.request_status_update()
+        return True
+
+    def emergency_stop(self) -> bool:
+        """Klipper's M112: heaters and motors off at once; it stays shut down until a firmware restart."""
+        self._post("printer/emergency_stop", {})
+        return True
+
+    def firmware_restart(self) -> bool:
+        """Restart Klipper and its MCUs: how a shutdown or an error is cleared."""
+        self._post("printer/firmware_restart", {})
         return True
 
     def set_nozzle_temperature(self, target: int | float) -> bool:

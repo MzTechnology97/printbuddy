@@ -1143,6 +1143,7 @@ async def get_printer_status(
         firmware_version=state.firmware_version,
         connection_details=getattr(state, "sdcp_connection", None) or (state.raw_data or {}).get("sdcp_connection"),
         developer_mode=state.developer_mode if state else None,
+        klipper=getattr(state, "klipper", None),
         awaiting_plate_clear=printer_manager.is_awaiting_plate_clear(printer_id),
         supports_drying=supports_drying(printer.model, state.firmware_version),
         current_archive_id=current_archive_id,
@@ -4751,6 +4752,43 @@ async def klipper_console(
         return {"lines": await asyncio.to_thread(gcode_store, count)}
     except httpx.HTTPError as exc:
         raise HTTPException(502, "Could not read the printer's console") from exc
+
+
+@router.post("/{printer_id}/klipper/emergency-stop")
+async def klipper_emergency_stop(
+    printer_id: int,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """Emergency stop (M112): heaters and motors off at once, the print lost; a firmware restart clears it."""
+    emergency_stop = await _klipper_client(db, printer_id, "emergency_stop")
+    try:
+        await asyncio.to_thread(emergency_stop)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not reach the printer's Moonraker") from exc
+    return {"success": True}
+
+
+@router.post("/{printer_id}/klipper/firmware-restart")
+async def klipper_firmware_restart(
+    printer_id: int,
+    confirm: bool = Query(False, description="Needed during a print: the restart ends it"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
+    db: AsyncSession = Depends(get_db),
+):
+    """FIRMWARE_RESTART: how Klipper leaves a shutdown or an error."""
+    firmware_restart = await _klipper_client(db, printer_id, "firmware_restart")
+    state = printer_manager.get_status(printer_id)
+    if state is not None and state.state in ("RUNNING", "PAUSE") and not confirm:
+        raise HTTPException(
+            409,
+            {"code": "restart_confirm_while_printing", "message": "The restart ends the print: confirm to restart"},
+        )
+    try:
+        await asyncio.to_thread(firmware_restart)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not reach the printer's Moonraker") from exc
+    return {"success": True}
 
 
 # Commands that stop or restart Klipper (and the print with it): sent during a print only when confirmed.

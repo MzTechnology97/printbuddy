@@ -3675,6 +3675,14 @@ class _FakeKlipperClient:
     def gcode_store(self, count=100):
         return [{"message": "ok", "time": 1.0, "type": "response"}][:count]
 
+    def emergency_stop(self):
+        self.sent.append("emergency_stop")
+        return True
+
+    def firmware_restart(self):
+        self.sent.append("firmware_restart")
+        return True
+
 
 @pytest.mark.asyncio
 @pytest.mark.integration
@@ -3745,6 +3753,30 @@ async def test_klipper_console_sends_one_command_and_confirms_restarts_while_pri
         assert (await async_client.post(url, json={"script": "FIRMWARE_RESTART"})).status_code == 200
 
     assert client.sent == ["M112", "M117 hello", "FIRMWARE_RESTART"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_emergency_stop_and_firmware_restart(async_client: AsyncClient, printer_factory):
+    from types import SimpleNamespace
+
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="K1", provider="klipper", api_url="http://k1.local:7125")
+    client = _FakeKlipperClient(state="RUNNING")
+    base = f"/api/v1/printers/{printer.id}/klipper"
+    with patch.dict(printer_manager._clients, {printer.id: client}):
+        assert (await async_client.post(f"{base}/emergency-stop")).status_code == 200
+        refused = await async_client.post(f"{base}/firmware-restart")
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["code"] == "restart_confirm_while_printing"
+        assert (await async_client.post(f"{base}/firmware-restart?confirm=true")).status_code == 200
+        client.state.state = "FAILED"  # Klipper shut down: no print to lose, no confirmation
+        assert (await async_client.post(f"{base}/firmware-restart")).status_code == 200
+    assert client.sent == ["emergency_stop", "firmware_restart", "firmware_restart"]
+
+    with patch.dict(printer_manager._clients, {printer.id: SimpleNamespace(send_gcode=lambda s: True)}):
+        assert (await async_client.post(f"{base}/emergency-stop")).status_code == 400  # not a Klipper
 
 
 async def _user_token(username: str, permissions: list[str]) -> str:
