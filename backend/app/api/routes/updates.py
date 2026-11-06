@@ -9,12 +9,12 @@ import sys
 import time
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import RequirePermissionIfAuthEnabled
-from backend.app.core.config import APP_VERSION, GITHUB_REPO, settings
+from backend.app.core.config import APP_VERSION, GITHUB_BRANCH, GITHUB_REPO, settings
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.models.settings import Settings
@@ -170,6 +170,19 @@ def _get_source_ref() -> str | None:
     if re.fullmatch(r"[0-9a-fA-F]{40}", head):
         return head
     return None
+
+
+def _source_commit(source_ref: str | None) -> str | None:
+    """Commit sha inside a build ref: a bare sha, or `farm-<sha8>` as the farm server builds pass it."""
+    match = re.search(r"(?:^|-)([0-9a-fA-F]{7,40})$", (source_ref or "").strip())
+    return match.group(1).lower() if match else None
+
+
+# The farm image is built by hand on the server; nothing in the app may install
+# an update, least of all upstream's releases over the fork.
+_MANUAL_UPDATE_MESSAGE = (
+    f"Updates are installed by hand: build printbuddy-farm:<sha8> from {GITHUB_REPO} {GITHUB_BRANCH} on the server."
+)
 
 
 def _find_executable(name: str) -> str | None:
@@ -418,7 +431,7 @@ async def check_for_updates(
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.SYSTEM_READ),
 ):
-    """Check GitHub for available updates."""
+    """Compare the running build's commit with the fork's integration branch on GitHub."""
     global _update_status
 
     # Respect the check_updates setting
@@ -432,10 +445,14 @@ async def check_for_updates(
             "message": "Update checks are disabled",
         }
 
-    # Check if beta updates should be included
-    result = await db.execute(select(Settings).where(Settings.key == "include_beta_updates"))
-    beta_setting = result.scalar_one_or_none()
-    include_beta = beta_setting and beta_setting.value.lower() == "true"
+    commit = _source_commit(_get_source_ref())
+    if not commit:
+        return {
+            "update_available": False,
+            "current_version": APP_VERSION,
+            "latest_version": None,
+            "message": "This build does not record its commit (build with --build-arg PRINTBUDDY_REF=farm-<sha8>)",
+        }
 
     # Short-circuit if we're still inside a GitHub rate-limit backoff window (#1420).
     backoff_remaining = _seconds_until_github_unblocked()
@@ -464,7 +481,7 @@ async def check_for_updates(
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=20",
+                f"https://api.github.com/repos/{GITHUB_REPO}/compare/{commit}...{GITHUB_BRANCH}",
                 headers={"Accept": "application/vnd.github.v3+json"},
                 timeout=10.0,
             )
@@ -486,78 +503,19 @@ async def check_for_updates(
                 }
 
             if response.status_code == 404:
-                # No releases yet
-                _update_status = {
-                    "status": "idle",
-                    "progress": 100,
-                    "message": "No releases found",
-                    "error": None,
-                }
+                # Built from a commit that was never pushed to the fork.
+                _update_status = {"status": "idle", "progress": 100, "message": "Commit not on GitHub", "error": None}
                 return {
                     "update_available": False,
                     "current_version": APP_VERSION,
                     "latest_version": None,
-                    "message": "No releases found",
+                    "message": f"Running commit {commit[:8]} is not on {GITHUB_REPO}",
                 }
 
             response.raise_for_status()
-            releases = response.json()
+            compare = response.json()
 
-            # Find the appropriate release based on beta setting. Do not trust
-            # GitHub response order; select by parsed Printbuddy version.
-            release_data = _select_latest_release(releases, bool(include_beta))
-
-            if not release_data:
-                _update_status = {
-                    "status": "idle",
-                    "progress": 100,
-                    "message": "No releases found",
-                    "error": None,
-                }
-                return {
-                    "update_available": False,
-                    "current_version": APP_VERSION,
-                    "latest_version": None,
-                    "message": "No releases found",
-                }
-
-            latest_version = release_data.get("tag_name", "").lstrip("v")
-            release_name = release_data.get("name", latest_version)
-            release_notes = release_data.get("body", "")
-            release_url = release_data.get("html_url", "")
-            published_at = release_data.get("published_at", "")
-
-            update_available = is_newer_version(latest_version, APP_VERSION)
-
-            _update_status = {
-                "status": "idle",
-                "progress": 100,
-                "message": "Update available" if update_available else "Up to date",
-                "error": None,
-            }
-
-            is_docker = _is_docker_environment()
-            is_ha_addon = _is_ha_addon()
-            if is_ha_addon:
-                update_method = "ha_addon"
-            elif is_docker:
-                update_method = "docker"
-            else:
-                update_method = "git"
-            return {
-                "update_available": update_available,
-                "current_version": APP_VERSION,
-                "latest_version": latest_version,
-                "release_name": release_name,
-                "release_notes": release_notes,
-                "release_url": release_url,
-                "published_at": published_at,
-                "is_docker": is_docker,
-                "is_ha_addon": is_ha_addon,
-                "update_method": update_method,
-            }
-
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ValueError) as e:
         logger.error("Failed to check for updates: %s", e)
         _update_status = {
             "status": "error",
@@ -571,6 +529,39 @@ async def check_for_updates(
             "latest_version": None,
             "error": "Failed to check for updates",
         }
+
+    new_commits = int(compare.get("ahead_by") or 0)
+    # shortcut: GitHub lists at most 250 commits per compare page, so past that the
+    # last one listed is not the branch tip; the count above stays exact.
+    commits = compare.get("commits") or []
+    tip = commits[-1] if new_commits and commits else None
+    tip_sha = (tip["sha"] if tip else commit)[:8]
+    update_available = new_commits > 0
+
+    _update_status = {
+        "status": "idle",
+        "progress": 100,
+        "message": "Update available" if update_available else "Up to date",
+        "error": None,
+    }
+
+    return {
+        "update_available": update_available,
+        "current_version": f"{APP_VERSION}+{commit[:8]}",
+        "latest_version": f"{APP_VERSION}+{tip_sha}",
+        "release_name": f"{new_commits} new commit(s) on {GITHUB_BRANCH}",
+        "release_notes": "\n".join(
+            f"- {c['commit']['message'].splitlines()[0]}"
+            for c in reversed(commits)
+            if c.get("commit", {}).get("message")
+        ),
+        "release_url": compare.get("html_url", ""),
+        "published_at": tip["commit"]["committer"]["date"] if tip else "",
+        "is_docker": _is_docker_environment(),
+        "is_ha_addon": False,
+        "update_method": "manual",
+        "message": _MANUAL_UPDATE_MESSAGE,
+    }
 
 
 async def _discover_target_release(db: AsyncSession) -> str | None:
@@ -854,33 +845,10 @@ async def _perform_update(target_ref: str):
 
 @router.post("/self-update")
 async def start_self_update(
-    db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.SETTINGS_UPDATE),
 ):
-    """Trigger the optional Docker updater sidecar."""
-    if not settings.self_update_enabled:
-        raise HTTPException(status_code=400, detail="Self-update is not enabled")
-    if not settings.updater_url or not settings.updater_token:
-        raise HTTPException(status_code=503, detail="Updater sidecar is not configured")
-
-    headers = {"Authorization": f"Bearer {settings.updater_token}"}
-    target_ref = await _discover_target_release(db)
-    payload = None
-    if target_ref:
-        payload = {"target_image": f"docker.io/vmhomelabde/printbuddy:{target_ref}"}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{settings.updater_url.rstrip('/')}/update", headers=headers, json=payload, timeout=5.0
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text or "Updater sidecar rejected the update request"
-        raise HTTPException(status_code=exc.response.status_code, detail=detail)
-    except httpx.HTTPError as exc:
-        logger.warning("Updater sidecar trigger failed: %s", exc)
-        raise HTTPException(status_code=503, detail="Updater sidecar is not reachable")
+    """Refused: the updater sidecar pulls upstream's docker.io image, which would replace the farm fork."""
+    raise HTTPException(status_code=400, detail=_MANUAL_UPDATE_MESSAGE)
 
 
 @router.get("/self-update/status")
@@ -951,74 +919,10 @@ async def get_self_update_job_status(
 
 @router.post("/apply")
 async def apply_update(
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.SETTINGS_UPDATE),
 ):
-    """Apply available update (git pull + rebuild)."""
-    global _update_status
-
-    if _update_status["status"] in ["downloading", "installing"]:
-        return {
-            "success": False,
-            "message": "Update already in progress",
-            "status": _update_status,
-        }
-
-    # Check for managed deployment shapes that own the update lifecycle.
-    # HA addons are also Docker, so check HA first to surface the more
-    # specific message.
-    if _is_ha_addon():
-        return {
-            "success": False,
-            "is_ha_addon": True,
-            "is_docker": True,
-            "message": (
-                "Printbuddy is running as a Home Assistant add-on. "
-                "Updates are managed by the Home Assistant Supervisor "
-                "(Settings → Add-ons → Printbuddy → Update)."
-            ),
-        }
-    if _is_docker_environment():
-        return {
-            "success": False,
-            "is_docker": True,
-            "message": (
-                "Docker installations cannot be updated in-app. "
-                "Please update via Docker Compose: "
-                "git pull && docker compose build --pull && docker compose up -d"
-            ),
-        }
-
-    # Discover which release tag to install. Resolved here (where we have
-    # a DB session) and passed into the background task; the BG task can't
-    # reuse this request's session since FastAPI closes it on response.
-    target_ref = await _discover_target_release(db)
-    if target_ref is None:
-        return {
-            "success": False,
-            "message": (
-                "Could not determine a release to install. Either GitHub is "
-                "unreachable or no release matches your update channel "
-                "(check the include_beta_updates setting)."
-            ),
-        }
-
-    # Start update in background
-    background_tasks.add_task(_perform_update, target_ref)
-
-    _update_status = {
-        "status": "downloading",
-        "progress": 10,
-        "message": "Starting update...",
-        "error": None,
-    }
-
-    return {
-        "success": True,
-        "message": "Update started",
-        "status": _update_status,
-    }
+    """Refused: upstream's in-app updater resets the checkout to an upstream release tag."""
+    return {"success": False, "is_docker": _is_docker_environment(), "message": _MANUAL_UPDATE_MESSAGE}
 
 
 @router.get("/status")

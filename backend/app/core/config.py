@@ -7,7 +7,11 @@ from pydantic_settings import BaseSettings
 
 # Application version - single source of truth
 APP_VERSION = "0.2.5.4b1"
-GITHUB_REPO = "vmhomelab/Printbuddy"
+# Farm fork: the update check compares the running build's commit with this branch.
+GITHUB_REPO = "MzTechnology97/printbuddy"
+GITHUB_BRANCH = "dev"
+# Bug reports stay upstream: the fork has GitHub issues turned off.
+BUG_REPORT_REPO = "vmhomelab/Printbuddy"
 
 # App directory - where the application is installed (for static files)
 _app_dir = Path(__file__).resolve().parent.parent.parent.parent

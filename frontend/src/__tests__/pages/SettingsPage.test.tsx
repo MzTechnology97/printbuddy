@@ -330,6 +330,28 @@ describe('SettingsPage', () => {
       expect(screen.queryByText(/Home Assistant Supervisor/i)).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: /install update/i })).not.toBeInTheDocument();
     });
+
+    it('shows only the build-by-hand note for the farm fork (no install or pull CTA)', async () => {
+      await renderWithUpdateCheck({
+        update_available: true,
+        current_version: '0.2.5.4b1+aaaaaaaa',
+        latest_version: '0.2.5.4b1+bbbbbbbb',
+        release_name: '2 new commit(s) on dev',
+        release_notes: '- fix: two\n- feat: one',
+        release_url: 'https://example.invalid/compare',
+        published_at: '2026-11-06',
+        is_docker: true,
+        is_ha_addon: false,
+        update_method: 'manual',
+        message: 'Updates are installed by hand: build printbuddy-farm:<sha8> from the fork.',
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(/installed by hand/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByText('docker compose pull && docker compose up -d')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /install update|update now/i })).not.toBeInTheDocument();
+    });
   });
 
   describe('tabs navigation', () => {

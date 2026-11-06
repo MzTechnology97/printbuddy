@@ -7,6 +7,42 @@ import pytest
 from httpx import AsyncClient
 
 
+def _fake_github(status_code: int, payload, calls: list[str] | None = None):
+    """httpx.AsyncClient stand-in that answers every GET with one response and records the URL."""
+
+    class _Resp:
+        headers: dict = {}
+        text = ""
+
+        def __init__(self):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, url, **_):
+            if calls is not None:
+                calls.append(url)
+            return _Resp()
+
+        async def post(self, url, **_):
+            if calls is not None:
+                calls.append(url)
+            return _Resp()
+
+    return _FakeClient
+
+
 class TestUpdatesAPI:
     @pytest.mark.asyncio
     async def test_get_version(self, async_client: AsyncClient):
@@ -15,41 +51,119 @@ class TestUpdatesAPI:
         assert response.status_code == 200
         result = response.json()
         assert result["version"]
-        assert result["repo"] == "vmhomelab/Printbuddy"
+        assert result["repo"] == "MzTechnology97/printbuddy"
         assert result["source_ref"] == "1a593e7b9440ce692cf7eddb8006d8f45add755f"
         assert result["source_ref_short"] == "1a593e7"
         assert result["display_version"].endswith("(1a593e7)")
 
-    @pytest.mark.asyncio
-    async def test_apply_update_docker_rejection(self, async_client: AsyncClient):
-        with (
-            patch("backend.app.api.routes.updates._is_ha_addon", return_value=False),
-            patch("backend.app.api.routes.updates._is_docker_environment", return_value=True),
-        ):
-            response = await async_client.post("/api/v1/updates/apply")
-        result = response.json()
-        assert result["success"] is False
-        assert result["is_docker"] is True
-        assert result.get("is_ha_addon") is not True
-        # Docker message tells the user to docker compose, not HA.
-        assert "Docker Compose" in result["message"]
+    def test_source_commit_reads_farm_build_refs(self):
+        from backend.app.api.routes.updates import _source_commit
+
+        assert _source_commit("farm-AB677425") == "ab677425"
+        assert _source_commit("1a593e7b9440ce692cf7eddb8006d8f45add755f") == "1a593e7b9440ce692cf7eddb8006d8f45add755f"
+        assert _source_commit("dev") is None
+        assert _source_commit(None) is None
 
     @pytest.mark.asyncio
-    async def test_apply_update_ha_addon_rejection(self, async_client: AsyncClient):
-        """HA addons are also Docker, so the route must check HA first and
-        return the HA-specific message — otherwise users see "run docker
-        compose" advice they can't follow."""
+    async def test_check_compares_running_commit_with_fork_dev(self, async_client: AsyncClient):
+        import backend.app.api.routes.updates as updates_module
+
+        updates_module._github_rate_limit_until = 0.0
+        calls: list[str] = []
+        payload = {
+            "ahead_by": 2,
+            "html_url": "https://github.com/MzTechnology97/printbuddy/compare/ab677425...dev",
+            "commits": [
+                {"sha": "1111111199", "commit": {"message": "feat: one\n\nbody", "committer": {"date": "2026-11-05"}}},
+                {"sha": "2222222299", "commit": {"message": "fix: two", "committer": {"date": "2026-11-06"}}},
+            ],
+        }
         with (
-            patch("backend.app.api.routes.updates._is_ha_addon", return_value=True),
-            patch("backend.app.api.routes.updates._is_docker_environment", return_value=True),
+            patch.dict("os.environ", {"PRINTBUDDY_REF": "farm-ab677425"}),
+            patch("backend.app.api.routes.updates.httpx.AsyncClient", _fake_github(200, payload, calls)),
         ):
-            response = await async_client.post("/api/v1/updates/apply")
-        result = response.json()
-        assert result["success"] is False
-        assert result["is_ha_addon"] is True
-        assert result["is_docker"] is True
-        assert "Home Assistant" in result["message"]
-        assert "Docker Compose" not in result["message"]
+            body = (await async_client.get("/api/v1/updates/check")).json()
+
+        assert calls == ["https://api.github.com/repos/MzTechnology97/printbuddy/compare/ab677425...dev"]
+        assert body["update_available"] is True
+        assert body["current_version"].endswith("+ab677425")
+        assert body["latest_version"].endswith("+22222222")
+        assert body["release_notes"] == "- fix: two\n- feat: one"
+        assert body["published_at"] == "2026-11-06"
+        assert body["update_method"] == "manual"
+        assert "printbuddy-farm" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_check_up_to_date_when_dev_has_nothing_new(self, async_client: AsyncClient):
+        import backend.app.api.routes.updates as updates_module
+
+        updates_module._github_rate_limit_until = 0.0
+        with (
+            patch.dict("os.environ", {"PRINTBUDDY_REF": "farm-ab677425"}),
+            patch(
+                "backend.app.api.routes.updates.httpx.AsyncClient", _fake_github(200, {"ahead_by": 0, "commits": []})
+            ),
+        ):
+            body = (await async_client.get("/api/v1/updates/check")).json()
+
+        assert body["update_available"] is False
+        assert body["latest_version"].endswith("+ab677425")
+
+    @pytest.mark.asyncio
+    async def test_check_commit_missing_from_fork(self, async_client: AsyncClient):
+        import backend.app.api.routes.updates as updates_module
+
+        updates_module._github_rate_limit_until = 0.0
+        with (
+            patch.dict("os.environ", {"PRINTBUDDY_REF": "farm-ab677425"}),
+            patch("backend.app.api.routes.updates.httpx.AsyncClient", _fake_github(404, {})),
+        ):
+            body = (await async_client.get("/api/v1/updates/check")).json()
+
+        assert body["update_available"] is False
+        assert "ab677425 is not on MzTechnology97/printbuddy" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_check_without_build_commit_skips_github(self, async_client: AsyncClient):
+        calls: list[str] = []
+        with (
+            patch("backend.app.api.routes.updates._get_source_ref", return_value=None),
+            patch("backend.app.api.routes.updates.httpx.AsyncClient", _fake_github(200, {}, calls)),
+        ):
+            body = (await async_client.get("/api/v1/updates/check")).json()
+
+        assert calls == []
+        assert body["update_available"] is False
+        assert "PRINTBUDDY_REF" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_apply_update_never_installs(self, async_client: AsyncClient):
+        """The farm image is built by hand; the in-app updater must not reset to an upstream tag."""
+        with (
+            patch("backend.app.api.routes.updates._discover_target_release", new_callable=AsyncMock) as discover,
+            patch("backend.app.api.routes.updates._perform_update", new_callable=AsyncMock) as perform,
+        ):
+            body = (await async_client.post("/api/v1/updates/apply")).json()
+
+        assert body["success"] is False
+        assert "printbuddy-farm" in body["message"]
+        discover.assert_not_awaited()
+        perform.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_self_update_refused_even_when_sidecar_configured(self, async_client: AsyncClient):
+        """The sidecar would pull upstream's docker.io image over the fork."""
+        calls: list[str] = []
+        with (
+            patch("backend.app.api.routes.updates.settings.self_update_enabled", True, create=True),
+            patch("backend.app.api.routes.updates.settings.updater_url", "http://updater:8787", create=True),
+            patch("backend.app.api.routes.updates.settings.updater_token", "sidecar-token", create=True),
+            patch("backend.app.api.routes.updates.httpx.AsyncClient", _fake_github(200, {}, calls)),
+        ):
+            response = await async_client.post("/api/v1/updates/self-update")
+
+        assert response.status_code == 400
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_self_update_status_disabled_by_default(self, async_client: AsyncClient):
@@ -107,51 +221,6 @@ class TestUpdatesAPI:
         assert body["health"]["docker_available"] is True
 
     @pytest.mark.asyncio
-    async def test_self_update_trigger_calls_updater(self, async_client: AsyncClient):
-        posted_json = None
-
-        class _Resp:
-            status_code = 200
-
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"accepted": True, "job_id": "upd_1", "message": "Update started"}
-
-        class _FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_):
-                return None
-
-            async def post(self, url, *, headers=None, timeout=None, json=None):
-                nonlocal posted_json
-                assert url == "http://updater:8787/update"
-                assert headers == {"Authorization": "Bearer sidecar-token"}
-                assert timeout == 5.0
-                posted_json = json
-                return _Resp()
-
-        with (
-            patch("backend.app.api.routes.updates.settings.self_update_enabled", True, create=True),
-            patch("backend.app.api.routes.updates.settings.updater_url", "http://updater:8787", create=True),
-            patch("backend.app.api.routes.updates.settings.updater_token", "sidecar-token", create=True),
-            patch(
-                "backend.app.api.routes.updates._discover_target_release",
-                new_callable=AsyncMock,
-                return_value="v0.2.5.1b13",
-            ),
-            patch("backend.app.api.routes.updates.httpx.AsyncClient", _FakeClient),
-        ):
-            response = await async_client.post("/api/v1/updates/self-update")
-
-        assert response.status_code == 200
-        assert response.json()["job_id"] == "upd_1"
-        assert posted_json == {"target_image": "docker.io/vmhomelabde/printbuddy:v0.2.5.1b13"}
-
-    @pytest.mark.asyncio
     async def test_self_update_job_status_proxies_updater(self, async_client: AsyncClient):
         class _Resp:
             status_code = 200
@@ -186,24 +255,6 @@ class TestUpdatesAPI:
         assert response.status_code == 200
         assert response.json()["status"] == "pulling"
 
-    @pytest.mark.asyncio
-    async def test_apply_update_non_docker(self, async_client: AsyncClient):
-        """Test non-Docker path - mock _perform_update + _discover_target_release
-        to prevent side effects (network call to GitHub releases API + actual
-        git/pip subprocesses)."""
-        with (
-            patch("backend.app.api.routes.updates._is_ha_addon", return_value=False),
-            patch("backend.app.api.routes.updates._is_docker_environment", return_value=False),
-            patch(
-                "backend.app.api.routes.updates._discover_target_release",
-                new_callable=AsyncMock,
-                return_value="v9.9.9",
-            ),
-            patch("backend.app.api.routes.updates._perform_update", new_callable=AsyncMock),
-        ):
-            response = await async_client.post("/api/v1/updates/apply")
-        assert response.json()["success"] is True
-
     def test_is_docker_with_dockerenv(self):
         from backend.app.api.routes.updates import _is_docker_environment
 
@@ -231,97 +282,6 @@ class TestUpdatesAPI:
 
         with patch.dict("os.environ", {"SUPERVISOR_TOKEN": ""}, clear=False):
             assert _is_ha_addon() is False
-
-    @pytest.mark.asyncio
-    async def test_check_returns_ha_addon_flag_and_method(self, async_client: AsyncClient):
-        """`/updates/check` must surface the deployment shape so the frontend
-        can pick the right CTA. HA must take precedence over Docker because
-        HA addons run *inside* a Docker container — checking docker first
-        would mis-classify them."""
-        import httpx as _httpx
-
-        fake_release = {
-            "tag_name": "v999.9.9",
-            "name": "Far Future Release",
-            "body": "",
-            "html_url": "https://example.invalid/r",
-            "published_at": "2099-01-01T00:00:00Z",
-        }
-
-        class _Resp:
-            status_code = 200
-
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return [fake_release]
-
-        class _FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_):
-                return None
-
-            async def get(self, *_, **__):
-                return _Resp()
-
-        with (
-            patch.object(_httpx, "AsyncClient", _FakeClient),
-            patch("backend.app.api.routes.updates._is_ha_addon", return_value=True),
-            patch("backend.app.api.routes.updates._is_docker_environment", return_value=True),
-        ):
-            response = await async_client.get("/api/v1/updates/check")
-        body = response.json()
-        assert body["is_ha_addon"] is True
-        assert body["update_method"] == "ha_addon"
-        # is_docker is preserved alongside so older frontend bundles still
-        # hit a managed-deployment branch (degrades to Docker UX) instead of
-        # rendering the in-app Install button.
-        assert body["is_docker"] is True
-
-    @pytest.mark.asyncio
-    async def test_check_docker_only_returns_docker_method(self, async_client: AsyncClient):
-        import httpx as _httpx
-
-        fake_release = {
-            "tag_name": "v999.9.9",
-            "name": "Far Future Release",
-            "body": "",
-            "html_url": "https://example.invalid/r",
-            "published_at": "2099-01-01T00:00:00Z",
-        }
-
-        class _Resp:
-            status_code = 200
-
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return [fake_release]
-
-        class _FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_):
-                return None
-
-            async def get(self, *_, **__):
-                return _Resp()
-
-        with (
-            patch.object(_httpx, "AsyncClient", _FakeClient),
-            patch("backend.app.api.routes.updates._is_ha_addon", return_value=False),
-            patch("backend.app.api.routes.updates._is_docker_environment", return_value=True),
-        ):
-            response = await async_client.get("/api/v1/updates/check")
-        body = response.json()
-        assert body["is_ha_addon"] is False
-        assert body["is_docker"] is True
-        assert body["update_method"] == "docker"
 
     @pytest.mark.asyncio
     async def test_check_backs_off_after_github_rate_limit(self, async_client: AsyncClient):
@@ -369,7 +329,10 @@ class TestUpdatesAPI:
                 return _RateLimitedResp()
 
         try:
-            with patch.object(_httpx, "AsyncClient", _FakeClient):
+            with (
+                patch.dict("os.environ", {"PRINTBUDDY_REF": "farm-ab677425"}),
+                patch.object(_httpx, "AsyncClient", _FakeClient),
+            ):
                 first = await async_client.get("/api/v1/updates/check")
                 second = await async_client.get("/api/v1/updates/check")
         finally:
@@ -412,62 +375,6 @@ class TestUpdatesAPI:
         assert selected is not None
         assert selected["tag_name"] == "v0.2.5.1b11"
 
-    @pytest.mark.asyncio
-    async def test_check_for_updates_sorts_releases_by_version(self, async_client: AsyncClient, db_session):
-        import httpx as _httpx
-
-        from backend.app.models.settings import Settings
-
-        db_session.add(Settings(key="include_beta_updates", value="true"))
-        await db_session.commit()
-
-        releases = [
-            {
-                "tag_name": "v0.2.5.1b9",
-                "name": "b9",
-                "body": "older first",
-                "html_url": "https://example.invalid/b9",
-                "published_at": "2026-07-30T16:44:30Z",
-            },
-            {
-                "tag_name": "v0.2.5.1b11",
-                "name": "b11",
-                "body": "newer second",
-                "html_url": "https://example.invalid/b11",
-                "published_at": "2026-07-30T19:02:09Z",
-            },
-        ]
-
-        class _Resp:
-            status_code = 200
-
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return releases
-
-        class _FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_):
-                return None
-
-            async def get(self, *_, **__):
-                return _Resp()
-
-        with (
-            patch.object(_httpx, "AsyncClient", _FakeClient),
-            patch("backend.app.api.routes.updates.APP_VERSION", "0.2.5.1b9"),
-        ):
-            response = await async_client.get("/api/v1/updates/check")
-
-        body = response.json()
-        assert body["update_available"] is True
-        assert body["latest_version"] == "0.2.5.1b11"
-        assert body["release_name"] == "b11"
-
     def test_parse_github_remote_recognises_ssh_https_and_dotgit(self):
         """`_parse_github_remote` must accept the four canonical forms `git
         remote -v` prints; anything else returns None so callers can treat
@@ -501,7 +408,7 @@ class TestUpdatesAPI:
     @pytest.mark.asyncio
     async def test_perform_update_preserves_ssh_origin_when_pointing_at_correct_repo(self, tmp_path):
         """Regression for the developer-checkout footgun: if origin already
-        points at github.com/vmhomelab/Printbuddy via SSH, the updater must
+        points at github.com/MzTechnology97/printbuddy via SSH, the updater must
         leave it alone instead of clobbering it with HTTPS. Pre-fix, every
         Apply Update click rewrote `git@github.com:...` to `https://...`,
         breaking subsequent `git push` for any developer testing the
@@ -523,7 +430,7 @@ class TestUpdatesAPI:
             # SSH URL. Every other subprocess returns successfully with no
             # output.
             if "get-url" in args and "origin" in args:
-                proc.communicate = AsyncMock(return_value=(b"git@github.com:vmhomelab/Printbuddy.git\n", b""))
+                proc.communicate = AsyncMock(return_value=(b"git@github.com:MzTechnology97/printbuddy.git\n", b""))
             else:
                 proc.communicate = AsyncMock(return_value=(b"", b""))
             proc.returncode = 0
@@ -668,61 +575,6 @@ class TestUpdatesAPI:
             "fail the whole fetch (the rest of the refs update cleanly). "
             f"Captured fetch call: {fetch_calls[0]['args']}"
         )
-
-    @pytest.mark.asyncio
-    async def test_apply_update_passes_discovered_release_to_perform_update(self, async_client: AsyncClient):
-        """End-to-end glue: the route handler calls `_discover_target_release`
-        to pick the tag (respecting include_beta_updates), then schedules
-        `_perform_update` with that tag — not with no arg, not with main."""
-        from backend.app.api.routes import updates as updates_module
-
-        captured_ref: list[str] = []
-
-        async def fake_perform_update(target_ref):
-            captured_ref.append(target_ref)
-
-        async def fake_discover(_db):
-            return "v0.2.4b1"
-
-        with (
-            patch.object(updates_module, "_is_ha_addon", return_value=False),
-            patch.object(updates_module, "_is_docker_environment", return_value=False),
-            patch.object(updates_module, "_perform_update", side_effect=fake_perform_update),
-            patch.object(updates_module, "_discover_target_release", side_effect=fake_discover),
-        ):
-            response = await async_client.post("/api/v1/updates/apply")
-
-        assert response.json()["success"] is True
-        assert captured_ref == ["v0.2.4b1"], (
-            f"apply_update must pass the discovered tag to _perform_update; captured invocations: {captured_ref}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_apply_update_returns_clear_error_when_no_release_resolves(self, async_client: AsyncClient):
-        """If GitHub is unreachable or no release matches the user's channel,
-        the route returns a useful error instead of silently kicking off an
-        update that can't possibly land. Avoids the previous failure mode
-        where in-app update appeared to succeed but did nothing."""
-        from backend.app.api.routes import updates as updates_module
-
-        async def fake_discover(_db):
-            return None
-
-        # The route guards against a concurrent update via the module-global
-        # `_update_status` — reset it so a previous test that left the status
-        # mid-flight doesn't short-circuit this one.
-        updates_module._update_status = {"status": "idle", "progress": 0, "message": "", "error": None}
-
-        with (
-            patch.object(updates_module, "_is_ha_addon", return_value=False),
-            patch.object(updates_module, "_is_docker_environment", return_value=False),
-            patch.object(updates_module, "_discover_target_release", side_effect=fake_discover),
-        ):
-            response = await async_client.post("/api/v1/updates/apply")
-
-        body = response.json()
-        assert body["success"] is False
-        assert "release" in body["message"].lower()
 
     @pytest.mark.asyncio
     async def test_perform_update_runs_pip_in_app_dir_not_data_dir(self, tmp_path):
