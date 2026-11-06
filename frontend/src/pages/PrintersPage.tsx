@@ -129,6 +129,7 @@ import { FilamentSlotCircle } from '../components/FilamentSlotCircle';
 import { Collapsible } from '../components/Collapsible';
 import { ConnectionDiagnosticModal, DiagnosticChecklist } from '../components/ConnectionDiagnostic';
 import { KlipperControlPanel } from '../components/KlipperControlPanel';
+import { KlipperAlert } from '../components/KlipperSafety'; // fork: Klipper errors and runout
 import { getColorName, parseFilamentColor, isLightColor } from '../utils/colors';
 import { getPrinterFileRuleSet, isPrintableForProvider } from '../utils/printerFileRules';
 import type { CameraViewMode } from '../api/client';
@@ -4206,6 +4207,7 @@ function PrinterCard({
             )}
 
             <SortablePrinterCardSection layoutEditing={layoutEditing} id="indicators" title={t('printers.indicators')} order={getCardSectionOrder('indicators')}>
+            {isMoonrakerProvider && <KlipperAlert printerId={printer.id} status={status} showToast={showToast} />}
             {viewMode === 'expanded' && showClearPlateButton && (
               <button
                 type="button"

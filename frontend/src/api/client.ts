@@ -460,6 +460,8 @@ export interface PrinterStatus {
   speed_level: number;
   // Chamber light on/off
   chamber_light: boolean;
+  // fork: Klipper (Moonraker) only: Klipper's state, why it is not ready, a pause for filament runout
+  klipper?: { state: string; message: string | null; filament_runout: boolean } | null;
   // Active extruder for dual nozzle (0=right, 1=left)
   active_extruder: number;
   // AMS mapping - which AMS is connected to which nozzle
@@ -3850,6 +3852,13 @@ export const api = {
     request<{ success: boolean }>(`/printers/${printerId}/klipper/console`, {
       method: 'POST',
       body: JSON.stringify({ script, confirm }),
+    }),
+  klipperEmergencyStop: (printerId: number) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/emergency-stop`, { method: 'POST' }),
+  // confirm: restart during a print (409 otherwise)
+  klipperFirmwareRestart: (printerId: number, confirm = false) =>
+    request<{ success: boolean }>(`/printers/${printerId}/klipper/firmware-restart?confirm=${confirm}`, {
+      method: 'POST',
     }),
 
   // Chamber Light Control

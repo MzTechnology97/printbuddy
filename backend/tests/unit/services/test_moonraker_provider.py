@@ -1296,3 +1296,101 @@ def test_moonraker_chamber_without_a_known_limit_still_refuses_a_negative_target
         client.set_chamber_temperature(-5)
     assert client.set_chamber_temperature(60) is True
     assert sent == ["SET_HEATER_TEMPERATURE HEATER=chamber_heater TARGET=60"]
+
+
+def _status_poll_client(monkeypatch, status: dict, available: list[str]):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Sovol SV08")
+    monkeypatch.setattr(
+        client,
+        "_query_objects",
+        lambda names: {n: status[n] for n in names} if names[0].startswith("filament_") else status,
+    )
+    monkeypatch.setattr(client, "_available_objects", lambda: available)
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_print_file_metadata", lambda filename: {})
+    return client
+
+
+def test_moonraker_paused_for_filament_runout(monkeypatch):
+    # Shape of a real printer with a switch sensor and a disabled motion sensor (names as Klipper gives them).
+    status = {
+        "webhooks": {"state": "ready", "state_message": "Printer is ready"},
+        "print_stats": {"state": "paused", "filename": "part.gcode"},
+        "filament_switch_sensor filament_sensor": {"filament_detected": False, "enabled": True},
+        "filament_motion_sensor encoder_sensor": {"filament_detected": True, "enabled": False},
+    }
+    available = ["webhooks", "filament_switch_sensor filament_sensor", "filament_motion_sensor encoder_sensor"]
+    client = _status_poll_client(monkeypatch, status, available)
+
+    client.request_status_update()
+    assert client.state.state == "PAUSE"
+    assert client.state.klipper == {"state": "ready", "message": None, "filament_runout": True}
+
+    # A pause by hand with filament loaded, or a disabled sensor without filament, is no runout.
+    status["filament_switch_sensor filament_sensor"] = {"filament_detected": True, "enabled": True}
+    status["filament_motion_sensor encoder_sensor"] = {"filament_detected": False, "enabled": False}
+    client.request_status_update()
+    assert client.state.klipper["filament_runout"] is False
+
+
+def test_moonraker_klipper_shutdown_is_an_error_with_its_message(monkeypatch):
+    status = {
+        "webhooks": {
+            "state": "shutdown",
+            "state_message": "MCU 'mcu' shutdown: Timer too close\nOnce fixed, use FIRMWARE_RESTART",
+        },
+        "print_stats": {"state": "standby"},
+    }
+    client = _status_poll_client(monkeypatch, status, ["webhooks"])
+    client.request_status_update()
+    assert client.state.state == "FAILED"
+    assert client.state.klipper["state"] == "shutdown"
+    assert client.state.klipper["message"].startswith("MCU 'mcu' shutdown: Timer too close")
+
+
+def test_moonraker_klippy_not_connected_is_an_error_not_offline(monkeypatch):
+    import httpx
+
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Creality K1")
+    completed = []
+    client.on_print_complete = completed.append
+    client._has_status_sample, client._last_state = True, "RUNNING"
+
+    def refused(names):
+        request = httpx.Request("GET", "http://moonraker.local:7125/printer/objects/query")
+        raise httpx.HTTPStatusError("503", request=request, response=httpx.Response(503, request=request))
+
+    replies = {
+        "server/info": {"klippy_state": "error"},
+        "printer/info": {"state": "error", "state_message": "Error loading config: Option 'x' is not valid"},
+        "server/history/list?limit=1&order=desc": {"jobs": [{"status": "klippy_disconnect"}]},
+    }
+    monkeypatch.setattr(client, "_query_objects", refused)
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: replies[path])
+
+    assert client.request_status_update() is True
+    assert (client.state.connected, client.state.state) == (True, "FAILED")
+    assert client.state.klipper == {
+        "state": "error",
+        "message": "Error loading config: Option 'x' is not valid",
+        "filament_runout": False,
+    }
+    assert [c["status"] for c in completed] == ["failed"]  # the print it was running is a failure
+
+    def down(path, **kwargs):
+        raise httpx.ConnectError("down")
+
+    # Moonraker unreachable too: the poll fails and the printer goes offline, as before.
+    monkeypatch.setattr(client, "_get", down)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.request_status_update()
+
+
+def test_moonraker_emergency_stop_and_firmware_restart_post_to_moonraker(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125")
+    posted = []
+    monkeypatch.setattr(client, "_post", lambda path, payload: posted.append(path) or {})
+    assert client.emergency_stop() and client.firmware_restart()
+    assert posted == ["printer/emergency_stop", "printer/firmware_restart"]
