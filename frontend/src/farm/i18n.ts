@@ -416,6 +416,8 @@ const en = {
     summaryProblems_other: '{{count}} to fix',
     toQueue: 'Follow them in the Queue →',
     slicingNow: 'Slicing: {{percent}}%',
+    clearHistoryFarm_one: '{{count}} of them is a farm job ({{completed}} finished batch for Seller Hub): it keeps its outcome, nothing is lost.',
+    clearHistoryFarm_other: '{{count}} of them are farm jobs ({{completed}} finished batches for Seller Hub): each keeps its outcome, nothing is lost.',
   },
   products: {
     title: 'Products',
@@ -883,6 +885,8 @@ const it: typeof en = {
     summaryProblems_other: '{{count}} da sistemare',
     toQueue: 'Seguili nella Coda →',
     slicingNow: 'Slicing in corso: {{percent}}%',
+    clearHistoryFarm_one: 'Tra queste c\'è {{count}} lavoro farm ({{completed}} lotti finiti per Seller Hub): conserva il suo esito, non si perde nulla.',
+    clearHistoryFarm_other: 'Tra queste ci sono {{count}} lavori farm ({{completed}} lotti finiti per Seller Hub): ognuno conserva il suo esito, non si perde nulla.',
   },
   products: {
     title: 'Prodotti',

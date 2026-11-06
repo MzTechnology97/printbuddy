@@ -62,11 +62,17 @@ def _now() -> datetime:
 def with_fingerprint(remote_filename: str, data: bytes) -> str:
     sha8 = hashlib.sha256(data).hexdigest()[:8]
     if FINGERPRINT_RE.search(remote_filename):
-        remote_filename = re.sub(r"__[0-9a-f]{8}(?=\.)", "", remote_filename, count=1)
+        remote_filename = without_fingerprint(remote_filename)
     for ext in _EXTENSIONS:
         if remote_filename.endswith(ext):
             return f"{remote_filename[: -len(ext)]}__{sha8}{ext}"
     return f"{remote_filename}__{sha8}"
+
+
+def without_fingerprint(name: str) -> str:
+    """The name a file had before ``fingerprint`` added ``__<sha8>`` (before its extension, or at the end):
+    the name its archive and its library file know it by."""
+    return re.sub(r"__[0-9a-f]{8}(?=\.|$)", "", name, count=1)
 
 
 async def fingerprint(remote_filename: str, file_path: Path) -> str:

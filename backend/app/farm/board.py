@@ -99,7 +99,12 @@ def _group(job: FarmPrintJob | None, item: PrintQueueItem | None) -> str:
     if job is not None and job.status == "cancelled" and item is None:
         return "history"
     if item is None:
-        return "history"
+        recent_fail = (
+            job is not None
+            and job.outcome == "failed"
+            and (job.finished_at or _now()) > _now() - timedelta(hours=PROBLEM_HOURS)
+        )
+        return "problems" if recent_fail else "history"  # its queue item deleted: the outcome it kept
     if item.status == "printing":
         return "printing"
     if item.status == "pending":
@@ -120,6 +125,8 @@ def _phase(job: FarmPrintJob | None, item: PrintQueueItem | None) -> str:
     if job is not None and job.status == "cancelled" and item is None:
         return "cancelled"
     if item is None:
+        if job is not None and job.outcome:  # its queue item deleted: the outcome it kept
+            return {"completed": "finished"}.get(job.outcome, job.outcome)
         return "finished" if job is not None and job.status == "outside" else "waiting"
     if item.status == "pending":
         return "sending" if item.dispatching_at else "queued"
@@ -252,6 +259,7 @@ async def board(
                 PrintQueueItem.status.in_(("pending", "printing")),
                 PrintQueueItem.completed_at >= _now() - timedelta(hours=PROBLEM_HOURS),
                 (FarmPrintJob.status == "cancelled") & (FarmPrintJob.updated_at >= recent),
+                FarmPrintJob.outcome.is_not(None) & (FarmPrintJob.finished_at >= recent),
             )
         )
         .order_by(FarmPrintJob.id.desc())
@@ -284,7 +292,9 @@ async def board(
 
     def ended(pair) -> datetime:
         job, item = pair
-        when = (item.completed_at if item is not None else None) or (job.updated_at if job is not None else None)
+        when = (item.completed_at if item is not None else None) or (
+            (job.finished_at or job.updated_at) if job is not None else None
+        )
         return _naive(when) or datetime.min
 
     history = sorted(groups["history"], key=ended, reverse=True)

@@ -7,7 +7,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import require_permission_if_auth_enabled
@@ -58,8 +58,8 @@ class AssignIn(BaseModel):
 
 
 def _state(job: FarmPrintJob, item_status: str | None) -> str:
-    if job.status == "queued":
-        return item_status or "removed"
+    if job.status == "queued":  # its queue item's state; once deleted, the outcome the job kept (``outcome``)
+        return item_status or job.outcome or "removed"
     return "completed" if job.status == "outside" else job.status
 
 
@@ -98,6 +98,7 @@ def _job_dict(
         "printer_id": job.printer_id,
         "printer": printer,
         "queue_item_id": job.queue_item_id,
+        "archive_id": job.archive_id,
         # The batch's pieces: the plate's less the excluded objects matched so far (``exclusions`` says if there
         # may be more), else the plate's: a ceiling of the good pieces either way. It can change while printing.
         "pieces": job.printed_pieces if exclusions and job.printed_pieces is not None else planned,
@@ -113,6 +114,27 @@ def _job_dict(
         "print_name": job.outside_name,  # outside the queue: the file it printed
         "proposal": job.proposal,  # to_assign: the components its name suggests
     }
+
+
+@router.get("/jobs/history-links", dependencies=[_read])
+async def history_links(
+    printer_id: int | None = None, status: str | None = None, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """How many farm jobs the queue's "clear history" touches (same filters as ``/queue/history``): they keep
+    their outcome on themselves; the warning says how many, and how many are batches Seller Hub may still check."""
+    ended = ("completed", "failed", "skipped", "cancelled")
+    query = (
+        select(PrintQueueItem.status, func.count(FarmPrintJob.id))
+        .join(FarmPrintJob, FarmPrintJob.queue_item_id == PrintQueueItem.id)
+        .where(PrintQueueItem.status.in_(ended if not status else [status] if status in ended else []))
+        .group_by(PrintQueueItem.status)
+    )
+    if printer_id is not None:
+        query = query.where(
+            PrintQueueItem.printer_id.is_(None) if printer_id == -1 else PrintQueueItem.printer_id == printer_id
+        )
+    counts = dict((await db.execute(query)).all())
+    return {"jobs": sum(counts.values()), "completed": counts.get("completed", 0)}
 
 
 @router.post("/jobs", dependencies=[_create])
@@ -151,10 +173,19 @@ async def list_jobs(
         .outerjoin(Printer, Printer.id == FarmPrintJob.printer_id)
     )
     if state == "completed":
-        queued = query.where(FarmPrintJob.status == "queued", PrintQueueItem.status == "completed")
+        queued = query.where(
+            FarmPrintJob.status == "queued",
+            or_(
+                PrintQueueItem.status == "completed",
+                # its queue item deleted: the outcome it kept
+                PrintQueueItem.id.is_(None) & (FarmPrintJob.outcome == "completed"),
+            ),
+        )
         printed = query.where(FarmPrintJob.status == "outside")
         if since is not None:
-            queued = queued.where(PrintQueueItem.completed_at >= service._utc(since))
+            queued = queued.where(
+                func.coalesce(PrintQueueItem.completed_at, FarmPrintJob.finished_at) >= service._utc(since)
+            )
             printed = printed.where(FarmPrintJob.listed_at >= service._utc(since))
         jobs = [_job_dict(*row) for q in (queued, printed) for row in (await db.execute(q)).all()]
         return sorted(jobs, key=lambda j: (j["listed_at"] or datetime.min, j["id"]))

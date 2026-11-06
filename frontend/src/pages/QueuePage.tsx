@@ -58,6 +58,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
 import { JobsBoard } from '../farm/JobsBoard';
+import { farmApi } from '../farm/api';
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import type { PrintQueueItem, PrintQueueBulkUpdate, Permission } from '../api/client';
 import { Card } from '../components/Card';
@@ -928,6 +929,13 @@ export function QueuePage() {
     onError: () => showToast(t('queue.toast.reorderFailed'), 'error'),
   });
 
+  // fork: how many farm jobs "clear history" touches, for its warning
+  const historyLinks = useQuery({
+    queryKey: ['farm', 'history-links', apiFilterPrinter, historyStatusFilter],
+    queryFn: () => farmApi.getHistoryLinks(apiFilterPrinter, historyStatusFilter || undefined),
+    enabled: showClearHistoryConfirm,
+  });
+
   const clearHistoryMutation = useMutation({
     mutationFn: async () => {
       let deleted = 0;
@@ -1652,7 +1660,14 @@ export function QueuePage() {
       {showClearHistoryConfirm && (
         <ConfirmModal
           title={t('queue.confirm.clearHistoryTitle')}
-          message={t('queue.confirm.clearHistoryMessage', { count: historyItems.length })}
+          message={
+            t('queue.confirm.clearHistoryMessage', { count: historyItems.length })
+            // fork: the farm jobs among them keep their outcome; the warning says how many
+            + (historyLinks.data?.jobs
+              ? ` ${t('farm.board.clearHistoryFarm', { count: historyLinks.data.jobs, completed: historyLinks.data.completed })}`
+              : '')
+          }
+          isLoading={historyLinks.isLoading}
           confirmText={t('queue.clearHistory')}
           variant="danger"
           onConfirm={() => {

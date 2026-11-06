@@ -467,6 +467,14 @@ export const farmApi = {
       `/board?history_offset=${historyOffset}&history_limit=${historyLimit}${printerId ? `&printer_id=${printerId}` : ''}`,
     ),
   getBoardDetail: (key: string) => farmRequest<FarmBoardDetail>(`/board/${key}`),
+  /** How many farm jobs the queue's "clear history" touches, with its filters. */
+  getHistoryLinks: (printerId?: number, status?: string) =>
+    farmRequest<{ jobs: number; completed: number }>(
+      `/jobs/history-links?${new URLSearchParams({
+        ...(printerId !== undefined ? { printer_id: String(printerId) } : {}),
+        ...(status ? { status } : {}),
+      })}`,
+    ),
   boardAction: (key: string, action: 'retry-slice' | 'reslice' | 'requeue') =>
     farmRequest<Record<string, unknown>>(`/board/${key}/${action}`, { method: 'POST' }),
   getPrinterSpools: () => farmRequest<FarmPrinterSpool[]>('/printer-spools'),

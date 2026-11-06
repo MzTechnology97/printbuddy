@@ -398,6 +398,9 @@ async def delete_user(
     if delete_items:
         # Delete all items created by this user
         await db.execute(delete(PrintArchive).where(PrintArchive.created_by_id == user_id))
+        from backend.app.farm.jobs.outcome import keep_outcomes  # fork: farm jobs keep their outcome
+
+        await keep_outcomes(db, PrintQueueItem.created_by_id == user_id)
         await db.execute(delete(PrintQueueItem).where(PrintQueueItem.created_by_id == user_id))
         await db.execute(delete(LibraryFile).where(LibraryFile.created_by_id == user_id))
         await db.execute(delete(PrintBatch).where(PrintBatch.created_by_id == user_id))
