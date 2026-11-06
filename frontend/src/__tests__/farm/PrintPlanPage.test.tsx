@@ -90,7 +90,6 @@ describe('PrintPlanPage', () => {
   let savedSettings: unknown;
   let createdJobs: unknown;
   let jobs: object[];
-  let savedSpool: unknown;
 
   beforeEach(() => {
     savedSettings = undefined;
@@ -108,10 +107,6 @@ describe('PrintPlanPage', () => {
           { printer_id: 10, name: 'K1', model: 'K1', material: null, color_name: null, color: null, updated_at: null },
         ]),
       ),
-      http.put('/api/v1/farm/printer-spools/:id', async ({ params, request }) => {
-        savedSpool = { id: params.id, ...((await request.json()) as object) };
-        return HttpResponse.json({});
-      }),
       http.get('/api/v1/farm/plan/settings', () =>
         HttpResponse.json({ url: 'http://hub.test:8000', tolerance: 80, colors: { nero: '111111' } }),
       ),
@@ -127,10 +122,11 @@ describe('PrintPlanPage', () => {
     const first = (await screen.findByText('Tartufo sopra – Marrone')).closest('li')!;
     expect(within(first).getByText('out of stock')).toBeInTheDocument();
     expect(within(first).getByText(/Missing 30/)).toBeInTheDocument();
-    expect(within(first).getByText('PROPOSED')).toBeInTheDocument();
-    expect(within(first).getByText(/A1-truffle\.3mf/)).toBeInTheDocument();
-    expect(within(first).getByText(/to slice/)).toBeInTheDocument(); // the P1S plate
-    expect(within(first).getByText(/colour not loaded/)).toBeInTheDocument();
+    // Compact: no plates or printers on the card, a Print button opening the summary where they are.
+    expect(within(first).queryByText('PROPOSED')).not.toBeInTheDocument();
+    expect(within(first).queryByText(/A1-truffle\.3mf/)).not.toBeInTheDocument();
+    expect(within(first).queryByText(/colour not loaded/)).not.toBeInTheDocument();
+    expect(within(first).getByRole('button', { name: /Print/ })).toBeEnabled();
     // The product's photo (its colour variant) and the proposed plate's preview, opening the 3D viewer.
     expect(within(first).getByText('In: Tartufo – Marrone')).toBeInTheDocument();
     expect(within(first).getByRole('img', { name: 'Photo of Tartufo – Marrone' }).getAttribute('src')).toContain(
@@ -155,7 +151,7 @@ describe('PrintPlanPage', () => {
     render(<PrintPlanPage />);
     const first = (await screen.findByText('Tartufo sopra – Marrone')).closest('li')!;
     // Nothing is created before the summary is confirmed.
-    await user.click(within(first).getByRole('button', { name: /Queue/ }));
+    await user.click(within(first).getByRole('button', { name: /Print/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Queue: summary' });
     expect(createdJobs).toBeUndefined();
     expect(within(dialog).getByText(/One print: 15 pieces with the proposed plate \(30 missing\)/)).toBeInTheDocument();
@@ -186,7 +182,7 @@ describe('PrintPlanPage', () => {
     await waitFor(() => expect(createdJobs).toEqual({ jobs: [{ component_code: 'C-0121', plate_ids: [1, 2] }] }));
 
     // A chosen printer keeps only the plates of its model and goes with the job.
-    await user.click(within(first).getByRole('button', { name: /Queue/ }));
+    await user.click(within(first).getByRole('button', { name: /Print/ }));
     const again = await screen.findByRole('dialog', { name: 'Queue: summary' });
     await user.selectOptions(within(again).getByLabelText('Printer'), 'P1S · free');
     expect(within(again).queryByText(/A1-truffle\.3mf/)).not.toBeInTheDocument();
@@ -203,7 +199,7 @@ describe('PrintPlanPage', () => {
     );
 
     // A chosen 3MF goes alone; a new slice can be forced before it is queued.
-    await user.click(within(first).getByRole('button', { name: /Queue/ }));
+    await user.click(within(first).getByRole('button', { name: /Print/ }));
     const third = await screen.findByRole('dialog', { name: 'Queue: summary' });
     await user.selectOptions(within(third).getByLabelText('3MF and plate'), '1');
     await user.click(within(third).getByRole('checkbox', { name: /Force a new slice/ }));
@@ -269,14 +265,11 @@ describe('PrintPlanPage', () => {
     expect(screen.getByRole('link', { name: 'Follow them in the Queue →' })).toHaveAttribute('href', '/queue?view=jobs');
   });
 
-  it('sets the spool loaded on a Klipper printer without CFS', async () => {
-    const user = userEvent.setup();
+  it('has no spools section any more: they are set on the printer cards in Home', async () => {
     render(<PrintPlanPage />);
-    await user.type(await screen.findByLabelText('Material K1'), 'PETG');
-    await waitFor(() => expect(screen.getByRole('option', { name: 'Nero' })).toBeInTheDocument());
-    await user.selectOptions(screen.getByLabelText('Colour K1'), 'Nero');
-    await user.click(screen.getByRole('button', { name: 'Save K1' }));
-    await waitFor(() => expect(savedSpool).toEqual({ id: '10', material: 'PETG', color_name: 'Nero' }));
+    await screen.findByText('Tartufo sopra – Marrone');
+    expect(screen.queryByText('Spool loaded')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Material')).not.toBeInTheDocument();
   });
 
   it('saves the Seller Hub address and tolerance', async () => {

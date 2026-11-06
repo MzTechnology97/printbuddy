@@ -22,6 +22,7 @@ function Loaded({ printerId }: { printerId: number }) {
   const spools = useQuery({ queryKey: ['farm', 'printer-spools'], queryFn: farmApi.getPrinterSpools });
   const loaded = buildLoadedFilaments(status.data);
   const byHand = spools.data?.find((s) => s.printer_id === printerId && s.material);
+  const setByHand = spools.data?.some((s) => s.printer_id === printerId); // no CFS: set on its card in Home
   if (status.isLoading) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -38,7 +39,9 @@ function Loaded({ printerId }: { printerId: number }) {
           {byHand.material} {byHand.color_name} · {t('farm.spools.byHand')}
         </span>
       )}
-      {!loaded.length && !byHand && <span className="text-amber-400">{t('farm.jobs.nothingLoaded')}</span>}
+      {!loaded.length && !byHand && (
+        <span className="text-amber-400">{t(setByHand ? 'farm.jobs.spoolOnHome' : 'farm.jobs.nothingLoaded')}</span>
+      )}
     </div>
   );
 }

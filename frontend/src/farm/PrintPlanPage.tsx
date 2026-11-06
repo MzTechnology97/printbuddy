@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AlertTriangle, ClipboardList, ImageOff, ListPlus, Loader2, RefreshCw, Settings2, X } from 'lucide-react';
+import { AlertTriangle, ClipboardList, ImageOff, ListPlus, Loader2, Printer, RefreshCw, Settings2, X } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
@@ -18,7 +18,6 @@ import {
   type FarmPlanComponent,
   type FarmPlanPlate,
   type FarmPlanSettings,
-  type FarmPrinterSpool,
 } from './api';
 import { BoardSummary, SlicerBadge } from './JobsBoard';
 import { PlateThumb } from './PlatesPanel';
@@ -285,8 +284,6 @@ function ComponentCard({ c, selected, onSelect, onAccoda }: {
   onAccoda: () => void;
 }) {
   const { t } = useTranslation();
-  const [all, setAll] = useState(false);
-  const plates = all ? c.plates : c.plates.slice(0, 2);
   const canQueue = c.plates.length > 0 && c.missing > 0;
   return (
     <li className="bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4 space-y-3">
@@ -301,7 +298,8 @@ function ComponentCard({ c, selected, onSelect, onAccoda }: {
             style={{ background: `#${c.color_hex}` }} />
         )}
         <ComponentPictures c={c} />
-        <div className="min-w-0 flex-1">
+        {/* phone: the text on its own row under the pictures and the button, never squeezed beside them */}
+        <div className="min-w-0 basis-full order-last sm:order-none sm:basis-0 sm:flex-1">
           <p className="text-white">
             <span className="font-mono text-bambu-green mr-2">{c.code}</span>
             {c.name}
@@ -316,9 +314,9 @@ function ComponentCard({ c, selected, onSelect, onAccoda }: {
             {c.days_left != null && ` · ${t('farm.plan.daysLeft', { count: Math.round(c.days_left) })}`}
           </p>
         </div>
-        <Button size="sm" disabled={!canQueue} onClick={onAccoda}
+        <Button size="sm" className="ml-auto sm:ml-0" disabled={!canQueue} onClick={onAccoda}
           title={c.missing <= 0 ? t('farm.jobs.covered') : undefined}>
-          <ListPlus className="w-4 h-4" /> {t('farm.jobs.accoda')}
+          <Printer className="w-4 h-4" /> {t('farm.jobs.print')}
         </Button>
       </div>
       {!c.known ? (
@@ -329,18 +327,7 @@ function ComponentCard({ c, selected, onSelect, onAccoda }: {
           {t('farm.plan.noPlates', { shape: c.shape || c.name })}{' '}
           <Link to="/farm/products?tab=plates" className="text-bambu-green hover:underline">{t('farm.plan.toPlates')}</Link>
         </p>
-      ) : (
-        <ul className="space-y-2">
-          {plates.map((p, i) => (
-            <PlateRow key={p.plate_id} plate={p} proposed={i === 0 && p.score > 0} />
-          ))}
-          {c.plates.length > 2 && (
-            <button type="button" className="text-xs text-bambu-green hover:underline" onClick={() => setAll(!all)}>
-              {all ? t('farm.plan.fewer') : t('farm.plan.morePlates', { count: c.plates.length - 2 })}
-            </button>
-          )}
-        </ul>
-      )}
+      ) : null /* the plates, the printers and the proposal are in the Print summary */}
     </li>
   );
 }
@@ -757,68 +744,6 @@ function linkedComponents(param: string, rows: FarmPlanComponent[], t: TFunction
   return { usable, notes };
 }
 
-const MATERIALS = ['PLA', 'PETG', 'ASA', 'ABS', 'TPU', 'PA', 'PC'];
-
-function SpoolRow({ s, colors }: { s: FarmPrinterSpool; colors: string[] }) {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const [material, setMaterial] = useState(s.material || '');
-  const [color, setColor] = useState(s.color_name || '');
-  const done = () => queryClient.invalidateQueries({ queryKey: ['farm'] });
-  const save = useMutation({
-    mutationFn: () => farmApi.setPrinterSpool(s.printer_id, { material, color_name: color }),
-    onSuccess: () => { done(); showToast(t('farm.products.saved'), 'success'); },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  const clear = useMutation({
-    mutationFn: () => farmApi.clearPrinterSpool(s.printer_id),
-    onSuccess: () => { setMaterial(''); setColor(''); done(); },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  return (
-    <li className="p-3 flex flex-wrap items-center gap-2 text-sm">
-      <span className="text-white w-32 truncate" title={s.model}>{s.name}</span>
-      {s.color && <span aria-hidden className="w-4 h-4 rounded-full border border-bambu-gray/60" style={{ background: `#${s.color}` }} />}
-      <input list={`farm-materials-${s.printer_id}`} aria-label={`${t('farm.spools.material')} ${s.name}`} className={`${INPUT} py-1 w-28`}
-        value={material} placeholder={t('farm.spools.material')} onChange={(e) => setMaterial(e.target.value)} />
-      <datalist id={`farm-materials-${s.printer_id}`}>
-        {(s.materials?.length ? s.materials : MATERIALS).map((m) => <option key={m} value={m} />)}
-      </datalist>
-      <select aria-label={`${t('farm.spools.color')} ${s.name}`} className={`${INPUT} py-1`} value={color}
-        onChange={(e) => setColor(e.target.value)}>
-        <option value="">{t('farm.spools.color')}</option>
-        {colors.map((c) => <option key={c} value={c}>{c}</option>)}
-      </select>
-      <Button size="sm" aria-label={`${t('farm.products.save')} ${s.name}`}
-        disabled={!material.trim() || !color || save.isPending} onClick={() => save.mutate()}>
-        {t('farm.products.save')}
-      </Button>
-      {s.material && (
-        <Button size="sm" variant="ghost" onClick={() => clear.mutate()}>{t('farm.spools.empty')}</Button>
-      )}
-    </li>
-  );
-}
-
-/** Klipper printers without CFS can't say what is loaded: the user does, until they change it. */
-function SpoolsCard() {
-  const { t } = useTranslation();
-  const spools = useQuery({ queryKey: ['farm', 'printer-spools'], queryFn: farmApi.getPrinterSpools });
-  const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
-  if (!spools.data?.length) return null;
-  const colors = Object.keys(settings.data?.colors || {}).map((c) => c.charAt(0).toUpperCase() + c.slice(1));
-  return (
-    <section className="space-y-2">
-      <h2 className="text-lg font-semibold text-white">{t('farm.spools.title')}</h2>
-      <p className="text-xs text-bambu-gray max-w-3xl">{t('farm.spools.intro')}</p>
-      <ul className="divide-y divide-bambu-dark-tertiary bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg">
-        {spools.data.map((s) => <SpoolRow key={`${s.printer_id}-${s.updated_at}`} s={s} colors={colors} />)}
-      </ul>
-    </section>
-  );
-}
-
 /** 3MFs that will not work, by file: told when they are saved, gone once fixed (``farm.library_problems``). */
 function LibraryProblems() {
   const { t } = useTranslation();
@@ -902,7 +827,6 @@ export function PrintPlanPage() {
       )}
       <LibraryProblems />
       <BoardSummary />
-      <SpoolsCard />
       {summary ? (
         <AccodaSummary components={summary} notes={linkNotes} onDone={() => setSelected(new Set())}
           onClose={() => { setSummary(null); setLinkNotes([]); }} />

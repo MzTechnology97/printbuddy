@@ -97,6 +97,7 @@ import {
 
 import { useNavigate } from 'react-router-dom';
 import { api, discoveryApi, firmwareApi, withStreamToken, ApiError, getAuthToken } from '../api/client';
+import { PrinterSpoolLine } from '../farm/PrinterSpool'; // fork: the spool set by hand on a Klipper without CFS
 import { formatDateOnly, formatETA, formatDuration, parseUTCDate } from '../utils/date';
 import type { Printer, PrinterCreate, PrinterStatus, AMSUnit, DiscoveredPrinter, FirmwareUpdateInfo, FirmwareUploadStatus, LinkedSpoolInfo, SpoolAssignment, HMSError, InventorySpool, SmartPlug, PrinterDiagnosticResult, PandaBreathStatus, AppSettings } from '../api/client';
 import { Card, CardContent } from '../components/Card';
@@ -3840,6 +3841,8 @@ function PrinterCard({
             </Card>
           </div>
         )}
+
+        <PrinterSpoolLine printerId={printer.id} />
 
         {loadedSpoolPicker && (
           <SortablePrinterCardSection layoutEditing={layoutEditing} id="loaded-spool" title="Loaded spool" order={getCardSectionOrder('loaded-spool')}>
