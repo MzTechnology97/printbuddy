@@ -4860,7 +4860,7 @@ export default {
     farmFileCorrupt: 'Farm file not intact',
     farmFileCorruptDescription: 'A print file in a farm or NAS folder is damaged',
     farmLibraryProblem: 'Library problem',
-    farmLibraryProblemDescription: 'A 3MF saved in the library will not work (slicing, profile, printer model, empty plate)',
+    farmLibraryProblemDescription: 'A production 3MF in the library will not print (slicing, printer model, empty plate)',
     farmPlateToClear: 'Plate to clear',
     farmPlateToClearDescription: 'A printer finished and farm work waits for its plate',
     farmComponentUrgent: 'Urgent component stuck',
