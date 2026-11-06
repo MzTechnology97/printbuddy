@@ -26,7 +26,11 @@ def _set_sqlite_pragmas(dbapi_conn, connection_record):
 def _create_engine():
     """Create the async engine with dialect-appropriate settings."""
     if is_sqlite():
-        kwargs = {"pool_size": 20, "max_overflow": 200}
+        # 10 + 90, down from 20 + 200 (upstream #2883): in WAL mode SQLite keeps
+        # a closed connection's db fd open until the LAST connection closes, so
+        # the pool's fds stay at its peak (~441 at 20 + 200, ~201 here) and ate
+        # most of a 1024 nofile limit. 100 connections is ample here.
+        kwargs = {"pool_size": 10, "max_overflow": 90}
     else:
         kwargs = {
             "pool_size": settings.db_pool_size,

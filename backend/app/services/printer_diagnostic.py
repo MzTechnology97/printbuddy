@@ -43,6 +43,9 @@ async def _check_port(ip: str, port: int, timeout: float = _PORT_PROBE_TIMEOUT) 
         return False
 
 
+check_port = _check_port  # public: the MQTT connection watchdog probes the port too
+
+
 def _detect_docker_network_mode() -> str:
     """Detect Docker network mode.
 

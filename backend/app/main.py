@@ -96,7 +96,7 @@ from backend.app.services.bambu_ftp import (
     get_ftp_retry_settings,
     with_ftp_retry,
 )
-from backend.app.services.bambu_mqtt import PrinterState
+from backend.app.services.bambu_mqtt import BambuMQTTClient, PrinterState
 from backend.app.services.github_backup import github_backup_service
 from backend.app.services.homeassistant import homeassistant_service
 from backend.app.services.library_trash import library_trash_service
@@ -5704,6 +5704,92 @@ def stop_camera_cleanup():
         logging.getLogger(__name__).info("Camera stream cleanup stopped")
 
 
+# Dead-MQTT-session backstop (upstream #2732). check_staleness() only
+# handles a session that is connected but silent; once a Bambu client is
+# disconnected only paho's own retry is watching, and when that stops making
+# progress the printer stays "disconnected" for hours. Klipper/Moonraker clients
+# have their own WebSocket reconnect and are left alone.
+_connection_watchdog_task: asyncio.Task | None = None
+CONNECTION_WATCHDOG_INTERVAL = 60
+# Well past STALE_TIMEOUT (60s) and paho's 30s max reconnect backoff, so a
+# session that is recovering on its own is never interrupted.
+CONNECTION_WATCHDOG_OFFLINE_GRACE = 300
+CONNECTION_WATCHDOG_RETRY_INTERVAL = 300
+_connection_watchdog_last_attempt: dict[int, float] = {}
+
+
+async def _recover_dead_printer_sessions() -> int:
+    """Rebuild Bambu MQTT clients that have been offline too long; returns how many.
+
+    Never raises: one bad printer must not stop the sweep for the rest of the farm.
+    """
+    from backend.app.services.printer_diagnostic import PORT_MQTT, check_port
+
+    logger = logging.getLogger(__name__)
+    now = time.monotonic()
+    recovered = 0
+    for printer_id, client in list(printer_manager._clients.items()):
+        try:
+            if not isinstance(client, BambuMQTTClient):
+                continue
+            if client.state.connected:
+                _connection_watchdog_last_attempt.pop(printer_id, None)
+                continue
+            # 0 = never had a session: the initial connect is paho's job.
+            last_msg = client._last_message_time
+            if not last_msg:
+                continue
+            offline_for = time.time() - last_msg
+            if offline_for < CONNECTION_WATCHDOG_OFFLINE_GRACE:
+                continue
+            last_attempt = _connection_watchdog_last_attempt.get(printer_id)
+            if last_attempt is not None and now - last_attempt < CONNECTION_WATCHDOG_RETRY_INTERVAL:
+                continue
+            _connection_watchdog_last_attempt[printer_id] = now
+            # A printer switched off overnight is left to paho: rebuilding a
+            # client against an unreachable host only churns and fills the log.
+            if not await check_port(client.ip_address, PORT_MQTT):
+                logger.debug("Printer %s offline for %.0fs, MQTT port not answering", printer_id, offline_for)
+                continue
+            recovered += 1
+            logger.warning(
+                "Printer %s offline for %.0fs but answers on MQTT port %d - rebuilding its MQTT session",
+                printer_id,
+                offline_for,
+                PORT_MQTT,
+            )
+            # From async context this hard-resets: fresh client_id and paho's
+            # QoS 1 queue dropped, so an unacked project_file cannot replay (#1136).
+            client.force_reconnect_stale_session(f"offline for {offline_for:.0f}s, port still answering")
+        except Exception as e:
+            logger.warning("Connection watchdog failed for printer %s: %s", printer_id, e)
+    return recovered
+
+
+async def _connection_watchdog_loop() -> None:
+    # Let the initial connects settle before judging anyone offline.
+    await asyncio.sleep(CONNECTION_WATCHDOG_OFFLINE_GRACE)
+    while True:
+        await _recover_dead_printer_sessions()
+        await asyncio.sleep(CONNECTION_WATCHDOG_INTERVAL)
+
+
+def start_connection_watchdog():
+    global _connection_watchdog_task
+    if _connection_watchdog_task is None:
+        _connection_watchdog_task = asyncio.create_task(_connection_watchdog_loop())
+        logging.getLogger(__name__).info("Printer connection watchdog started")
+
+
+def stop_connection_watchdog():
+    global _connection_watchdog_task
+    if _connection_watchdog_task:
+        _connection_watchdog_task.cancel()
+        _connection_watchdog_task = None
+        _connection_watchdog_last_attempt.clear()
+        logging.getLogger(__name__).info("Printer connection watchdog stopped")
+
+
 # ---------------------------------------------------------------------------
 # Expected-print TTL eviction
 # ---------------------------------------------------------------------------
@@ -5875,6 +5961,12 @@ async def lifespan(app: FastAPI):
     from backend.app.core.asyncio_handlers import install_proactor_reset_filter
 
     install_proactor_reset_filter()
+
+    # Before anything opens files or sockets in bulk: a soft limit of 1024 is
+    # what turned descriptor exhaustion into a corrupted SQLite database (#2883).
+    from backend.app.core.fd_limit import raise_open_file_limit
+
+    raise_open_file_limit()
 
     await init_db()
 
@@ -6158,6 +6250,9 @@ async def lifespan(app: FastAPI):
     # Start camera stream orphan cleanup
     start_camera_cleanup()
 
+    # Backstop for Bambu MQTT sessions paho has stopped recovering (#2732)
+    start_connection_watchdog()
+
     # Start expected-print TTL eviction (prevents memory leak when prints are
     # registered but on_print_start never fires)
     start_expected_prints_cleanup()
@@ -6207,6 +6302,7 @@ async def lifespan(app: FastAPI):
     stop_ams_history_recording()
     stop_runtime_tracking()
     stop_camera_cleanup()
+    stop_connection_watchdog()
     from backend.app.services.loop_watchdog import stop_loop_watchdog
 
     stop_loop_watchdog()

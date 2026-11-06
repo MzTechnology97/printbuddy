@@ -26,6 +26,8 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
+from backend.app.utils.paho_teardown import retire_paho_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -430,7 +432,7 @@ class PandaBreathMQTTService:
                 self._disconnection_event = threading.Event()
                 self.client.disconnect()
                 await asyncio.to_thread(self._disconnection_event.wait, timeout=timeout)
-                self.client.loop_stop()
+                retire_paho_client(self.client, "panda-breath")
             except Exception as exc:
                 logger.debug("Panda Breath MQTT disconnect ignored: %s", exc)
             finally:

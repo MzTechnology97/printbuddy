@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
+from backend.app.utils.paho_teardown import retire_paho_client
+
 logger = logging.getLogger(__name__)
 
 # Paho's loop thread must always have a finite teardown window. A caller may
@@ -539,13 +541,12 @@ class BambuMQTTClient:
         #
         # Paho-network-thread callers (line ~2604/~2623 — dev-mode probe and
         # ams_filament_setting zombie detection inside `_update_state`)
-        #   → socket-close fallback. Calling `loop_stop()` from inside the
-        #     network thread would self-join and deadlock; the safe pattern is
-        #     to close the socket and let paho's own loop detect the broken
-        #     connection and auto-reconnect (same instance, same client_id —
-        #     queue replay is theoretically possible here but those paths have
-        #     always done socket-close and #1136 was specifically triggered
-        #     from the dispatch path).
+        #   → socket-close fallback. There is no running loop on that thread
+        #     to hand a rebuilt client, so close the socket and let paho's own
+        #     loop detect the broken connection and auto-reconnect (same
+        #     instance, same client_id — queue replay is theoretically
+        #     possible here but those paths have always done socket-close and
+        #     #1136 was specifically triggered from the dispatch path).
         logger.warning("[%s] Forcing MQTT reconnect: %s", self.serial_number, reason)
         self._stale_reconnecting = True
         self.state.connected = False
@@ -556,11 +557,10 @@ class BambuMQTTClient:
     def _reset_client_for_reconnect(self) -> None:
         """Route between hard-reset and socket-close based on caller thread.
 
-        Hard-reset (preferred) requires we're not running on paho's network
-        thread, since `loop_stop()` on the same thread deadlocks. Detect via
-        ``asyncio.get_running_loop()`` — paho's callback thread has no loop;
-        every legitimate hard-reset caller (FastAPI handlers, background
-        async tasks) does."""
+        Hard-reset (preferred) rebuilds the client and needs a running loop to
+        hand to ``connect()``. Detect via ``asyncio.get_running_loop()`` —
+        paho's callback thread has no loop; every legitimate hard-reset caller
+        (FastAPI handlers, background async tasks) does."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -581,14 +581,9 @@ class BambuMQTTClient:
         old_client = self._client
         self._client = None
         if old_client is not None:
-            try:
-                old_client.disconnect()  # MQTT DISCONNECT — broker drops session
-            except Exception:
-                pass
-            try:
-                old_client.loop_stop()  # blocks briefly until the network thread exits
-            except Exception:
-                pass
+            # Never join the old network thread here: it can be stuck in a TLS
+            # handshake indefinitely and this runs on the event loop (#3068).
+            retire_paho_client(old_client, self.serial_number)
         # Skip reconnect if no asyncio loop is available (test environment or
         # pre-init). The next initial connect() call from PrinterManager will
         # set up the client fresh.
@@ -3715,7 +3710,7 @@ class BambuMQTTClient:
             disconnected = self._disconnection_event.wait(timeout=timeout)
             if not disconnected:
                 logger.warning(
-                    "[%s] MQTT disconnect did not complete within %.1fs; closing socket before loop_stop",
+                    "[%s] MQTT disconnect did not complete within %.1fs; closing socket",
                     self.serial_number,
                     timeout,
                 )
@@ -3725,8 +3720,8 @@ class BambuMQTTClient:
                         sock.close()
                 except Exception:
                     pass
-            client.loop_stop()
             self._client = None
+            retire_paho_client(client, self.serial_number)  # never join paho's thread on the loop (#3068)
             self.state.connected = False
 
     def send_command(self, command: dict):

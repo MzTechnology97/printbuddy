@@ -59,7 +59,7 @@ def test_sqlite_engine_keeps_sqlite_specific_pool_defaults():
     create_engine.assert_called_once_with(
         fake_settings.database_url,
         echo=True,
-        pool_size=20,
-        max_overflow=200,
+        pool_size=10,
+        max_overflow=90,
     )
     listen.assert_called_once()
