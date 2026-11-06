@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import copy
+import json
+import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,6 +14,14 @@ from urllib.parse import quote, urljoin, urlparse, urlunparse
 import httpx
 
 from backend.app.services.bambu_mqtt import FilaSwitchState, NozzleInfo, PrintOptions
+
+logger = logging.getLogger(__name__)
+
+# fork: Moonraker's websocket keeps the printer objects up to date, so a status poll reads them from memory.
+_WS_SKIP_OBJECTS = frozenset({"configfile", "bed_mesh"})  # large and rarely read: still asked over HTTP
+_WS_STALE_SECONDS = 10.0  # no message for this long: the cache is not trusted, polls go back to HTTP
+_WS_IDLE_SECONDS = 5.0  # nothing received for this long: ask server.info to keep the link checked
+_WS_MAX_RETRY_SECONDS = 60.0
 
 
 @dataclass
@@ -607,6 +619,17 @@ def _normalize_moonraker_webcam(base_url: str, webcam: dict[str, Any]) -> dict[s
     }
 
 
+def _ws_is_event(name: str, values: Any) -> bool:
+    """A websocket change worth a status update at once: print state, Klipper state, filament sensor."""
+    if not isinstance(values, dict):
+        return False
+    if name in ("print_stats", "webhooks", "pause_resume"):
+        return "state" in values or "is_paused" in values
+    return (
+        name.split(" ", 1)[0] in ("filament_switch_sensor", "filament_motion_sensor") and "filament_detected" in values
+    )
+
+
 class MoonrakerPrinterClient:
     """Minimal Klipper/Mainsail provider backed by Moonraker.
 
@@ -647,6 +670,17 @@ class MoonrakerPrinterClient:
         self.webcams: list[dict[str, Any]] = []
         self._file_metadata: dict[str, dict[str, Any]] = {}  # fork: per printed file, read once
         self._heater_max_temp: dict[str, float] = {}  # fork: chamber heater -> its config max_temp
+        # fork: websocket push (start_websocket); polls and pushes take turns on the status
+        self._status_lock = threading.RLock()
+        self._ws_lock = threading.Lock()
+        self._ws_stop = threading.Event()
+        self._ws_thread: threading.Thread | None = None
+        self._ws_conn: Any = None  # the open websocket, closed by stop_websocket
+        self._ws_objects: list[str] = []  # every printer object, as printer.objects.list gives them
+        self._ws_status: dict[str, dict[str, Any]] = {}  # the subscribed objects, kept up to date
+        self._ws_live = False
+        self._ws_seen = 0.0  # monotonic time of the last message
+        self._ws_next_id = 0
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -680,6 +714,9 @@ class MoonrakerPrinterClient:
         return self._file_metadata[filename]
 
     def _query_objects(self, object_names: list[str]) -> dict[str, Any]:
+        cached = self._ws_cached(object_names)
+        if cached is not None:
+            return cached
         query = "printer/objects/query?" + "&".join(quote(name, safe="") for name in object_names)
         objects = self._get(query)
         return objects.get("status", objects) if isinstance(objects, dict) else {}
@@ -746,6 +783,9 @@ class MoonrakerPrinterClient:
         return normalized
 
     def _available_objects(self) -> list[str]:
+        if self._ws_fresh():
+            with self._ws_lock:
+                return list(self._ws_objects)
         objects = self._get("printer/objects/list")
         available = objects.get("objects", []) if isinstance(objects, dict) else []
         return [name for name in available if isinstance(name, str)] if isinstance(available, list) else []
@@ -1456,14 +1496,154 @@ class MoonrakerPrinterClient:
             self.webcams = []
 
     def disconnect(self, timeout: float = 0) -> None:  # noqa: ARG002 - kept for Bambu client compatibility
+        self.stop_websocket()
         self.state.connected = False
 
     def check_staleness(self) -> bool:
         try:
-            self.request_status_update()
+            with self._status_lock:
+                self.request_status_update()
         except Exception:
             self.state.connected = False
         return self.state.connected
+
+    # --- fork: Moonraker websocket -------------------------------------------------------------------------
+    # One daemon thread per printer subscribes to every object (but _WS_SKIP_OBJECTS) and merges Moonraker's
+    # notify_status_update into _ws_status. While it is fresh, _query_objects and _available_objects read it
+    # instead of HTTP; a change of print state, of Klipper's state or of a filament sensor updates the status
+    # at once. Any failure drops the cache: the polls go back to HTTP and the thread reconnects with backoff.
+
+    def start_websocket(self) -> None:
+        if self._ws_thread is not None and self._ws_thread.is_alive():
+            return
+        self._ws_stop.clear()
+        self._ws_thread = threading.Thread(target=self._ws_run, name="moonraker-websocket", daemon=True)
+        self._ws_thread.start()
+
+    def stop_websocket(self) -> None:
+        self._ws_stop.set()
+        with self._ws_lock:
+            self._ws_live = False
+            conn = self._ws_conn
+        if conn is not None:
+            conn.close()  # wakes the thread's recv at once
+        thread = self._ws_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _ws_url(self) -> str:
+        parsed = urlparse(urljoin(self.base_url, "websocket"))
+        return urlunparse(parsed._replace(scheme="wss" if parsed.scheme == "https" else "ws"))
+
+    def _ws_fresh(self) -> bool:
+        with self._ws_lock:
+            return self._ws_live and time.monotonic() - self._ws_seen < _WS_STALE_SECONDS
+
+    def _ws_cached(self, names: list[str]) -> dict[str, Any] | None:
+        """The objects from the websocket's cache, or None when it can't answer (stale, or a skipped object)."""
+        if not self._ws_fresh() or any(name in _WS_SKIP_OBJECTS for name in names):
+            return None
+        with self._ws_lock:
+            if any(name in self._ws_objects and name not in self._ws_status for name in names):
+                return None
+            # An object the printer doesn't have is left out, as Moonraker's HTTP query does.
+            return {name: copy.deepcopy(self._ws_status[name]) for name in names if name in self._ws_status}
+
+    def _ws_run(self) -> None:
+        delay = 2.0
+        while not self._ws_stop.is_set():
+            try:
+                self._ws_session()
+                delay = 2.0
+            except Exception as exc:  # noqa: BLE001 - any failure: back to HTTP, retry later
+                logger.debug("Moonraker websocket %s: %s", self.base_url, exc)
+            with self._ws_lock:
+                self._ws_live = False
+                self._ws_conn = None
+            if self._ws_stop.wait(delay):
+                return
+            delay = min(delay * 2, _WS_MAX_RETRY_SECONDS)
+
+    def _ws_session(self) -> None:
+        from websockets.sync.client import connect
+
+        with connect(
+            self._ws_url(), additional_headers=self._headers or None, open_timeout=self.timeout, max_size=2**23
+        ) as ws:
+            with self._ws_lock:
+                self._ws_conn = ws
+            if self._ws_stop.is_set():  # stopped while connecting
+                return
+            self._ws_subscribe(ws)
+            while not self._ws_stop.is_set():
+                try:
+                    raw = ws.recv(timeout=_WS_IDLE_SECONDS)
+                except TimeoutError:
+                    self._ws_call(ws, "server.info")  # the reply proves the link is alive
+                    continue
+                if self._ws_handle(json.loads(raw)):
+                    self._ws_subscribe(ws)  # Klipper restarted: its subscriptions are gone
+
+    def _ws_call(self, ws: Any, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """A JSON-RPC request; notifications arriving before its reply are handled on the way."""
+        self._ws_next_id += 1
+        request_id = self._ws_next_id
+        ws.send(json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}, "id": request_id}))
+        deadline = time.monotonic() + max(self.timeout, 10.0)
+        while time.monotonic() < deadline:
+            message = json.loads(ws.recv(timeout=max(0.1, deadline - time.monotonic())))
+            if message.get("id") != request_id:
+                self._ws_handle(message)
+                continue
+            if "error" in message:
+                raise RuntimeError(f"{method}: {message['error']}")
+            with self._ws_lock:
+                self._ws_seen = time.monotonic()
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+        raise TimeoutError(f"{method}: no reply")
+
+    def _ws_subscribe(self, ws: Any) -> None:
+        objects = [
+            name for name in self._ws_call(ws, "printer.objects.list").get("objects", []) if isinstance(name, str)
+        ]
+        wanted = {name: None for name in objects if name not in _WS_SKIP_OBJECTS}
+        status = self._ws_call(ws, "printer.objects.subscribe", {"objects": wanted}).get("status") or {}
+        with self._ws_lock:
+            self._ws_objects = objects
+            self._ws_status = {name: dict(values) for name, values in status.items() if isinstance(values, dict)}
+            self._ws_seen = time.monotonic()
+            self._ws_live = True
+
+    def _ws_handle(self, message: dict[str, Any]) -> bool:
+        """Merge one notification into the cache; True when Klipper restarted and must be subscribed again."""
+        method = message.get("method")
+        if method == "notify_status_update":
+            params = message.get("params") or [{}]
+            changes = params[0] if isinstance(params[0], dict) else {}
+            with self._ws_lock:
+                for name, values in changes.items():
+                    if isinstance(values, dict):
+                        self._ws_status.setdefault(name, {}).update(values)
+                self._ws_seen = time.monotonic()
+            if any(_ws_is_event(name, values) for name, values in changes.items()):
+                self._ws_push_status()
+            return False
+        if method in ("notify_klippy_disconnected", "notify_klippy_shutdown"):
+            if method == "notify_klippy_disconnected":
+                with self._ws_lock:
+                    self._ws_live = False  # Klipper's objects are gone until it is ready again
+            self._ws_push_status()
+            return False
+        return method == "notify_klippy_ready"
+
+    def _ws_push_status(self) -> None:
+        """A print, Klipper or sensor state changed: update the status now instead of at the next poll."""
+        try:
+            with self._status_lock:
+                self.request_status_update()
+        except Exception as exc:  # noqa: BLE001 - the next poll tries again
+            logger.debug("Moonraker push update %s: %s", self.base_url, exc)
 
     def _build_lifecycle_payload(self) -> dict[str, Any]:
         filename = self.state.subtask_name or self.state.current_print or self.state.gcode_file or "Unknown"
