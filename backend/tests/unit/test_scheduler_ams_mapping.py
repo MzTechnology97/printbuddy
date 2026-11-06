@@ -1029,6 +1029,61 @@ class TestExtractNozzleMappingFrom3mf:
         assert result is None
         zf.close()
 
+    def test_single_active_under_report_with_multi_group_falls_through(self):
+        """#1825: extruder_nozzle_stats under-reports the second nozzle, but the
+        slice genuinely uses two extruders (group_id 0 and 1). The shortcut must
+        NOT fire — the parser has to honour the per-filament group_id assignment.
+
+        H2D HT-AMS scenario from the report: physical_extruder_map ['1','0'],
+        extruder_nozzle_stats ['Standard#1','Standard#0'] (sum==1), but ASA is
+        group_id 0 (→ LEFT) and PETG is group_id 1 (→ RIGHT). Before the fix
+        the shortcut collapsed both onto LEFT; now group_id wins.
+        """
+        slice_info = """<?xml version="1.0" encoding="UTF-8"?>
+        <config>
+          <plate>
+            <filament id="1" type="ASA"  color="#FF0000" used_g="5.0" group_id="0"/>
+            <filament id="2" type="PETG" color="#00FF00" used_g="3.0" group_id="1"/>
+          </plate>
+        </config>"""
+        zf = _make_3mf_zip(
+            {
+                "physical_extruder_map": ["1", "0"],
+                "extruder_nozzle_stats": ["Standard#1", "Standard#0"],
+            },
+            slice_info_xml=slice_info,
+        )
+        result = extract_nozzle_mapping_from_3mf(zf)
+        # group_id 0 → physical_extruder_map[0] = 1 (LEFT)
+        # group_id 1 → physical_extruder_map[1] = 0 (RIGHT)
+        assert result == {1: 1, 2: 0}
+        zf.close()
+
+    def test_single_active_with_single_group_still_uses_shortcut(self):
+        """When stats report one active extruder AND the slice is truly
+        single-group, the shortcut is still correct and must continue to fire
+        (preserves the #851 behaviour for genuine single-nozzle prints made on
+        a multi-nozzle printer where only one nozzle is installed).
+        """
+        slice_info = """<?xml version="1.0" encoding="UTF-8"?>
+        <config>
+          <plate>
+            <filament id="1" type="PLA" color="#FF0000" used_g="5.0" group_id="0"/>
+            <filament id="2" type="PLA" color="#00FF00" used_g="3.0" group_id="0"/>
+          </plate>
+        </config>"""
+        zf = _make_3mf_zip(
+            {
+                "physical_extruder_map": ["1", "0"],
+                "extruder_nozzle_stats": ["Standard#1", "Standard#0"],
+            },
+            slice_info_xml=slice_info,
+        )
+        result = extract_nozzle_mapping_from_3mf(zf)
+        # Only extruder index 0 is active → physical_extruder_map[0] = 1 (LEFT)
+        assert result == {1: 1, 2: 1}
+        zf.close()
+
 
 class TestNozzleAwareMapping:
     """Test nozzle-aware filament matching in the print scheduler."""

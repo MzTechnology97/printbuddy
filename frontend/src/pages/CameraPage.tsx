@@ -32,7 +32,7 @@ export function CameraPage() {
   // arrives. useStreamTokenSync (mounted in App) already owns the fetch; this
   // useQuery call dedupes via the shared key and just reads the cached value.
   useStreamTokenSync();
-  const { data: streamTokenData } = useQuery({
+  const { data: streamTokenData, isPending: streamTokenPending } = useQuery({
     queryKey: ['camera-stream-token', user?.id ?? null],
     queryFn: () => api.getCameraStreamToken(),
     enabled: authEnabled ? !!user : true,
@@ -62,6 +62,9 @@ export function CameraPage() {
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const stallCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  // Consecutive bad status reads; reconnect only after two in a row so a blip
+  // during fan-out startup/handover doesn't churn viewers (#2521).
+  const stallStrikesRef = useRef(0);
 
   // Fetch printer info for the title
   const { data: printer } = useQuery({
@@ -285,21 +288,26 @@ export function CameraPage() {
     }
 
     // Start stall detection after stream has loaded
+    stallStrikesRef.current = 0;
     stallCheckIntervalRef.current = setInterval(async () => {
       try {
         const status = await api.getCameraStatus(id);
-        // Trigger reconnect if:
-        // 1. Backend reports stall (no frames for 10+ seconds)
-        // 2. OR stream is not active anymore (process died)
-        if (status.stalled || (!status.active && !streamError)) {
-          console.log(`Stream issue detected: stalled=${status.stalled}, active=${status.active}, reconnecting...`);
-          if (stallCheckIntervalRef.current) {
-            clearInterval(stallCheckIntervalRef.current);
-            stallCheckIntervalRef.current = null;
-          }
-          setStreamLoading(false);
-          attemptReconnect();
+        // Bad read: backend reports stall (no frames for 10+ seconds),
+        // or the stream is not active anymore (process died).
+        if (!(status.stalled || (!status.active && !streamError))) {
+          stallStrikesRef.current = 0;
+          return;
         }
+        stallStrikesRef.current += 1;
+        if (stallStrikesRef.current < 2) return;
+        stallStrikesRef.current = 0;
+        console.log(`Stream issue detected: stalled=${status.stalled}, active=${status.active}, reconnecting...`);
+        if (stallCheckIntervalRef.current) {
+          clearInterval(stallCheckIntervalRef.current);
+          stallCheckIntervalRef.current = null;
+        }
+        setStreamLoading(false);
+        attemptReconnect();
       } catch {
         // Ignore fetch errors - server might be temporarily unavailable
       }
@@ -329,6 +337,7 @@ export function CameraPage() {
     setStreamError(false);
     // Reset reconnect attempts on successful connection
     setReconnectAttempts(0);
+    stallStrikesRef.current = 0;
     setIsReconnecting(false);
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -599,7 +608,11 @@ export function CameraPage() {
   // the token directly from the reactive query value instead of relying on the
   // module-level cache in withStreamToken(), because that cache is updated in a
   // useEffect that runs after render.
-  const waitingForStreamToken = authEnabled && !streamTokenValue;
+  //
+  // Also wait while the token query is pending with auth disabled (#2521):
+  // otherwise the src changes when the token lands, the browser fires a second
+  // request, and a one-socket printer gets two fan-out viewers per page load.
+  const waitingForStreamToken = !streamTokenValue && (authEnabled || streamTokenPending);
   const appendToken = (url: string) =>
     streamTokenValue ? `${url}&token=${encodeURIComponent(streamTokenValue)}` : withStreamToken(url);
   const currentUrl = transitioning || waitingForStreamToken

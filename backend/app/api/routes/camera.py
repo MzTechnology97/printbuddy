@@ -48,6 +48,12 @@ from backend.app.services.elegoo_camera import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/printers", tags=["camera"])
 
+# Upper bound on waiting for a SIGKILLed ffmpeg to be reaped (#2580). A killed
+# ffmpeg stuck in uninterruptible I/O on a dead RTSP socket can take arbitrarily
+# long to exit; an unbounded wait parked the fan-out stream coroutine for hours
+# on a P2S. The orphan cleanup's /proc scan reaps an abandoned one later.
+_FFMPEG_KILL_TIMEOUT = 2.0
+
 # Track active ffmpeg processes for cleanup
 _active_streams: dict[str, asyncio.subprocess.Process] = {}
 
@@ -251,7 +257,16 @@ async def _terminate_ffmpeg(process: asyncio.subprocess.Process, stream_id: str 
         except TimeoutError:
             logger.warning("ffmpeg didn't terminate gracefully, killing (stream_id=%s)", stream_id)
             process.kill()
-            await process.wait()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_FFMPEG_KILL_TIMEOUT)
+            except TimeoutError:
+                # Don't keep waiting (#2580): the caller is the stream generator,
+                # and blocking here pins the fan-out pump forever.
+                logger.error(
+                    "ffmpeg did not exit within %.1fs of SIGKILL; abandoning wait (stream_id=%s)",
+                    _FFMPEG_KILL_TIMEOUT,
+                    stream_id,
+                )
     except ProcessLookupError:
         pass  # Already dead
     except OSError as e:
@@ -434,7 +449,14 @@ async def generate_rtsp_mjpeg_stream(
                     ip_address,
                     stream_id,
                 )
-                await asyncio.sleep(profile.rtsp_reconnect_delay)
+                # Fast after a session that delivered frames (reconnect_count
+                # is 1 then), backing off while the printer keeps refusing.
+                await asyncio.sleep(
+                    min(
+                        profile.rtsp_reconnect_delay * 2 ** (reconnect_count - 1),
+                        profile.rtsp_reconnect_backoff_max,
+                    )
+                )
                 if disconnect_event and disconnect_event.is_set():
                     break
 
@@ -474,6 +496,7 @@ async def generate_rtsp_mjpeg_stream(
             buffer = b""
             stream_ended = False
             client_gone = False
+            session_got_frames = False
 
             while True:
                 if disconnect_event and disconnect_event.is_set():
@@ -511,6 +534,7 @@ async def generate_rtsp_mjpeg_stream(
                         frame = buffer[: end_idx + 2]
                         buffer = buffer[end_idx + 2 :]
                         got_any_frames = True
+                        session_got_frames = True
 
                         if printer_id is not None:
                             import time
@@ -556,6 +580,11 @@ async def generate_rtsp_mjpeg_stream(
                 break
 
             if stream_ended:
+                # The budget is for failures in a row: a session that delivered
+                # video was a success however it ended (an X1C ends one every
+                # minute, which under a lifetime count killed the view at ~30 min).
+                if session_got_frames:
+                    reconnect_count = 0
                 reconnect_count += 1
                 continue
 
@@ -564,7 +593,7 @@ async def generate_rtsp_mjpeg_stream(
 
         if reconnect_count > profile.rtsp_reconnect_max:
             logger.error(
-                "RTSP max reconnects (%d) reached for %s (stream_id=%s)",
+                "RTSP max consecutive reconnects (%d) reached for %s (stream_id=%s)",
                 profile.rtsp_reconnect_max,
                 ip_address,
                 stream_id,
@@ -868,20 +897,11 @@ async def stop_camera_stream(
             if event:
                 event.set()
             if process.returncode is None:
-                try:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=2.0)
-                    except TimeoutError:
-                        logger.warning("ffmpeg didn't terminate gracefully, killing (stream_id=%s)", stream_id)
-                        process.kill()
-                        await process.wait()
-                    stopped += 1
-                    logger.info("Terminated ffmpeg process for stream %s", stream_id)
-                except ProcessLookupError:
-                    pass  # Process already dead
-                except OSError as e:
-                    logger.warning("Error stopping stream %s: %s", stream_id, e)
+                # Shared helper: it bounds the post-kill wait (#2580), so a
+                # killed-but-unreaped ffmpeg can't hang the Stop request.
+                await _terminate_ffmpeg(process, stream_id)
+                stopped += 1
+                logger.info("Terminated ffmpeg process for stream %s", stream_id)
             _spawned_ffmpeg_pids.pop(process.pid, None)
 
     for stream_id in to_remove:
@@ -1665,8 +1685,16 @@ async def cleanup_orphaned_streams():
         except (ProcessLookupError, OSError):
             _spawned_ffmpeg_pids.pop(pid, None)
 
-    # 3. Clean up _active_streams entries with dead processes
-    dead_streams = [sid for sid, proc in _active_streams.items() if proc.returncode is not None]
+    # 3. Clean up _active_streams entries with dead processes. Not one whose
+    # generator is still running and was not told to stop: its ffmpeg ended
+    # with the session (an X1C ends one about every minute) and it is about to
+    # redial. Removing the entry then ended the live view, as the generator
+    # reads a missing entry as a stop. Every stop path sets the event first.
+    dead_streams = [
+        sid
+        for sid, proc in _active_streams.items()
+        if proc.returncode is not None and not (sid in _disconnect_events and not _disconnect_events[sid].is_set())
+    ]
     for sid in dead_streams:
         proc = _active_streams.pop(sid, None)
         if proc:
@@ -1697,9 +1725,18 @@ async def cleanup_orphaned_streams():
                 event.set()
             try:
                 proc.kill()
-                await proc.wait()
+                # Bounded (#2580): this janitor is the safety net that recovers
+                # stalled streams, so it must not hang on an unreaped ffmpeg.
+                await asyncio.wait_for(proc.wait(), timeout=_FFMPEG_KILL_TIMEOUT)
             except (ProcessLookupError, OSError):
                 pass
+            except TimeoutError:
+                logger.error(
+                    "ffmpeg (pid=%d) did not exit within %.1fs of SIGKILL; abandoning wait (stream_id=%s)",
+                    proc.pid,
+                    _FFMPEG_KILL_TIMEOUT,
+                    sid,
+                )
             _active_streams.pop(sid, None)
             _disconnect_events.pop(sid, None)
             _stream_last_frame_times.pop(sid, None)

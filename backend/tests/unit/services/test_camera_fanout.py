@@ -355,3 +355,115 @@ async def test_camera_route_treats_printer_fanout_as_active_stream():
     await bc.subscribe()
 
     assert is_stream_active(42) is True
+
+
+# ---------------------------------------------------------------------------
+# P1/A1 black-on-load (#2521, upstream 1.2.5): prime late joiners, and never
+# let a replacement upstream dial before the displaced one's socket closed.
+# ---------------------------------------------------------------------------
+
+
+async def test_late_subscriber_primed_with_last_frame():
+    async def factory(disconnect: asyncio.Event) -> AsyncGenerator[bytes, None]:
+        yield b"first"
+        await disconnect.wait()  # hold the stream open, no further frames
+
+    bc = MjpegBroadcaster("p1", factory)
+    q1 = await bc.subscribe()
+    assert await asyncio.wait_for(q1.get(), timeout=1.0) == b"first"
+
+    q2 = await bc.subscribe()
+    assert await asyncio.wait_for(q2.get(), timeout=0.2) == b"first"
+    await bc.force_shutdown()
+
+
+async def test_successor_pump_waits_for_predecessor_teardown():
+    factory = _make_factory([b"x"] * 1000, delay=0.02)
+    bc1 = MjpegBroadcaster("p1", factory)
+    camera_fanout._broadcasters["p1"] = bc1
+    bc1._stopped = True  # noqa: SLF001 — stopped, socket not yet closed
+
+    bc2 = await get_or_create_broadcaster("p1", factory)
+    assert bc2 is not bc1
+    queue = await bc2.subscribe()
+    await asyncio.sleep(0.05)
+    assert queue.empty(), "successor dialled before the prior upstream closed"
+
+    bc1._teardown_complete.set()  # noqa: SLF001
+    assert await asyncio.wait_for(queue.get(), timeout=1.0) == b"x"
+    await shutdown_broadcaster("p1")
+
+
+async def test_successor_pump_dials_anyway_if_predecessor_wedges(monkeypatch):
+    monkeypatch.setattr(camera_fanout, "_TEARDOWN_WAIT_SECONDS", 0.05)
+    factory = _make_factory([b"x"] * 1000, delay=0.02)
+    bc1 = MjpegBroadcaster("p1", factory)
+    camera_fanout._broadcasters["p1"] = bc1
+    bc1._stopped = True  # noqa: SLF001 — teardown never completes
+
+    bc2 = await get_or_create_broadcaster("p1", factory)
+    queue = await bc2.subscribe()
+    assert await asyncio.wait_for(queue.get(), timeout=1.0) == b"x"
+    await shutdown_broadcaster("p1")
+
+
+async def test_stop_then_restream_never_opens_two_sockets():
+    """A reload fires /camera/stop and /camera/stream together. The stopped
+    broadcaster must stay in the registry so the new one chains behind it."""
+    state = {"open": 0, "peak": 0}
+
+    async def factory(disconnect: asyncio.Event) -> AsyncGenerator[bytes, None]:
+        await asyncio.sleep(0.01)  # dial
+        state["open"] += 1
+        state["peak"] = max(state["peak"], state["open"])
+        try:
+            while not disconnect.is_set():
+                await asyncio.sleep(0.01)
+                yield b"frame"
+        finally:
+            await asyncio.sleep(0.05)  # socket close is not instantaneous
+            state["open"] -= 1
+
+    bc1 = await get_or_create_broadcaster("p1", factory)
+    queue = await bc1.subscribe()
+    assert await asyncio.wait_for(queue.get(), timeout=1.0) == b"frame"
+
+    async def reloaded_page_streams():
+        await asyncio.sleep(0.005)
+        bc = await get_or_create_broadcaster("p1", factory)
+        q = await bc.subscribe()
+        return await asyncio.wait_for(q.get(), timeout=2.0)
+
+    _, frame = await asyncio.gather(shutdown_broadcaster("p1"), reloaded_page_streams())
+    assert frame == b"frame"
+    assert state["peak"] == 1, "new stream dialled before the old socket closed"
+    await shutdown_broadcaster("p1")
+
+
+async def test_shutdown_broadcaster_is_idempotent():
+    bc = await get_or_create_broadcaster("p1", _make_factory([b"x"] * 1000, delay=0.02))
+    await bc.subscribe()
+    assert await shutdown_broadcaster("p1") is True
+    assert await shutdown_broadcaster("p1") is False
+    assert await shutdown_broadcaster("never-existed") is False
+
+
+async def test_subscriber_with_no_frames_detaches_promptly():
+    async def silent_factory(disconnect: asyncio.Event) -> AsyncGenerator[bytes, None]:
+        await disconnect.wait()
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    bc = MjpegBroadcaster("p1", silent_factory)
+    queue = await bc.subscribe()
+
+    async def is_disconnected() -> bool:
+        return True
+
+    async def drain():
+        async for _chunk in iter_subscriber(bc, queue, is_disconnected=is_disconnected):
+            pass
+
+    await asyncio.wait_for(drain(), timeout=3.0)  # used to wait 30 s
+    assert bc.subscriber_count == 0
+    await bc.force_shutdown()
