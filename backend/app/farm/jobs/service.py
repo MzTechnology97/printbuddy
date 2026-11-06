@@ -943,6 +943,7 @@ async def dispatch_once(db: AsyncSession) -> int:
             )
         ).scalars()
     )
+    busy |= scheduler.printers_refusing_uploads()  # it refused its last file: a job placed there would only wait
     created = 0
     for job in jobs:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))

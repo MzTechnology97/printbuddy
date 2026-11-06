@@ -534,14 +534,23 @@ class PrinterManager:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return client.check_staleness()  # not on the loop: blocking is fine here
+            return self._poll_provider(printer_id, client)  # not on the loop: blocking is fine here
         if printer_id not in self._provider_polls:
-            task = asyncio.create_task(asyncio.to_thread(client.check_staleness))
+            task = asyncio.create_task(asyncio.to_thread(self._poll_provider, printer_id, client))
             self._provider_polls[printer_id] = task
             task.add_done_callback(
                 lambda t: self._provider_polls.pop(printer_id) if self._provider_polls.get(printer_id) is t else None
             )
         return client.state.connected
+
+    def _poll_provider(self, printer_id: int, client) -> bool:
+        """An HTTP provider's status poll. A failed poll drops ``connected`` without a status callback, so the
+        callback is called here on that edge: the offline notification (main) sees Klipper printers go too."""
+        was_connected = client.state.connected
+        connected = client.check_staleness()
+        if was_connected and not connected and self._on_status_change:
+            self._schedule_async(self._on_status_change(printer_id, client.state))
+        return connected
 
     def get_client(self, printer_id: int) -> BambuMQTTClient | None:
         """Get the MQTT client for a printer."""
