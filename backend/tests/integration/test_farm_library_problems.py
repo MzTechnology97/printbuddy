@@ -1,20 +1,25 @@
 """Printfarm (fork): production 3MFs that will not print, told when saved. Made-up projects; no slicer, no notification sent."""
 
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from backend.app.api.routes import library
 from backend.app.farm import (
     library_problems as lp,
     slicing,  # noqa: F401  (loaded before library_path is patched below)
 )
 from backend.app.farm.library_problems import FarmLibraryProblem
 from backend.app.farm.models import FarmLibraryFile
-from backend.app.farm.plates.models import FarmPlate, FarmPrinterModelMap
+from backend.app.farm.plates.models import FarmPrinterModelMap
+from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
 from backend.app.models.library import LibraryFile
+from backend.tests.integration.test_farm_library import add_external, scan
+from backend.tests.integration.test_farm_pieces import box, make_mesh_project, tetra
 
 
 def problems(objects, *, model_ok=True):
@@ -28,16 +33,25 @@ def test_each_problem_without_slicing():
 
 
 @pytest.fixture
-async def project(db_session):
+def prod():
+    """The files an active product prints from (the real rule has its own test at the end)."""
+    return set()
+
+
+@pytest.fixture
+async def project(db_session, prod):
     lib = LibraryFile(filename="maniglia.3mf", file_path="/nas/maniglia.3mf", file_type="3mf", file_size=1)
     db_session.add(lib)
     await db_session.flush()
     state = FarmLibraryFile(watch_folder_id=1, library_file_id=lib.id, path="/nas/maniglia.3mf", mtime=1, size=1)
     state.sha256, state.status = "v1", "ok"
     db_session.add(state)
-    db_session.add(FarmPlate(library_file_id=lib.id, plate_index=1, status="confirmed"))  # a production file
     await db_session.commit()
+    prod.add(lib.id)
     sent = []
+
+    async def production(db):
+        return set(prod)
 
     async def no_fetch(db, lib_file):
         return None
@@ -46,6 +60,7 @@ async def project(db_session):
         patch("backend.app.farm.nas.cache.ensure_local", no_fetch),
         patch("backend.app.farm.nas.access.library_path", lambda p: p),
         patch.object(lp.notify, "notify", lambda event, key, **values: sent.append((event, key, values))),
+        patch.object(lp, "production_files", production),
     ):
         yield lib, state, sent
 
@@ -140,21 +155,23 @@ async def test_mapping_the_printer_model_clears_its_problem(db_session, project)
     assert await stored(db_session) == []
 
 
-async def another_file(db_session, name):
+async def another_file(db_session, name, prod=None):
     f = LibraryFile(filename=name, file_path=f"/nas/{name}", file_type="3mf", file_size=1)
     db_session.add(f)
     await db_session.flush()
     st = FarmLibraryFile(watch_folder_id=1, library_file_id=f.id, path=f"/nas/{name}", mtime=1, size=1)
     st.sha256, st.status = name, "ok"
     db_session.add(st)
-    db_session.add(FarmPlate(library_file_id=f.id, plate_index=1, status="confirmed"))
+    await db_session.flush()
+    if prod is not None:
+        prod.add(f.id)
     return f
 
 
 @pytest.mark.asyncio
-async def test_one_odd_file_does_not_stop_the_round(db_session, project):
+async def test_one_odd_file_does_not_stop_the_round(db_session, project, prod):
     lib, state, sent = project
-    await another_file(db_session, "altro.3mf")
+    await another_file(db_session, "altro.3mf", prod)
     await db_session.commit()
 
     def read(path):
@@ -168,10 +185,10 @@ async def test_one_odd_file_does_not_stop_the_round(db_session, project):
 
 
 @pytest.mark.asyncio
-async def test_many_files_with_new_problems_send_one_summary(db_session, project):
+async def test_many_files_with_new_problems_send_one_summary(db_session, project, prod):
     lib, state, sent = project
     for n in range(6):
-        await another_file(db_session, f"f{n}.3mf")
+        await another_file(db_session, f"f{n}.3mf", prod)
     await db_session.commit()
     with patch.object(lp, "read_project", lambda path: {1: 0}):
         await lp.check_new_versions(db_session)
@@ -180,44 +197,71 @@ async def test_many_files_with_new_problems_send_one_summary(db_session, project
 
 
 @pytest.mark.asyncio
-async def test_only_files_the_farm_prints_from_are_checked(db_session, project):
+async def test_only_files_an_active_product_prints_from_are_checked(db_session, project, prod):
     lib, state, sent = project
-    other = await another_file(db_session, "18650 Case Holder.3mf")
-    plate = (await db_session.execute(select(FarmPlate).where(FarmPlate.library_file_id == other.id))).scalar_one()
-    plate.status = "proposed"  # nobody confirmed it, no product uses it: not the farm's
+    other = await another_file(db_session, "18650 Case Holder.3mf")  # no active product prints from it
     db_session.add(old_problem(other.id, "empty_plate"))
     await db_session.commit()
 
-    with patch.object(lp, "read_project", lambda path: {1: 0}):
+    def read(path):
+        assert "18650" not in path  # not even opened
+        return {1: 0}
+
+    with patch.object(lp, "read_project", read):
         assert await lp.list_problems(db_session) == []  # hidden at once, before any round
-        assert await lp.check_new_versions(db_session) == 1  # only the confirmed one
+        assert await lp.check_new_versions(db_session) == 1  # only the product's file
     assert await stored(db_session) == [(1, "empty_plate")]  # the old problem of the other file is gone
     assert len(sent) == 1 and sent[0][2]["filename"] == "maniglia.3mf"  # and it was not told
     await lp.record_slice(db_session, other.id, 1, None, HTTPException(502, "boom"))
     assert len(await stored(db_session)) == 1
 
-    plate.status = "confirmed"  # it becomes a production file: checked at the next round
-    await db_session.commit()
+    prod.add(other.id)  # a product prints from it now: checked at the next round
     with patch.object(lp, "read_project", lambda path: {1: 0}):
         assert await lp.check_new_versions(db_session) == 1
     assert len(await stored(db_session)) == 2
 
-    plate.status = "proposed"  # and no longer: its problems go
-    await db_session.commit()
+    prod.discard(other.id)  # and no longer: its problems go
     await lp.check_new_versions(db_session)
     assert await stored(db_session) == [(1, "empty_plate")]
 
 
 @pytest.mark.asyncio
-async def test_a_file_in_a_products_folder_is_a_production_file(db_session, project):
-    lib, state, sent = project
-    other = await another_file(db_session, "staffa.3mf")
-    for plate in (await db_session.execute(select(FarmPlate))).scalars():
-        plate.status = "proposed"
+async def test_production_files_are_those_an_active_product_would_print_from(
+    async_client, db_session, tmp_path, monkeypatch
+):
+    """The rule of the plan and Accoda: a plate yielding a component of an active product, in its 3MFs."""
+    monkeypatch.setattr(library.app_settings, "external_roots", str(tmp_path))
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Staffa" / "staffa.3mf", {1: [("Staffa", box(10, 20, 5), None)]})
+    make_mesh_project(nas / "Staffa" / "prova.3mf", {1: [("Prova", tetra(), None)]})  # in its folder, not its piece
+    make_mesh_project(nas / "Varie" / "18650.3mf", {1: [("Case", box(5, 5, 40), None)]})  # a plate, no product
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"/api/v1/farm/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"]
+        for f in (await async_client.get("/api/v1/farm/library/files")).json()
+    }
+
+    pid = (await async_client.post("/api/v1/farm/products", json={"name": "Staffa"})).json()["project_id"]
+    shape = (await async_client.post("/api/v1/farm/shapes", json={"name": "Staffa", "project_id": pid})).json()["id"]
+    for piece in (await async_client.get("/api/v1/farm/pieces")).json():
+        if piece["names"][0] == "Staffa":
+            r = await async_client.put("/api/v1/farm/pieces", json={"yield_ids": piece["yield_ids"], "shape_id": shape})
+            assert r.status_code == 200, r.text
+    code = (await async_client.post("/api/v1/farm/components", json={"shape_id": shape, "color": "Nero"})).json()[
+        "code"
+    ]
+    component = await db_session.scalar(select(FarmComponent).where(FarmComponent.code == code))
+    db_session.add(FarmProductPart(project_id=pid, component_id=component.id, quantity=1))
     await db_session.commit()
+    staffa_folder = (await async_client.get(f"/api/v1/library/files/{files['staffa.3mf']}")).json()["folder_id"]
+    r = await async_client.put(f"/api/v1/farm/products/{pid}/folders/{staffa_folder}", json={"linked": True})
+    assert r.status_code == 200, r.text
 
-    async def in_product(db):
-        return {other.id: {1}}
+    assert await lp.production_files(db_session) == {files["staffa.3mf"]}
 
-    with patch("backend.app.farm.products.folders.file_products", in_product):
-        assert await lp.production_files(db_session) == {other.id}
+    product = await db_session.get(FarmProduct, pid)
+    product.disabled_at = datetime(2026, 11, 6)  # disabled: nothing of it is checked
+    await db_session.commit()
+    assert await lp.production_files(db_session) == set()
