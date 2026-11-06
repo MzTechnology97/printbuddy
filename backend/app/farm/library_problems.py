@@ -136,17 +136,31 @@ async def _replace(
 
 
 async def production_files(db: AsyncSession) -> set[int]:
-    """3MFs the farm prints from: a confirmed plate, or in a product's folders (not excluded by it).
+    """3MFs Printbuddy would print an active product from: a plate yielding a component of a product
+    not disabled, in a 3MF that product prints from (``plates_for``, the rule of the plan and Accoda).
 
-    Only these are checked; the rest of the library (tests, downloads) is not the farm's business.
+    Only these are checked or read; a confirmed plate alone, or a file in a product's folder that
+    yields none of its components, is not enough.
     """
-    from backend.app.farm.plates.models import FarmPlate
-    from backend.app.farm.products.folders import file_products
+    from backend.app.farm.plates.service import plates_for
+    from backend.app.farm.products.models import FarmComponent, FarmProduct, FarmProductPart
 
-    confirmed = set(
-        (await db.execute(select(FarmPlate.library_file_id).where(FarmPlate.status == "confirmed"))).scalars()
+    components = (
+        (
+            await db.execute(
+                select(FarmComponent)
+                .join(FarmProductPart, FarmProductPart.component_id == FarmComponent.id)
+                .join(FarmProduct, FarmProduct.project_id == FarmProductPart.project_id)
+                .where(FarmProduct.disabled_at.is_(None))
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
     )
-    return confirmed | set(await file_products(db))
+    if not components:
+        return set()
+    return {p["library_file_id"] for plates in (await plates_for(db, list(components))).values() for p in plates}
 
 
 async def _tell(db: AsyncSession, file_id: int, new: list[tuple[int | None, str, str]]) -> None:
