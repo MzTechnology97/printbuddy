@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import tempfile
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -4849,23 +4850,38 @@ async def klipper_bed_mesh(
         raise HTTPException(502, "Could not read the printer's bed mesh") from exc
 
 
+# fork: printer_id -> when a mesh calibration was sent; it runs for minutes and must not be sent twice
+_mesh_calibration_sent: dict[int, float] = {}
+_MESH_CALIBRATION_SECONDS = 10 * 60
+
+
 @router.post("/{printer_id}/klipper/bed-mesh/calibrate")
 async def klipper_bed_mesh_calibrate(
     printer_id: int,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
     db: AsyncSession = Depends(get_db),
 ):
-    """Home and probe a new mesh (minutes, with the bed heating as it is): never during a print."""
+    """Home and probe a new mesh (minutes, with the bed heating as it is): never during a print, never twice."""
     calibrate = await _klipper_client(db, printer_id, "calibrate_bed_mesh")
     state = printer_manager.get_status(printer_id)
-    if state is not None and state.state in ("RUNNING", "PAUSE"):
-        raise HTTPException(409, "The printer is printing: calibrate the mesh when it is idle")
+    if state is None or state.state in ("RUNNING", "PAUSE"):
+        raise HTTPException(409, "The printer is printing or its state is unknown: calibrate the mesh when it is idle")
+    sent_at = _mesh_calibration_sent.get(printer_id)
+    if sent_at is not None and time.monotonic() - sent_at < _MESH_CALIBRATION_SECONDS:
+        raise HTTPException(409, "A calibration was sent a few minutes ago: wait for it to end")
     try:
         ok = await asyncio.to_thread(calibrate)
-    except httpx.HTTPError as exc:
+    except httpx.TimeoutException:
+        # The script may be running already (it takes minutes): never report it as refused, never resend it.
+        _mesh_calibration_sent[printer_id] = time.monotonic()
+        return {"success": True, "pending": True, "message": "Calibration sent: check the printer"}
+    except httpx.HTTPStatusError as exc:
         raise HTTPException(400, "Klipper refused the calibration: see the console") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not reach the printer's Moonraker") from exc
     if not ok:
         raise HTTPException(500, "Failed to start the calibration")
+    _mesh_calibration_sent[printer_id] = time.monotonic()
     return {"success": True}
 
 
