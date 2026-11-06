@@ -27,6 +27,7 @@ import { SpoolCatalogSettings } from '../components/SpoolCatalogSettings';
 import { ColorCatalogSettings } from '../components/ColorCatalogSettings';
 import { ExternalLinksSettings } from '../components/ExternalLinksSettings';
 import { NasSettingsCard } from '../farm/NasSettingsCard'; // fork: printfarm
+import { SdFilesCard } from '../farm/SdFilesCard'; // fork: printfarm
 import { VirtualPrinterList } from '../components/VirtualPrinterList';
 import { GitHubBackupSettings } from '../components/GitHubBackupSettings';
 import { FailureDetectionSettings } from '../components/FailureDetectionSettings';
@@ -81,6 +82,7 @@ registerSettingsSearch({ labelKey: 'settings.appearance', tab: 'general', keywor
 registerSettingsSearch({ labelKey: 'settings.archiveSettings', tab: 'general', keywords: 'archive auto save thumbnails captures', anchor: 'card-archive' });
 registerSettingsSearch({ labelKey: 'settings.camera', tab: 'general', keywords: 'camera external video stream', anchor: 'card-camera' });
 registerSettingsSearch({ labelKey: 'settings.costTracking', tab: 'general', keywords: 'currency filament cost energy kwh price', anchor: 'card-cost' });
+registerSettingsSearch({ labelKey: 'farm.sdFiles.title', tab: 'general', keywords: 'sd usb stick chiavetta memoria storage keep file reprint ristampa display bambu printer stampante', anchor: 'card-sd-files' }); // fork: printfarm
 registerSettingsSearch({ labelKey: 'settings.fileManager', tab: 'general', keywords: 'file manager archive mode disk warning storage', anchor: 'card-filemanager' });
 registerSettingsSearch({ labelKey: 'settings.updates', tab: 'general', keywords: 'updates version firmware beta check', anchor: 'card-updates' });
 registerSettingsSearch({ labelKey: 'settings.dataManagement', tab: 'general', keywords: 'data reset clear logs notifications preferences', anchor: 'card-data' });
@@ -2385,6 +2387,7 @@ export function SettingsPage() {
             </CardContent>
           </Card>
           <NasSettingsCard /> {/* fork: printfarm NAS library */}
+          <SdFilesCard /> {/* fork: printfarm, files kept on the printer (SD or USB stick) */}
         </div>
 
         {/* Third Column - Sidebar Links & Updates */}

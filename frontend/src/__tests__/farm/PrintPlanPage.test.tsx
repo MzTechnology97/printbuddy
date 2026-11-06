@@ -293,38 +293,13 @@ describe('PrintPlanPage', () => {
     );
   });
 
-  it('keeps the files of the ticked Bambu printers on the SD, warning about ghost prints', async () => {
-    let saved: unknown;
-    server.use(
-      http.get('/api/v1/farm/sd-files', () =>
-        HttpResponse.json({
-          keep_days: 14,
-          printers: [
-            { id: 4, name: 'A1 uno', model: 'A1', keep: false, ghost_print_risk: true },
-            { id: 8, name: 'H2D', model: 'H2D', keep: true, ghost_print_risk: false },
-          ],
-        }),
-      ),
-      http.put('/api/v1/farm/sd-files', async ({ request }) => {
-        saved = await request.json();
-        return HttpResponse.json({ keep_days: 21, printers: [] });
-      }),
-    );
+  it('sends to Settings for keeping the files on the printer', async () => {
     const user = userEvent.setup();
     render(<PrintPlanPage />);
     await screen.findByText('Supporto Velux');
     await user.click(screen.getByRole('button', { name: /Settings/ }));
-    const a1 = await screen.findByLabelText(/Keep the file on the SD after the print.*: A1 uno/);
-    expect(screen.getByLabelText(/: H2D$/)).toBeChecked();
-    expect(screen.queryByText(/ghost print/)).not.toBeInTheDocument();
-    await user.click(a1);
-    // Ticked on a model that may restart the last print on power-up: the warning shows.
-    expect(screen.getByText(/ghost print/)).toBeInTheDocument();
-    const days = screen.getByLabelText('Delete unused files after (days)');
-    await user.clear(days);
-    await user.type(days, '21');
-    await user.click(screen.getAllByRole('button', { name: 'Save' }).at(-1)!);
-    await waitFor(() => expect(saved).toEqual({ keep_days: 21, keep_printer_ids: [8, 4] }));
+    expect(await screen.findByText(/Settings → General → Files on the printer \(Bambu\)/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Settings' })).toHaveAttribute('href', '/settings?tab=general');
   });
 
   it('prints the ticked components with their picture, slots chosen by hand and a manual start', async () => {

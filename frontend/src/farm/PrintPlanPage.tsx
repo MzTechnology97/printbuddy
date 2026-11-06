@@ -19,7 +19,6 @@ import {
   type FarmPlanPlate,
   type FarmPlanSettings,
   type FarmPrinterSpool,
-  type FarmSdFiles,
 } from './api';
 import { BoardSummary, SlicerBadge } from './JobsBoard';
 import { PlateThumb } from './PlatesPanel';
@@ -394,63 +393,6 @@ function SettingsCard({ settings, onClose }: { settings: FarmPlanSettings; onClo
       <div className="flex justify-end gap-2">
         <Button type="button" variant="secondary" onClick={onClose}>{t('farm.products.cancel')}</Button>
         <Button type="submit" disabled={save.isPending}>{t('farm.products.save')}</Button>
-      </div>
-    </form>
-  );
-}
-
-/** Bambu printers that keep their files on the SD after a print, so they can be reprinted from the display. */
-function SdFilesCard({ data }: { data: FarmSdFiles }) {
-  const { t } = useTranslation();
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const [days, setDays] = useState(data.keep_days);
-  const [kept, setKept] = useState(() => new Set(data.printers.filter((p) => p.keep).map((p) => p.id)));
-  const save = useMutation({
-    mutationFn: () => farmApi.saveSdFiles({ keep_days: days, keep_printer_ids: [...kept] }),
-    onSuccess: (saved) => {
-      queryClient.setQueryData(['farm', 'sd-files'], saved);
-      showToast(t('farm.products.saved'), 'success');
-    },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
-  if (!data.printers.length) return null;
-  const toggle = (id: number, on: boolean) => {
-    const next = new Set(kept);
-    if (on) next.add(id);
-    else next.delete(id);
-    setKept(next);
-  };
-  return (
-    <form className="bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg p-4 space-y-3 max-w-2xl"
-      onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
-      <h2 className="text-white font-semibold">{t('farm.sdFiles.title')}</h2>
-      <p className="text-xs text-bambu-gray">{t('farm.sdFiles.intro')}</p>
-      <p className="text-sm text-white">{t('farm.sdFiles.keep')}</p>
-      <ul className="space-y-2">
-        {data.printers.map((p) => (
-          <li key={p.id} className="text-sm text-white">
-            <label className="flex items-start gap-2">
-              <input type="checkbox" className="mt-1" checked={kept.has(p.id)}
-                aria-label={`${t('farm.sdFiles.keep')}: ${p.name}`}
-                onChange={(e) => toggle(p.id, e.target.checked)} />
-              <span>
-                {p.name} <span className="text-xs text-bambu-gray">{p.model}</span>
-                {p.ghost_print_risk && kept.has(p.id) && (
-                  <span role="alert" className="block text-xs text-amber-400">{t('farm.sdFiles.ghostRisk')}</span>
-                )}
-              </span>
-            </label>
-          </li>
-        ))}
-      </ul>
-      <label className="flex items-center gap-2 text-sm text-white">
-        {t('farm.sdFiles.days')}
-        <input type="number" min={1} max={365} className={`${INPUT} py-1 w-20`} value={days}
-          onChange={(e) => setDays(Number(e.target.value))} />
-      </label>
-      <div className="flex justify-end">
-        <Button type="submit" disabled={save.isPending || !(days >= 1 && days <= 365)}>{t('farm.products.save')}</Button>
       </div>
     </form>
   );
@@ -918,7 +860,6 @@ export function PrintPlanPage() {
   const [summary, setSummary] = useState<FarmPlanComponent[] | null>(null);
   const plan = useQuery({ queryKey: ['farm', 'plan'], queryFn: farmApi.getPlan, refetchInterval: 60_000 });
   const settings = useQuery({ queryKey: ['farm', 'plan-settings'], queryFn: farmApi.getPlanSettings });
-  const sdFiles = useQuery({ queryKey: ['farm', 'sd-files'], queryFn: farmApi.getSdFiles, enabled: showSettings });
   const rows = plan.data?.components || [];
   const [params, setParams] = useSearchParams();
   const linked = params.get('accoda'); // the contract with Seller Hub: don't rename
@@ -953,7 +894,12 @@ export function PrintPlanPage() {
       </div>
       <p className="text-bambu-gray text-sm max-w-3xl">{t('farm.plan.intro')}</p>
       {showSettings && settings.data && <SettingsCard settings={settings.data} onClose={() => setShowSettings(false)} />}
-      {showSettings && sdFiles.data && <SdFilesCard data={sdFiles.data} />}
+      {showSettings && (
+        <p className="text-sm text-bambu-gray max-w-2xl">
+          {t('farm.sdFiles.where')}{' '}
+          <Link to="/settings?tab=general" className="text-bambu-green hover:underline">{t('farm.sdFiles.open')}</Link>
+        </p>
+      )}
       <LibraryProblems />
       <BoardSummary />
       <SpoolsCard />
