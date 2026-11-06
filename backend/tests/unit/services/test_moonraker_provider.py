@@ -1,3 +1,6 @@
+import time
+
+import httpx
 import pytest
 
 from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient
@@ -1452,3 +1455,172 @@ def test_moonraker_emergency_stop_and_firmware_restart_post_to_moonraker(monkeyp
     monkeypatch.setattr(client, "_post", lambda path, payload: posted.append(path) or {})
     assert client.emergency_stop() and client.firmware_restart()
     assert posted == ["printer/emergency_stop", "printer/firmware_restart"]
+
+
+# --- fork: print controls guarded by the printer's state (ported from upstream's 868b02fb9 and 50ff85d45) ---
+
+
+def _client_in(state):
+    client = MoonrakerPrinterClient("http://klipper.local:7125")
+    client._has_status_sample = True
+    client.state.state = state
+    return client
+
+
+def _moonraker_http_400(path):
+    request = httpx.Request("POST", f"http://klipper.local:7125/{path}")
+    response = httpx.Response(400, request=request, json={"error": {"message": "rejected"}})
+    return httpx.HTTPStatusError("400 Bad Request", request=request, response=response)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "state", "expected"),
+    [
+        ("pause_print", "PAUSE", True),  # already paused
+        ("pause_print", "IDLE", False),
+        ("pause_print", "FAILED", False),  # Klipper shut down
+        ("resume_print", "RUNNING", True),  # already printing
+        ("resume_print", "IDLE", False),
+        ("stop_print", "IDLE", True),  # nothing to cancel: the queue's stop still succeeds
+        ("stop_print", "FINISH", True),
+        ("stop_print", "FAILED", True),
+    ],
+)
+def test_moonraker_print_control_outside_its_states_sends_nothing(monkeypatch, method_name, state, expected):
+    client = _client_in(state)
+    monkeypatch.setattr(client, "_post", lambda path, payload: pytest.fail(f"sent {path}"))
+    assert getattr(client, method_name)() is expected
+
+
+@pytest.mark.parametrize(
+    ("method_name", "state", "path"),
+    [
+        ("pause_print", "RUNNING", "printer/print/pause"),
+        ("resume_print", "PAUSE", "printer/print/resume"),
+        ("stop_print", "RUNNING", "printer/print/cancel"),
+        ("stop_print", "PAUSE", "printer/print/cancel"),
+    ],
+)
+def test_moonraker_print_control_in_its_states_is_sent(monkeypatch, method_name, state, path):
+    client = _client_in(state)
+    posted = []
+    monkeypatch.setattr(client, "_post", lambda p, payload: posted.append(p) or {})
+    assert getattr(client, method_name)() is True
+    assert posted == [path]
+
+
+def test_moonraker_print_control_conflict_names_the_state():
+    assert MoonrakerPrinterClient("http://klipper.local:7125").print_control_conflict("pause") is None  # no status yet
+    assert _client_in("RUNNING").print_control_conflict("pause") is None
+    assert "IDLE" in _client_in("IDLE").print_control_conflict("pause")
+    assert "RUNNING" in _client_in("RUNNING").print_control_conflict("resume")
+    assert "FINISH" in _client_in("FINISH").print_control_conflict("stop")
+
+
+def test_moonraker_emergency_stop_and_firmware_restart_stay_unguarded(monkeypatch):
+    for state in ("IDLE", "FAILED", "PAUSE", "RUNNING"):
+        client = _client_in(state)
+        posted = []
+        monkeypatch.setattr(client, "_post", lambda path, payload, posted=posted: posted.append(path) or {})
+        assert client.emergency_stop() and client.firmware_restart()
+        assert posted == ["printer/emergency_stop", "printer/firmware_restart"], state
+
+
+@pytest.mark.parametrize(
+    ("method_name", "known_state", "state_after_refresh"),
+    [
+        ("pause_print", "RUNNING", "PAUSE"),
+        ("resume_print", "PAUSE", "RUNNING"),
+        ("stop_print", "RUNNING", "IDLE"),
+        ("stop_print", "PAUSE", "FAILED"),  # Moonraker's "cancelled" reads FAILED
+    ],
+)
+def test_moonraker_control_400_is_success_only_when_refresh_shows_target_state(
+    monkeypatch, method_name, known_state, state_after_refresh
+):
+    client = _client_in(known_state)
+    refreshes = []
+
+    def fake_refresh():
+        refreshes.append(True)
+        client.state.state = state_after_refresh
+        return True
+
+    monkeypatch.setattr(client, "_post", lambda p, payload: (_ for _ in ()).throw(_moonraker_http_400(p)))
+    monkeypatch.setattr(client, "request_status_update", fake_refresh)
+
+    assert getattr(client, method_name)() is True
+    assert refreshes == [True]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "known_state", "state_after_refresh"),
+    [
+        ("pause_print", "RUNNING", "RUNNING"),
+        ("resume_print", "PAUSE", "PAUSE"),
+        ("stop_print", "RUNNING", "RUNNING"),
+        ("stop_print", "PAUSE", "PAUSE"),
+    ],
+)
+def test_moonraker_control_400_is_reraised_when_printer_did_not_reach_target(
+    monkeypatch, method_name, known_state, state_after_refresh
+):
+    client = _client_in(known_state)
+
+    def fake_refresh():
+        client.state.state = state_after_refresh
+        return True
+
+    monkeypatch.setattr(client, "_post", lambda p, payload: (_ for _ in ()).throw(_moonraker_http_400(p)))
+    monkeypatch.setattr(client, "request_status_update", fake_refresh)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        getattr(client, method_name)()
+
+
+def test_moonraker_control_400_reraises_original_error_when_refresh_fails(monkeypatch):
+    client = _client_in("RUNNING")
+    original = _moonraker_http_400("printer/print/pause")
+
+    def fake_refresh():
+        raise httpx.ConnectError("printer unreachable")
+
+    monkeypatch.setattr(client, "_post", lambda p, payload: (_ for _ in ()).throw(original))
+    monkeypatch.setattr(client, "request_status_update", fake_refresh)
+
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        client.pause_print()
+    assert caught.value is original
+
+
+def test_moonraker_control_non_400_errors_are_not_swallowed(monkeypatch):
+    client = _client_in("RUNNING")
+    request = httpx.Request("POST", "http://klipper.local:7125/printer/print/pause")
+    error = httpx.HTTPStatusError("500", request=request, response=httpx.Response(500, request=request))
+
+    monkeypatch.setattr(client, "_post", lambda p, payload: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        client, "request_status_update", lambda: pytest.fail("status must not be refreshed for non-400 errors")
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.pause_print()
+
+
+def test_moonraker_control_400_reads_the_state_from_the_websocket_cache(monkeypatch):
+    """Paused from the printer's screen just before our pause: the 400 is checked against the websocket's state."""
+    client = _client_in("RUNNING")
+    client._ws_objects = ["webhooks", "print_stats", "virtual_sdcard"]
+    client._ws_status = {
+        "webhooks": {"state": "ready"},
+        "print_stats": {"state": "paused", "filename": "part.gcode"},
+        "virtual_sdcard": {"progress": 0.5},
+    }
+    client._ws_live, client._ws_seen = True, time.monotonic()
+    http = []
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: http.append(path) or {})
+    monkeypatch.setattr(client, "_post", lambda p, payload: (_ for _ in ()).throw(_moonraker_http_400(p)))
+
+    assert client.pause_print() is True
+    assert client.state.state == "PAUSE"
+    assert not [p for p in http if p.startswith("printer/objects")]  # no HTTP poll: the cache answered
