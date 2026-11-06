@@ -159,3 +159,93 @@ class TestApiKeyDenylistIntegrity:
         }
         incorrectly_denied = expected_allowed & _APIKEY_DENIED_PERMISSIONS
         assert not incorrectly_denied, f"Operational permissions incorrectly in API key denylist: {incorrectly_denied}"
+
+
+async def _make_key(db_session, **scopes) -> str:
+    from backend.app.core.auth import generate_api_key
+    from backend.app.models.api_key import APIKey
+    from backend.app.models.settings import Settings
+
+    flags = {"can_queue": False, "can_control_printer": False, "can_read_status": False, **scopes}
+    full_key, key_hash, key_prefix = generate_api_key()
+    db_session.add(APIKey(name="scoped", key_hash=key_hash, key_prefix=key_prefix, enabled=True, **flags))
+    db_session.add(Settings(key="auth_enabled", value="true"))
+    await db_session.commit()
+    return full_key
+
+
+class TestApiKeyScopeAllowlist:
+    """Scopes are an allowlist (Bambuddy 0.2.4.5, GHSA-r2qv-8222-hqg3)."""
+
+    def test_admin_permissions_are_not_allowlisted(self):
+        from backend.app.core.auth import _APIKEY_DENIED_PERMISSIONS, _APIKEY_SCOPE_BY_PERMISSION
+
+        assert not set(_APIKEY_SCOPE_BY_PERMISSION) & {p.value for p in _APIKEY_DENIED_PERMISSIONS}
+
+    def test_scope_flags_exist_on_model(self):
+        from backend.app.core.auth import _APIKEY_SCOPE_BY_PERMISSION
+        from backend.app.models.api_key import APIKey
+
+        for flag in set(_APIKEY_SCOPE_BY_PERMISSION.values()):
+            assert hasattr(APIKey, flag), flag
+
+    def test_check_semantics(self):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from backend.app.core.auth import _check_apikey_permissions
+
+        key = SimpleNamespace(can_read_status=True, can_queue=False, can_control_printer=False)
+        _check_apikey_permissions(key, ["printers:read"])
+        for perms, kwargs in (
+            (["printers:control"], {}),
+            (["printers:read", "queue:create"], {}),
+            (["printers:update"], {}),  # unmapped = admin
+            (["not:a_permission"], {}),
+            ([], {}),
+            (["queue:create", "settings:update"], {"require_any": True}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                _check_apikey_permissions(key, perms, **kwargs)
+            assert exc.value.status_code == 403
+        _check_apikey_permissions(key, ["settings:update", "printers:read"], require_any=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("post", "/api/v1/printers/1/print/stop"),
+            ("post", "/api/v1/farm/jobs"),
+            ("post", "/api/v1/farm/board/k/requeue"),
+            ("delete", "/api/v1/farm/jobs/1"),
+            ("delete", "/api/v1/queue/1"),
+            ("get", "/api/v1/printers/"),
+        ],
+    )
+    async def test_key_without_scopes_is_refused(self, async_client: AsyncClient, db_session, method, path):
+        key = await _make_key(db_session)
+        resp = await getattr(async_client, method)(path, headers={"X-API-Key": key})
+        assert resp.status_code == 403, resp.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("scopes", "method", "path", "allowed"),
+        [
+            ({"can_control_printer": True}, "post", "/api/v1/printers/999/print/stop", True),
+            ({"can_control_printer": True}, "post", "/api/v1/farm/jobs", False),
+            ({"can_queue": True}, "post", "/api/v1/printers/999/print/stop", False),
+            ({"can_queue": True}, "post", "/api/v1/farm/jobs", True),
+            ({"can_queue": True}, "delete", "/api/v1/farm/jobs/999999", True),
+            ({"can_read_status": True}, "get", "/api/v1/farm/jobs", True),
+        ],
+    )
+    async def test_scope_grants_only_its_routes(
+        self, async_client: AsyncClient, db_session, scopes, method, path, allowed
+    ):
+        key = await _make_key(db_session, **scopes)
+        kwargs = {"json": {}} if method == "post" else {}
+        resp = await getattr(async_client, method)(path, headers={"X-API-Key": key}, **kwargs)
+        assert (resp.status_code != 403) is allowed, resp.text

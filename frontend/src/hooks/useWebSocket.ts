@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useToast } from '../contexts/ToastContext';
 import { useTranslation } from 'react-i18next';
+import { api } from '../api/client';
 
 interface WebSocketMessage {
   type: string;
@@ -14,6 +15,7 @@ interface WebSocketMessage {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const unmountedRef = useRef(false);
   const queryClient = useQueryClient();
   const [isConnected, setIsConnected] = useState(false);
   const lastMissingSpoolWarningRef = useRef<Map<number, string>>(new Map());
@@ -64,13 +66,25 @@ export function useWebSocket() {
     processNext();
   }, []);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return;
     }
 
+    // With auth enabled the server wants ?token= from /auth/ws-token. If the mint
+    // fails (auth off, or not logged in yet) connect anyway: auth-off servers
+    // accept, auth-on servers close with 4401 and the reconnect loop retries.
+    let token: string | undefined;
+    try {
+      token = (await api.getWebSocketToken()).token;
+    } catch {
+      // see above
+    }
+    if (unmountedRef.current || wsRef.current) return;
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/v1/ws`;
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    const wsUrl = `${protocol}//${window.location.host}/api/v1/ws${tokenParam}`;
 
     const ws = new WebSocket(wsUrl);
 
@@ -115,7 +129,7 @@ export function useWebSocket() {
 
       // Reconnect after 3 seconds
       reconnectTimeoutRef.current = window.setTimeout(() => {
-        connect();
+        void connect();
       }, 3000);
     };
 
@@ -318,9 +332,11 @@ export function useWebSocket() {
   }, [handleMessage]);
 
   useEffect(() => {
-    connect();
+    unmountedRef.current = false;
+    void connect();
 
     return () => {
+      unmountedRef.current = true;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

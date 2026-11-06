@@ -10,6 +10,7 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastProvider } from '../../contexts/ToastContext';
+import { api } from '../../api/client';
 
 // Track WebSocket instances created during tests
 let wsInstances: MockWebSocket[] = [];
@@ -107,8 +108,15 @@ function createWrapper(queryClient: QueryClient) {
   };
 }
 
-function getLatestWs(): MockWebSocket | undefined {
-  return wsInstances[wsInstances.length - 1];
+// connect() awaits the ws-token mint before it builds the socket. Flushing
+// microtasks works under both real and fake timers (waitFor polls real time).
+async function waitForWs(count = 1): Promise<MockWebSocket> {
+  for (let i = 0; i < 20 && wsInstances.length < count; i++) {
+    await Promise.resolve();
+  }
+  const ws = wsInstances[wsInstances.length - 1];
+  if (!ws) throw new Error('WebSocket was not constructed');
+  return ws;
 }
 
 describe('useWebSocket hook', () => {
@@ -122,6 +130,7 @@ describe('useWebSocket hook', () => {
     // Save original and install mock
     originalWebSocket = globalThis.WebSocket;
     globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    vi.spyOn(api, 'getWebSocketToken').mockResolvedValue({ token: 'test-ws-token' });
   });
 
   afterEach(() => {
@@ -190,9 +199,32 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs();
-      expect(ws).toBeDefined();
-      expect(ws?.url).toContain('/api/v1/ws');
+      const ws = await waitForWs();
+      expect(ws.url).toContain('/api/v1/ws?token=test-ws-token');
+    });
+
+    it('connects without a token when the mint fails (auth disabled)', async () => {
+      vi.mocked(api.getWebSocketToken).mockRejectedValueOnce(new Error('401'));
+      const { useWebSocket } = await import('../../hooks/useWebSocket');
+
+      renderHook(() => useWebSocket(), {
+        wrapper: createWrapper(queryClient),
+      });
+
+      const ws = await waitForWs();
+      expect(ws.url).toMatch(/\/api\/v1\/ws$/);
+    });
+
+    it('does not open a socket when unmounted while the token is pending', async () => {
+      const { useWebSocket } = await import('../../hooks/useWebSocket');
+
+      const { unmount } = renderHook(() => useWebSocket(), {
+        wrapper: createWrapper(queryClient),
+      });
+      unmount();
+
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(wsInstances).toHaveLength(0);
     });
 
     it('reports connected state when WebSocket opens', async () => {
@@ -206,9 +238,9 @@ describe('useWebSocket hook', () => {
       expect(result.current.isConnected).toBe(false);
 
       // Simulate connection opening
-      const ws = getLatestWs();
+      const ws = await waitForWs();
       act(() => {
-        ws?.open();
+        ws.open();
       });
 
       await waitFor(() => {
@@ -285,7 +317,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -327,7 +359,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -368,7 +400,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -405,7 +437,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
       act(() => {
         ws.open();
       });
@@ -435,7 +467,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -460,7 +492,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -490,7 +522,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -519,7 +551,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
@@ -542,7 +574,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Don't open connection - still in CONNECTING state
 
@@ -564,7 +596,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const firstWs = getLatestWs()!;
+      const firstWs = await waitForWs();
 
       // Open connection
       act(() => {
@@ -579,13 +611,11 @@ describe('useWebSocket hook', () => {
       });
 
       // Wait for reconnect timeout (3 seconds)
-      act(() => {
-        vi.advanceTimersByTime(3000);
-      });
+      await vi.advanceTimersByTimeAsync(3000);
 
       // Should have created new WebSocket
+      expect(await waitForWs(instanceCountBefore + 1)).not.toBe(firstWs);
       expect(wsInstances.length).toBe(instanceCountBefore + 1);
-      expect(getLatestWs()).not.toBe(firstWs);
 
       vi.useRealTimers();
     });
@@ -597,7 +627,7 @@ describe('useWebSocket hook', () => {
         wrapper: createWrapper(queryClient),
       });
 
-      const ws = getLatestWs()!;
+      const ws = await waitForWs();
 
       // Open connection
       act(() => {
