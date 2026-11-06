@@ -1,4 +1,4 @@
-"""Containment-checked path joining (ported from Bambuddy 0.2.4.5).
+"""Containment-checked path joining (ported from upstream 0.2.4.5).
 
 Use ``safe_join_under`` whenever a path part comes from a request body, a ZIP
 ``namelist()``, an upload filename, a printer's FTP listing or anything else not

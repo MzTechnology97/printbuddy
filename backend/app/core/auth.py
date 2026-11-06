@@ -24,7 +24,7 @@ from backend.app.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# API keys are allowlist-based (ported from Bambuddy 0.2.4.5, GHSA-r2qv-8222-hqg3):
+# API keys are allowlist-based (ported from upstream 0.2.4.5, GHSA-r2qv-8222-hqg3):
 # a key may only use a permission listed here, and only when the named scope flag
 # is set on the key. Anything unmapped is admin-only. Library and inventory writes
 # use can_queue (upstream split them into new flags backfilled from can_queue).
@@ -391,7 +391,7 @@ async def create_camera_stream_token() -> str:
     return token
 
 
-# --- WebSocket tokens (Bambuddy 0.2.4.5) ---
+# --- WebSocket tokens (upstream 0.2.4.5) ---
 # Browsers can't send an Authorization header on the WebSocket handshake, so the
 # SPA mints one of these via POST /auth/ws-token and passes it as ?token=.
 WEBSOCKET_TOKEN_EXPIRE_MINUTES = 60

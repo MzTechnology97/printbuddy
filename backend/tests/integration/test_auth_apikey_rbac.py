@@ -175,7 +175,7 @@ async def _make_key(db_session, **scopes) -> str:
 
 
 class TestApiKeyScopeAllowlist:
-    """Scopes are an allowlist (Bambuddy 0.2.4.5, GHSA-r2qv-8222-hqg3)."""
+    """Scopes are an allowlist (upstream 0.2.4.5, GHSA-r2qv-8222-hqg3)."""
 
     def test_admin_permissions_are_not_allowlisted(self):
         from backend.app.core.auth import _APIKEY_DENIED_PERMISSIONS, _APIKEY_SCOPE_BY_PERMISSION
