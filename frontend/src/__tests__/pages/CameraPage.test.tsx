@@ -177,13 +177,48 @@ describe('CameraPage', () => {
       });
     });
 
-    it('renders image src immediately when auth is disabled (no token required)', async () => {
+    it('does not fire a tokenless stream request when auth is disabled (#2521)', async () => {
+      // Rendering the src before the token query settles, then swapping it when
+      // the token lands, made the browser send two stream requests per load:
+      // two fan-out viewers on a printer that allows one camera socket.
+      let resolveToken!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        resolveToken = resolve;
+      });
+      server.use(
+        http.post('*/api/v1/printers/camera/stream-token', async () => {
+          await gate;
+          return HttpResponse.json({ token: 'tok-xyz' });
+        })
+      );
+
+      renderCameraPage(1);
+      await waitFor(() => {
+        expect(screen.getByText('X1 Carbon')).toBeInTheDocument();
+      });
+
+      const early = (document.querySelector('img') as HTMLImageElement | null)?.getAttribute('src') || '';
+      expect(early).not.toContain('/camera/stream');
+
+      resolveToken();
+
+      await waitFor(() => {
+        const src = (document.querySelector('img') as HTMLImageElement | null)?.getAttribute('src') || '';
+        expect(src).toContain('/api/v1/printers/1/camera/stream');
+        expect(src).toContain('token=tok-xyz');
+      });
+    });
+
+    it('still streams when auth is disabled and the token endpoint fails', async () => {
+      server.use(
+        http.post('*/api/v1/printers/camera/stream-token', () => new HttpResponse(null, { status: 500 }))
+      );
+
       renderCameraPage(1);
 
       await waitFor(() => {
         const src = (document.querySelector('img') as HTMLImageElement | null)?.getAttribute('src') || '';
-        expect(src).toContain(`/api/v1/printers/1/camera/stream`);
-        expect(src).not.toContain('token=');
+        expect(src).toContain('/api/v1/printers/1/camera/stream');
       });
     });
   });

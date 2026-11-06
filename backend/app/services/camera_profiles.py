@@ -53,10 +53,17 @@ class CameraProfile:
     # Max consecutive ffmpeg respawns when the printer drops the RTSP
     # session mid-stream. Some firmwares cut the stream after a few
     # seconds (originally noted on P2S), so we transparently respawn
-    # to keep the MJPEG client alive.
+    # to keep the MJPEG client alive. Consecutive means failed sessions in a
+    # row: a session that delivered frames resets the count. A stock X1C ends
+    # every session after about a minute, so a lifetime count stopped a live
+    # view for good after half an hour (upstream 1.2.5.7).
     rtsp_reconnect_max: int = 30
-    # Seconds between ffmpeg respawn attempts.
+    # Seconds before respawning after a session that delivered frames.
     rtsp_reconnect_delay: float = 0.2
+    # Each further failed attempt in a row doubles the delay up to this cap,
+    # so a printer refusing sessions for a while gets minutes, not 30 dials
+    # in nine seconds, before the stream is given up.
+    rtsp_reconnect_backoff_max: float = 5.0
 
     # --- Extra ffmpeg input args ---------------------------------------------
     # Hook for future per-model knobs (e.g. `-fflags` overrides) without
