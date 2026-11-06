@@ -1588,6 +1588,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
     # have known descriptions (e.g. user-initiated actions, not real errors).
     _HMS_NOTIFICATION_SUPPRESS = {
         "0500_400E",  # Printing was cancelled (user action, not an error)
+        "0500_4004",  # Device busy, new task refused (fork): the running print goes on
     }
 
     # Check for new HMS errors and send notifications
@@ -1618,10 +1619,10 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
                     printer_name = printer.name if printer else f"Printer {printer_id}"
 
                     # Format error details for notification
-                    # Module 0x07 = AMS/Filament, 0x05 = Nozzle, 0x0C = Motion Controller, etc.
+                    # Module 0x07 = AMS/Filament, 0x05 = System, 0x0C = Motion Controller, etc.
                     module_names = {
                         0x03: "Print/Task",
-                        0x05: "Nozzle/Extruder",
+                        0x05: "System",  # fork: 0500_xxxx are mainboard/task codes, not the nozzle
                         0x07: "AMS/Filament",
                         0x0C: "Motion Controller",
                         0x12: "Chamber",

@@ -4665,6 +4665,12 @@ class TestHMSUserActionFiltering:
         mqtt_client._update_state({"hms": [{"attr": 0x05000300, "code": 0x400E}]})
         assert mqtt_client.state.hms_errors == []
 
+    def test_device_busy_0500_4004_filtered(self, mqtt_client):
+        """0500_4004 (a new task refused while printing, sent by another app) is not a fault of the running print."""
+        mqtt_client._update_state({"hms": [{"attr": 0x05004004, "code": 0x4004}]})
+        mqtt_client._update_state({"print_error": 0x0500_4004})
+        assert mqtt_client.state.hms_errors == []
+
     def test_real_layer_shift_still_passes_through(self, mqtt_client):
         """0300_4057 (Z-axis step loss) is a real fault and must NOT be filtered."""
         mqtt_client._update_state({"hms": [{"attr": 0x03000100, "code": 0x4057}]})
