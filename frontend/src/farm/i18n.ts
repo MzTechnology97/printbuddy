@@ -120,6 +120,8 @@ const en = {
   jobs: {
     title: 'Accoda jobs',
     accoda: 'Queue',
+    print: 'Print',
+    spoolOnHome: 'no spool set: set it on the printer\'s card in Home',
     accodaSelected: 'Queue selected ({{count}})',
     select: 'Select',
     covered: 'Already covered by the queue',
@@ -220,8 +222,10 @@ const en = {
     open: 'Open the plates in Products',
   },
   spools: {
-    title: 'Spools loaded by hand',
-    intro: 'These Klipper printers have no CFS and cannot say which spool is loaded. Set material and colour here: Accoda uses them to pick the 3MF and check the colour, and the print starts by itself after the plate-clear OK. Update it whenever you change spool.',
+    title: 'Spool loaded',
+    intro: 'This Klipper printer has no CFS and cannot say which spool is loaded. Set material and colour: Accoda uses them to pick the 3MF and check the colour, and the print starts by itself after the plate-clear OK. Update it whenever you change spool.',
+    cardLabel: 'Spool (set by hand)',
+    none: 'not set',
     material: 'Material',
     color: 'Colour',
     empty: 'Empty',
@@ -591,6 +595,8 @@ const it: typeof en = {
   jobs: {
     title: 'Lavori in Accoda',
     accoda: 'Accoda',
+    print: 'Stampa',
+    spoolOnHome: 'nessuna bobina indicata: indicala sulla scheda della stampante nella Home',
     accodaSelected: 'Accoda selezionati ({{count}})',
     select: 'Seleziona',
     covered: 'Già coperto dalla coda',
@@ -691,8 +697,10 @@ const it: typeof en = {
     open: 'Apri i piatti in Prodotti',
   },
   spools: {
-    title: 'Bobine montate (indicate a mano)',
-    intro: 'Queste stampanti Klipper non hanno il CFS e non sanno quale bobina è montata. Indica qui materiale e colore: Accoda li usa per scegliere il 3MF e controllare il colore, e la stampa parte da sola dopo la conferma del piatto libero. Aggiornala ogni volta che cambi bobina.',
+    title: 'Bobina montata',
+    intro: 'Questa stampante Klipper non ha il CFS e non sa quale bobina è montata. Indica materiale e colore: Accoda li usa per scegliere il 3MF e controllare il colore, e la stampa parte da sola dopo la conferma del piatto libero. Aggiornala ogni volta che cambi bobina.',
+    cardLabel: 'Bobina (indicata a mano)',
+    none: 'non indicata',
     material: 'Materiale',
     color: 'Colore',
     empty: 'Vuota',
