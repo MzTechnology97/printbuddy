@@ -14,6 +14,7 @@ import { useMutation } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
 import type { Printer, PrinterStatus } from '../api/client';
+import { KlipperTuning } from './KlipperTuning';
 import { KlipperMacrosConsole } from './KlipperMacrosConsole';
 import { KlipperSafetyControls } from './KlipperSafety';
 
@@ -619,6 +620,7 @@ export function KlipperControlPanel({ printer, status, showToast }: Props) {
       </div>
 
       <KlipperMacrosConsole printerId={printer.id} connected={status?.connected} showToast={showToast} />
+      <KlipperTuning printerId={printer.id} status={status} showToast={showToast} />
     </div>
   );
 }

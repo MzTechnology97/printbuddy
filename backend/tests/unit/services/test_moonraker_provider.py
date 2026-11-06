@@ -1198,6 +1198,64 @@ def test_moonraker_print_ended_by_a_klipper_disconnect_is_a_failure(monkeypatch)
     assert end_with(None) == "stopped"  # no history: as before
 
 
+def test_moonraker_tuning_bed_mesh_and_versions(monkeypatch):
+    client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Sovol Zero")
+    # Shapes of real replies (values made up, matrix cut to 2x2).
+    status = {
+        "print_stats": {"state": "printing", "filename": "part.gcode"},
+        "gcode_move": {"extrude_factor": 0.95, "speed_factor": 1.0},
+        "extruder": {"temperature": 220.0, "target": 220.0, "pressure_advance": 0.044, "smooth_time": 0.04},
+    }
+    mesh = {
+        "bed_mesh": {
+            "profile_name": "default",
+            "mesh_min": [20.0, 20.0],
+            "mesh_max": [132.0, 140.0],
+            "probed_matrix": [[0.012, -0.034], [0.051, 0.0]],
+            "mesh_matrix": [[0.0]],
+            "profiles": {"default": {"points": []}, "pla": {"points": []}},
+        }
+    }
+    monkeypatch.setattr(client, "_query_objects", lambda names: mesh if names == ["bed_mesh"] else status)
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+    monkeypatch.setattr(client, "_query_fan_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_cfs_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_query_snapmaker_u1_status", lambda *args, **kwargs: {})
+    monkeypatch.setattr(client, "_print_file_metadata", lambda filename: {})
+    sent: list[str] = []
+    monkeypatch.setattr(client, "send_gcode", lambda s: sent.append(s) or True)
+    infos = {
+        "printer/info": {"software_version": "v0.13.0-733-g0499b303-dirty", "hostname": "printer"},
+        "server/info": {"moonraker_version": "v0.10.0-31-gd5ee171", "api_version_string": "1.5.0"},
+    }
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: infos[path])
+
+    client.request_status_update()
+    assert client.state.klipper_tuning == {"flow": 95, "pressure_advance": 0.044, "smooth_time": 0.04}
+
+    assert client.set_flow(105) and client.set_pressure_advance(0.05)
+    with pytest.raises(ValueError):
+        client.set_flow(10)
+    with pytest.raises(ValueError):
+        client.set_pressure_advance(2)
+    assert client.calibrate_bed_mesh()
+    assert sent == ["M221 S105", "SET_PRESSURE_ADVANCE ADVANCE=0.0500", "G28\nBED_MESH_CALIBRATE"]
+
+    assert client.bed_mesh() == {
+        "profile_name": "default",
+        "mesh_min": [20.0, 20.0],
+        "mesh_max": [132.0, 140.0],
+        "probed_matrix": [[0.012, -0.034], [0.051, 0.0]],
+        "profiles": ["default", "pla"],
+    }
+    assert client.versions() == {
+        "klipper": "v0.13.0-733-g0499b303-dirty",
+        "moonraker": "v0.10.0-31-gd5ee171",
+        "api": "1.5.0",
+        "hostname": "printer",
+    }
+
+
 def _klipper_controls_client(monkeypatch, available: list[str], status: dict):
     client = MoonrakerPrinterClient("http://moonraker.local:7125", printer_model="Creality K2 Pro")
     monkeypatch.setattr(

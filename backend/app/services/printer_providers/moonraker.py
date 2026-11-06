@@ -55,6 +55,8 @@ class MoonrakerPrinterState:
     printable_objects: dict[int, dict[str, Any]] = field(default_factory=dict)
     printable_objects_bbox_all: list[float] | None = None
     skipped_objects: list[int] = field(default_factory=list)
+    # fork: live tuning, {"flow": % (M221), "pressure_advance": s, "smooth_time": s}
+    klipper_tuning: dict[str, Any] | None = None
     cooling_fan_speed: int | None = None
     big_fan1_speed: int | None = None
     big_fan2_speed: int | None = None
@@ -1670,6 +1672,14 @@ class MoonrakerPrinterClient:
         speed_level = _moonraker_speed_level(status.get("gcode_move"))
         if speed_level is not None:
             self.state.speed_level = speed_level
+        gcode_move = status.get("gcode_move") if isinstance(status.get("gcode_move"), dict) else {}
+        extruder = status.get("extruder") if isinstance(status.get("extruder"), dict) else {}
+        flow = _safe_float(gcode_move.get("extrude_factor"))
+        self.state.klipper_tuning = {
+            "flow": round(flow * 100) if flow is not None else None,
+            "pressure_advance": _safe_float(extruder.get("pressure_advance")),
+            "smooth_time": _safe_float(extruder.get("smooth_time")),
+        }
         self._apply_snapmaker_u1_status(status)
         _apply_moonraker_fans(self.state, status)
         self._emit_status_callbacks(previous_state)
@@ -1826,6 +1836,45 @@ class MoonrakerPrinterClient:
             return False
         self.state.speed_level = int(mode)
         return True
+
+    def set_flow(self, percent: int) -> bool:
+        """Extrusion multiplier for the print, live (M221)."""
+        if not 50 <= percent <= 150:
+            raise ValueError("Flow must be 50-150%")
+        return self.send_gcode(f"M221 S{int(percent)}")
+
+    def set_pressure_advance(self, value: float) -> bool:
+        """Pressure advance of the active extruder, live; the config's value comes back at the next restart."""
+        if not 0 <= value <= 1:
+            raise ValueError("Pressure advance must be 0-1")
+        return self.send_gcode(f"SET_PRESSURE_ADVANCE ADVANCE={value:.4f}")
+
+    def bed_mesh(self) -> dict[str, Any]:
+        """The active mesh (probed points, mm) and the saved profiles' names; empty when the printer has none."""
+        mesh = self._query_objects(["bed_mesh"]).get("bed_mesh")
+        if not isinstance(mesh, dict):
+            return {}
+        return {
+            "profile_name": mesh.get("profile_name") or None,
+            "mesh_min": mesh.get("mesh_min"),
+            "mesh_max": mesh.get("mesh_max"),
+            "probed_matrix": mesh.get("probed_matrix") or [],
+            "profiles": sorted((mesh.get("profiles") or {}).keys()),
+        }
+
+    def calibrate_bed_mesh(self) -> bool:
+        """Home, then probe a new mesh: active until the next restart (SAVE_CONFIG keeps it)."""
+        return self.send_gcode("G28\nBED_MESH_CALIBRATE")
+
+    def versions(self) -> dict[str, Any]:
+        """Klipper's and Moonraker's versions, read only."""
+        printer, server = self._get("printer/info"), self._get("server/info")
+        return {
+            "klipper": printer.get("software_version"),
+            "moonraker": server.get("moonraker_version"),
+            "api": server.get("api_version_string"),
+            "hostname": printer.get("hostname"),
+        }
 
     def skip_objects(self, object_ids: list[int]) -> bool:
         names = [self.state.printable_objects[oid]["name"] for oid in object_ids if oid in self.state.printable_objects]

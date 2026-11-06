@@ -3655,6 +3655,23 @@ class _FakeKlipperClient:
     def check_staleness(self):
         return False
 
+    def set_flow(self, percent):
+        if not 50 <= percent <= 150:
+            raise ValueError("Flow must be 50-150%")
+        return self.send_gcode(f"M221 S{percent}")
+
+    def set_pressure_advance(self, value):
+        return self.send_gcode(f"SET_PRESSURE_ADVANCE ADVANCE={value:.4f}")
+
+    def bed_mesh(self):
+        return {"profile_name": "default", "probed_matrix": [[0.01, -0.02], [0.03, 0.0]], "profiles": ["default"]}
+
+    def calibrate_bed_mesh(self):
+        return self.send_gcode("G28\nBED_MESH_CALIBRATE")
+
+    def versions(self):
+        return {"klipper": "v0.13.0", "moonraker": "v0.10.0", "api": "1.5.0", "hostname": "printer"}
+
     def send_gcode(self, script):
         self.sent.append(script)
         return True
@@ -3709,6 +3726,62 @@ async def test_klipper_chamber_macros_and_console_routes(async_client: AsyncClie
         assert (await async_client.post(f"{base}/klipper/console", json={"script": ""})).status_code == 422
 
     assert client.sent == ["M141 S50", "set_case_leds_on", "QUERY_ENDSTOPS"]
+
+
+def _mesh_sent():
+    from backend.app.api.routes import printers as printers_routes
+
+    return printers_routes._mesh_calibration_sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_tuning_bed_mesh_and_versions_routes(async_client: AsyncClient, printer_factory):
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="SV08", provider="klipper", api_url="http://sv08.local:7125")
+    client = _FakeKlipperClient(state="RUNNING")
+    base = f"/api/v1/printers/{printer.id}/klipper"
+    with patch.dict(printer_manager._clients, {printer.id: client}), patch.dict(_mesh_sent(), clear=True):
+        assert (await async_client.post(f"{base}/flow?percent=105")).status_code == 200
+        assert (await async_client.post(f"{base}/flow?percent=300")).status_code == 400
+        assert (await async_client.post(f"{base}/pressure-advance?value=0.045")).status_code == 200
+        assert (await async_client.get(f"{base}/bed-mesh")).json()["probed_matrix"][0] == [0.01, -0.02]
+        assert (await async_client.post(f"{base}/bed-mesh/calibrate")).status_code == 409  # printing
+        client.state.state = "IDLE"
+        assert (await async_client.post(f"{base}/bed-mesh/calibrate")).status_code == 200
+        again = await async_client.post(f"{base}/bed-mesh/calibrate")  # it runs for minutes: never twice
+        assert again.status_code == 409 and "few minutes ago" in again.json()["detail"]
+        assert (await async_client.get(f"{base}/versions")).json()["klipper"] == "v0.13.0"
+    assert client.sent == ["M221 S105", "SET_PRESSURE_ADVANCE ADVANCE=0.0450", "G28\nBED_MESH_CALIBRATE"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_klipper_bed_mesh_calibrate_unknown_state_and_timeout(async_client: AsyncClient, printer_factory):
+    import httpx
+
+    from backend.app.api.routes import printers as printers_routes
+    from backend.app.services.printer_manager import printer_manager
+
+    printer = await printer_factory(name="K1", provider="klipper", api_url="http://k1.local:7125")
+    client = _FakeKlipperClient()
+    url = f"/api/v1/printers/{printer.id}/klipper/bed-mesh/calibrate"
+    with (
+        patch.dict(printer_manager._clients, {printer.id: client}),
+        patch.dict(printers_routes._mesh_calibration_sent, clear=True),
+    ):
+        with patch.object(printer_manager, "get_status", return_value=None):
+            assert (await async_client.post(url)).status_code == 409  # state unknown: not sent
+        assert client.sent == []
+
+        def timed_out():
+            raise httpx.WriteTimeout("timed out")
+
+        client.calibrate_bed_mesh = timed_out
+        sent = await async_client.post(url)  # it may be running: "sent", not "refused"
+        assert sent.status_code == 200 and sent.json()["pending"] is True
+        assert (await async_client.post(url)).status_code == 409  # and never sent again right away
 
 
 @pytest.mark.asyncio
