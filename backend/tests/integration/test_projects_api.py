@@ -956,7 +956,7 @@ class TestProjectExportImport:
 
 
 class TestProjectImportPathTraversal:
-    """A crafted project ZIP must not write outside the library (Bambuddy 0.2.4.5)."""
+    """A crafted project ZIP must not write outside the library (upstream 0.2.4.5)."""
 
     @staticmethod
     async def _import(async_client: AsyncClient, folder: str, entries: dict[str, bytes]):

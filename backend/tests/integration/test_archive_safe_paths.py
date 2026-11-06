@@ -1,4 +1,4 @@
-"""Archive photo and timelapse paths stay inside the archive dir (Bambuddy 0.2.4.5)."""
+"""Archive photo and timelapse paths stay inside the archive dir (upstream 0.2.4.5)."""
 
 import shutil
 

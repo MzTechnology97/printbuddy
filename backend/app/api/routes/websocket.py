@@ -20,7 +20,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
     """WebSocket endpoint for real-time updates.
 
     With auth enabled, ``?token=`` must hold a token from ``POST /auth/ws-token``
-    (Bambuddy 0.2.4.5). Checked before accept() so a refused client never joins
+    (upstream 0.2.4.5). Checked before accept() so a refused client never joins
     the broadcast list. With auth disabled, anyone can connect as before.
     """
     try:

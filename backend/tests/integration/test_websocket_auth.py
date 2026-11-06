@@ -1,4 +1,4 @@
-"""/api/v1/ws needs a token when auth is enabled (ported from Bambuddy 0.2.4.5)."""
+"""/api/v1/ws needs a token when auth is enabled (ported from upstream 0.2.4.5)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 

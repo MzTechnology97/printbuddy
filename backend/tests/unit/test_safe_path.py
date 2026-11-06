@@ -1,4 +1,4 @@
-"""safe_join_under / assert_under (ported from Bambuddy 0.2.4.5)."""
+"""safe_join_under / assert_under (ported from upstream 0.2.4.5)."""
 
 from pathlib import Path
 
