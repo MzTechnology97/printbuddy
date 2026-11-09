@@ -1235,6 +1235,57 @@ _last_status_broadcast: dict[int, str] = {}
 # Track printers where we've updated nozzle_count
 _nozzle_count_updated: set[int] = set()
 
+# "Printer offline" notification (upstream #1752): sent once a printer seen connected has stayed disconnected for
+# the grace below, so a reconnect blip (a stale-session reset waits 30 s) sends nothing.
+PRINTER_OFFLINE_GRACE_SECONDS = 60.0
+_printer_last_connected: dict[int, bool] = {}
+_printer_offline_tasks: dict[int, asyncio.Task] = {}
+
+
+async def _notify_printer_offline_after_grace(printer_id: int) -> None:
+    logger = logging.getLogger(__name__)
+    try:
+        await asyncio.sleep(PRINTER_OFFLINE_GRACE_SECONDS)
+        # Removed or disabled meanwhile (no client): not a printer that went offline.
+        if printer_manager.get_client(printer_id) is None or printer_manager.is_connected(printer_id):
+            return
+        if printer_manager.offline_expected(printer_id):  # powered off by us after the edge was seen
+            return
+        async with async_session() as db:
+            from backend.app.models.printer import Printer
+
+            printer = await db.get(Printer, printer_id)
+            if printer is None or not printer.is_active:
+                return
+            logger.info(
+                "Printer %s (%s) offline for %.0fs: notifying", printer_id, printer.name, PRINTER_OFFLINE_GRACE_SECONDS
+            )
+            await notification_service.on_printer_offline(printer_id, printer.name, db)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("Printer offline notification failed for printer %s: %s", printer_id, e)
+    finally:
+        if _printer_offline_tasks.get(printer_id) is asyncio.current_task():
+            del _printer_offline_tasks[printer_id]
+
+
+def _track_printer_offline(printer_id: int, connected: bool) -> None:
+    """On the connected -> disconnected edge, the offline notification after the grace; a reconnect cancels it."""
+    was_connected = _printer_last_connected.get(printer_id)
+    _printer_last_connected[printer_id] = connected
+    if connected:
+        task = _printer_offline_tasks.pop(printer_id, None)
+        if task is not None:
+            task.cancel()
+        if was_connected is False:  # back: a refused upload is tried again now, a power-off is over
+            print_scheduler.clear_upload_backoff(printer_id)
+            printer_manager.back_online(printer_id)
+    elif printer_manager.offline_expected(printer_id):
+        return  # we powered it off (smart plug auto-off, or after a print): no alert
+    elif was_connected and printer_id not in _printer_offline_tasks:
+        _printer_offline_tasks[printer_id] = asyncio.create_task(_notify_printer_offline_after_grace(printer_id))
+
 
 def _progress_tracking_job_key(state: PrinterState) -> str | None:
     """Return a stable active-print key for progress notification tracking."""
@@ -1385,6 +1436,7 @@ async def _notify_klipper_alert(printer_id: int, state) -> None:
 
 async def on_printer_status_change(printer_id: int, state: PrinterState):
     """Handle printer status changes - broadcast via WebSocket."""
+    _track_printer_offline(printer_id, bool(state.connected))
     # Only broadcast if something meaningful changed (reduce WebSocket spam)
     # Include rounded temperatures to detect meaningful temp changes (within 1 degree)
     temps = state.temperatures or {}
@@ -4497,6 +4549,7 @@ async def on_print_complete(printer_id: int, data: dict):
                                     p = result.scalar_one_or_none()
                                     if p and p.enabled:
                                         service = await smart_plug_manager.get_service_for_plug(p, new_db)
+                                        printer_manager.expect_offline(pid)  # no "offline" alert for it
                                         success = await service.turn_off(p)
                                         if success:
                                             logger.info("Powered off printer %s via smart plug '%s'", pid, p.name)

@@ -1171,6 +1171,7 @@ async def stop_queue_item(
                 plug = result.scalar_one_or_none()
                 if plug and plug.enabled:
                     logger.info("Auto-off: Powering off printer %s", printer_id)
+                    printer_manager.expect_offline(printer_id)  # no "offline" alert for it
                     await tasmota_service.turn_off(plug)
 
         asyncio.create_task(cooldown_and_poweroff())
@@ -1224,6 +1225,11 @@ async def start_queue_item(
                     "deficit": [d.to_dict() for d in deficit],
                 },
             )
+
+    # Started by hand: a printer waiting after a refused upload is tried again now, from zero refusals.
+    from backend.app.services.print_scheduler import scheduler
+
+    scheduler.clear_upload_backoff(item.printer_id, item.id)
 
     # Print Anyway / no deficit: clear the flags and let the scheduler dispatch.
     item.manual_start = False

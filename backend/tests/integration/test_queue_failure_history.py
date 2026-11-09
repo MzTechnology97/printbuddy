@@ -56,6 +56,7 @@ async def start(db_session, item, *, connected=True, upload=None, started=True):
         pm.start_print.return_value = started
         notify.on_queue_job_failed = AsyncMock()
         notify.on_queue_job_started = AsyncMock()
+        notify.on_queue_job_waiting = AsyncMock()
         await scheduler._start_print(db_session, item)
     await db_session.refresh(item)
     return item
@@ -71,14 +72,11 @@ async def test_upload_failure_keeps_the_ftp_error_not_only_the_generic_advice(db
         return False
 
     item = await start(db_session, queued_file, upload=failing_upload)
-    assert item.status == "failed"
+    # A refused upload keeps the item queued (upstream #3210/#3409), with the error the upload really hit.
+    assert (item.status, item.error_message, item.dispatching_at) == ("pending", None, None)
     assert (
-        item.error_message
-        == "Upload to the printer failed: FTP upload failed for /part.gcode.3mf: 552 Storage quota exceeded"
-    )
-    assert item.failure_detail["phase"] == "upload"
-    assert (
-        "ERROR: FTP upload failed for /part.gcode.3mf: 552 Storage quota exceeded" in item.failure_detail["technical"]
+        "Upload to the printer failed: FTP upload failed for /part.gcode.3mf: 552 Storage quota exceeded"
+        in item.waiting_reason
     )
 
 

@@ -39,6 +39,8 @@ def reported_nozzle_temperatures(temperatures: dict[str, object]) -> tuple[tuple
 # Replacing a client can synchronously wait for its network thread. Keep that
 # teardown bounded so a failed device connection cannot freeze the API loop.
 REPLACEMENT_DISCONNECT_TIMEOUT_SECONDS = 2.0
+# After a power-off we trigger, a disconnect within this long is expected (no "printer offline" alert).
+OFFLINE_EXPECTED_SECONDS = 600.0
 
 # Models that have a real chamber temperature sensor
 # Based on Home Assistant Bambu Lab integration
@@ -193,6 +195,9 @@ class PrinterManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         # In-flight background status polls of HTTP provider printers, by printer id.
         self._provider_polls: dict[int, asyncio.Task] = {}
+        # Printers we powered off ourselves (smart plug): printer_id -> until when the disconnect is expected,
+        # so it sends no "printer offline" alert. Cleared when the printer is back.
+        self._offline_expected: dict[int, float] = {}
         # Track who started the current print (Issue #206)
         self._current_print_user: dict[int, dict] = {}  # {printer_id: {"user_id": int, "username": str}}
         # Track printers awaiting plate-clear acknowledgment after a finished/failed print.
@@ -534,18 +539,37 @@ class PrinterManager:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return client.check_staleness()  # not on the loop: blocking is fine here
+            return self._poll_provider(printer_id, client)  # not on the loop: blocking is fine here
         if printer_id not in self._provider_polls:
-            task = asyncio.create_task(asyncio.to_thread(client.check_staleness))
+            task = asyncio.create_task(asyncio.to_thread(self._poll_provider, printer_id, client))
             self._provider_polls[printer_id] = task
             task.add_done_callback(
                 lambda t: self._provider_polls.pop(printer_id) if self._provider_polls.get(printer_id) is t else None
             )
         return client.state.connected
 
+    def _poll_provider(self, printer_id: int, client) -> bool:
+        """An HTTP provider's status poll. A failed poll drops ``connected`` without a status callback, so the
+        callback is called here on that edge: the offline notification (main) sees Klipper printers go too."""
+        was_connected = client.state.connected
+        connected = client.check_staleness()
+        if was_connected and not connected and self._on_status_change:
+            self._schedule_async(self._on_status_change(printer_id, client.state))
+        return connected
+
     def get_client(self, printer_id: int) -> BambuMQTTClient | None:
         """Get the MQTT client for a printer."""
         return self._clients.get(printer_id)
+
+    def expect_offline(self, printer_id: int) -> None:
+        """We are powering this printer off: its disconnect in the next minutes is no outage."""
+        self._offline_expected[printer_id] = time.monotonic() + OFFLINE_EXPECTED_SECONDS
+
+    def offline_expected(self, printer_id: int) -> bool:
+        return time.monotonic() < self._offline_expected.get(printer_id, 0)
+
+    def back_online(self, printer_id: int) -> None:
+        self._offline_expected.pop(printer_id, None)
 
     def mark_printer_offline(self, printer_id: int):
         """Mark a printer as offline and trigger status callback.
@@ -557,6 +581,7 @@ class PrinterManager:
 
         logger = logging.getLogger(__name__)
 
+        self.expect_offline(printer_id)
         if printer_id in self._clients:
             client = self._clients[printer_id]
             if client.state.connected:
