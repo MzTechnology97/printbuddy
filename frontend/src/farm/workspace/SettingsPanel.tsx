@@ -1,7 +1,9 @@
 // Fork (printfarm): the settings of one preset (process, filament or printer) laid out and dense as in OrcaSlicer:
 // its pages as underlined text tabs, its option groups (icon, bold title, thin rule) and order, one ~30 px row per
-// setting (label, compact input, reset arrow when changed), its labels, tooltips and Simple / Advanced mode
-// (orcaLayout.ts). Key, system-preset state, original value and read-only reason are in the row's tooltip.
+// setting (label, compact input, reset arrow when changed; G-code and notes on the full width), its labels,
+// tooltips and modes (Simple / Advanced / Expert, Develop with DEV; orcaLayout.ts). An option the slicer shows
+// but the file doesn't hold is listed read only: the system preset's value applies, and it is never guessed.
+// Key, system-preset state, original value and read-only reason are in the row's tooltip.
 // Settings whose parent switch is off are greyed (dependencies.ts). What can change, and the checks, come from
 // the backend (WorkspaceSetting.editable, draft.ts).
 // With ``object``, the same pages show what one object (or part) slices with, read only: its own values first,
@@ -10,9 +12,10 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Filter, RotateCcw } from 'lucide-react';
 import type { SettingValue, WorkspaceSetting } from './api';
-import { greyedKeys } from './dependencies';
-import { type Draft, formatValue, valueErrors } from './draft';
-import { type OrcaLayout, type Section, orcaIcon, orcaText, placedKeys } from './orcaLayout';
+import { dependencies } from './dependencies';
+import { consistencyWarnings } from './warnings';
+import { type Draft, formatValue, toLocaleDecimal, valueErrors } from './draft';
+import { type Mode, type OrcaLayout, type Section, orcaIcon, orcaText, placedKeys, shownInMode } from './orcaLayout';
 import { SettingControl } from './SettingControl';
 import '../i18n';
 
@@ -36,8 +39,10 @@ interface Props {
   editable: boolean;
   onChange: (setting: WorkspaceSetting, value: WorkspaceSetting['value']) => void;
   onReset: (key: string) => void;
-  /** The slicer's Simple mode: only its Simple settings (a changed one stays), and no "Other values" tab. */
-  simple?: boolean;
+  /** The slicer's mode: Simple shows its Simple settings only (a changed one stays) and no "Other values" tab. */
+  mode?: Mode;
+  /** OrcaSlicer's DEV switch: its develop options too. */
+  develop?: boolean;
   /** Offer the "Other values" tab: values of this preset the layout places on no page. */
   showUnknown?: boolean;
   /** Above the tabs, left of the search (the preset's name box). */
@@ -53,7 +58,7 @@ interface Row {
   tab: string;
   group: string;
   icon: string | null;
-  simple: boolean;
+  mode: string | undefined;
 }
 
 function matches(row: Row, query: string): boolean {
@@ -72,7 +77,8 @@ export function SettingsPanel({
   editable: fileEditable,
   onChange,
   onReset,
-  simple = false,
+  mode = 'expert',
+  develop = false,
   showUnknown = true,
   header,
   index,
@@ -95,6 +101,7 @@ export function SettingsPanel({
       .filter((p) => p.groups.length);
     return [{ title: FREQUENT_TAB, icon: '', groups: [{ title: '', icon: null, keys: FREQUENT_KEYS }] }, ...own];
   }, [layout, section, object]);
+  const simple = mode === 'simple';
   const withUnknown = showUnknown && !simple && !object;
   // opens on the first page with something to change (the printer's first pages are mostly read only)
   const [chosenTab, setTab] = useState(() => {
@@ -106,15 +113,23 @@ export function SettingsPanel({
   const [query, setQuery] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [onlyChanged, setOnlyChanged] = useState(false);
-  const [showReadOnlyChoice, setShowReadOnly] = useState(!fileEditable);
+  const [showReadOnlyChoice, setShowReadOnly] = useState(true); // as the slicer: everything it shows
   const showReadOnly = showReadOnlyChoice || !!object;
   const tabs = [...pages.map((p) => p.title), ...(withUnknown ? [UNKNOWN_TAB] : [])];
   const tab = tabs.includes(chosenTab) ? chosenTab : tabs[0];
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
 
-  // what a key slices with now (the object's own value, else the global one): which settings are greyed
-  const greyed = greyedKeys((key) => object?.own[key] ?? (key in draft ? draft[key] : byKey.get(key)?.value));
+  // what a key slices with now (the object's own value, else the global one): which settings are greyed or hidden
+  const { disabled: greyed, hidden } = dependencies(
+    (key) => object?.own[key] ?? (key in draft ? draft[key] : byKey.get(key)?.value),
+    !object,
+  );
   const isOwn = (key: string) => !!object && key in object.own;
+  // the slicer's consistency warnings for this preset (the global settings only)
+  const warnings = object
+    ? []
+    : consistencyWarnings((key) => (key in draft ? draft[key] : byKey.get(key)?.value)).filter((w) => w.section === section);
+  const warned = new Set(warnings.flatMap((w) => w.keys));
 
   // Every setting of this preset, in OrcaSlicer's order, shown with its label, tooltip, unit and icons.
   const rows = useMemo(() => {
@@ -134,17 +149,32 @@ export function SettingsPanel({
           }) ?? null,
       };
     };
+    // an option the slicer shows but the file doesn't hold: the system preset's value applies (not in the file)
+    const absent = (key: string): WorkspaceSetting => {
+      const o = layout.options[key];
+      return {
+        key,
+        label: key,
+        section,
+        type: o?.type === 'coBool' || o?.type === 'coBools' ? 'bool' : 'string',
+        multiline: o?.multiline,
+        value: '',
+        editable: false,
+        readonly_reason: 'absent',
+        differs_from_system: null,
+        overrides: [],
+      };
+    };
     const out: Row[] = [];
     for (const page of pages) {
       const own: Row[] = [];
       const rest: Row[] = [];
       for (const group of page.groups) {
         for (const key of group.keys) {
-          const s = byKey.get(key);
-          if (!s) continue;
-          const simpleMode = layout.options[key]?.mode === 'simple';
-          if (object && key in object.own) own.push({ setting: show(s), tab: page.title, group: OWN_GROUP, icon: 'cog', simple: simpleMode });
-          else rest.push({ setting: show(s), tab: page.title, group: group.title, icon: group.icon, simple: simpleMode });
+          const s = byKey.get(key) ?? absent(key);
+          const optionMode = layout.options[key]?.mode;
+          if (object && key in object.own) own.push({ setting: show(s), tab: page.title, group: OWN_GROUP, icon: 'cog', mode: optionMode });
+          else rest.push({ setting: show(s), tab: page.title, group: group.title, icon: group.icon, mode: optionMode });
         }
       }
       out.push(...own, ...rest); // an object's own values first on every page, under one heading
@@ -154,7 +184,7 @@ export function SettingsPanel({
       for (const s of settings) {
         // in its own preset: unknown keys (no section) with the process
         if (!placed.has(s.key) && (s.section ?? 'process') === section) {
-          out.push({ setting: s, tab: UNKNOWN_TAB, group: '', icon: null, simple: false });
+          out.push({ setting: s, tab: UNKNOWN_TAB, group: '', icon: null, mode: undefined });
         }
       }
     }
@@ -165,7 +195,9 @@ export function SettingsPanel({
   const visible = rows
     .filter((r) => (searching ? true : r.tab === tab))
     .filter((r) => matches(r, query))
-    .filter((r) => !simple || r.simple || r.setting.key in draft)
+    .filter((r) => r.tab === UNKNOWN_TAB || shownInMode(r.mode, mode, develop) || r.setting.key in draft)
+    // the slicer hides a line whose parent switch is off (a pending change stays in sight)
+    .filter((r) => !hidden.has(r.setting.key) || r.setting.key in draft)
     .filter((r) => !onlyChanged || r.setting.key in draft || isOwn(r.setting.key))
     .filter((r) => r.setting.editable || showReadOnly || r.tab === UNKNOWN_TAB)
     // a search lists a key once (an object's Frequent tab repeats four of them)
@@ -267,6 +299,21 @@ export function SettingsPanel({
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-3 pb-3">
+        {warnings.length > 0 && (
+          <div className="my-2 rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1.5 text-[12px] text-amber-200" role="status">
+            <p className="font-semibold">{t('farm.workspace.consistency.title')}</p>
+            <ul className="list-disc pl-4">
+              {warnings.map((w, i) => (
+                <li key={`${w.id}-${i}`}>
+                  {t(
+                    `farm.workspace.consistency.${w.id}`,
+                    Object.fromEntries(Object.entries(w.values ?? {}).map(([k, v]) => [k, toLocaleDecimal(String(v), lang)])),
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {tab === UNKNOWN_TAB && !searching && <p className="text-xs text-bambu-gray my-2">{t('farm.workspace.unknownIntro')}</p>}
         {visible.length === 0 && <p className="text-sm text-bambu-gray mt-2">{t('farm.workspace.noResults')}</p>}
         {visible.map(({ setting: s, group, icon, tab: rowTab }) => {
@@ -285,11 +332,14 @@ export function SettingsPanel({
           const value = own ?? globalValue(draft, s);
           const isGreyed = greyed.has(s.key);
           const settingEditable = editable && s.editable && !isGreyed;
+          const isAbsent = s.readonly_reason === 'absent';
           return (
             <div key={`${rowTab}-${s.key}`}>
               {header}
               <div
-                className={`flex items-center gap-2 min-h-[30px] py-0.5 pl-4 ${settingEditable || (object && !isGreyed) ? '' : 'opacity-50'}`}
+                className={`flex ${s.multiline ? 'flex-wrap' : ''} items-center gap-2 min-h-[30px] py-0.5 pl-4 ${
+                  settingEditable || (object && !isGreyed) ? '' : 'opacity-50'
+                }`}
                 title={details(s, changed, isGreyed)}
                 data-testid={`setting-${s.key}`}
                 data-greyed={isGreyed || undefined}
@@ -299,12 +349,19 @@ export function SettingsPanel({
                 >
                   {s.label}
                   {!object && s.overrides.length > 0 && <span className="ml-1 text-amber-400" aria-hidden>●</span>}
+                  {warned.has(s.key) && (
+                    <span className="ml-1 text-amber-400" title={t('farm.workspace.consistency.title')} aria-label={t('farm.workspace.consistency.title')}>
+                      ⚠
+                    </span>
+                  )}
                   {own != null && (
                     <span className="block text-[11px] text-bambu-gray">
                       {t('farm.workspace.globalValue', { value: format(s, globalValue(draft, s)) })}
                     </span>
                   )}
+                  {isAbsent && own == null && <span className="block text-[11px] text-bambu-gray">{t('farm.workspace.notInFile')}</span>}
                 </span>
+                {s.multiline && <span className="basis-full h-0" aria-hidden />}
                 <SettingControl
                   setting={settingEditable ? s : { ...s, editable: false }}
                   value={value}

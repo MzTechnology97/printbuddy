@@ -7,7 +7,8 @@ import type { SettingValue, WorkspaceDocument, WorkspaceSetting } from './api';
 import type { Draft } from './draft';
 import type { Selection } from './objects';
 import { ObjectsPanel } from './ObjectsPanel';
-import { type OrcaLayout, orcaIcon } from './orcaLayout';
+import { MODES, type Mode, type OrcaLayout, orcaIcon } from './orcaLayout';
+import { EnumSelect } from './SettingControl';
 import { SettingsPanel } from './SettingsPanel';
 import type { ObjectStats } from './viewTools';
 import '../i18n';
@@ -80,7 +81,8 @@ export function Sidebar({
   stats,
 }: Props) {
   const { t } = useTranslation();
-  const [simple, setSimple] = useState(true);
+  const [mode, setMode] = useState<Mode>('simple');
+  const [develop, setDevelop] = useState(false);
   const colours = values(doc, 'filament_colour');
   const names = values(doc, 'filament_settings_id');
   const types = values(doc, 'filament_type');
@@ -140,10 +142,25 @@ export function Sidebar({
           ))}
         </span>
         {hasSettings && !perObject && (
-          <label className="flex items-center gap-1 text-[11px] text-bambu-gray cursor-pointer" title={t('farm.workspace.mode')}>
-            <input type="checkbox" checked={!simple} onChange={(e) => setSimple(!e.target.checked)} aria-label={t('farm.workspace.advanced')} />
-            {t('farm.workspace.advanced')}
-          </label>
+          <>
+            {/* OrcaSlicer's DEV switch (its develop options) and its Simple / Advanced / Expert mode */}
+            <button
+              onClick={() => setDevelop(!develop)}
+              aria-pressed={develop}
+              title={t('farm.workspace.develop')}
+              className={`px-1.5 rounded-full text-[10px] tracking-widest border ${
+                develop ? 'border-bambu-green text-bambu-green' : 'border-bambu-dark-tertiary text-bambu-gray hover:text-white'
+              }`}
+            >
+              DEV
+            </button>
+            <EnumSelect
+              label={t('farm.workspace.mode')}
+              value={mode}
+              options={MODES.map((m) => ({ value: m, label: t(`farm.workspace.modes.${m}`) }))}
+              onChange={(m) => setMode(m as Mode)}
+            />
+          </>
         )}
       </Header>
       {perObject ? (
@@ -171,7 +188,8 @@ export function Sidebar({
               editable={doc.editable}
               onChange={onChange}
               onReset={onReset}
-              simple={simple}
+              mode={mode}
+              develop={develop}
               header={
                 <div className={`${box} flex items-center px-2 h-7 text-[13px] text-white`} title={presets.process ?? undefined}>
                   <span className="truncate">{presets.process ?? '—'}</span>

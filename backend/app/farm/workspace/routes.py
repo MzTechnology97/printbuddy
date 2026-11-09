@@ -80,8 +80,7 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
-        "settings": ws_settings.describe(cfg, overrides) if cfg else [],
-        "tabs": list(ws_settings.TABS),
+        "settings": ws_settings.describe(cfg, overrides, slicer) if cfg else [],
     }
 
 
@@ -174,12 +173,12 @@ def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path) -
     try:
         zf = project.open_archive(data)
         cfg = project.read_settings(zf)
-        kind, _, _ = project.classify(lib_file.filename, zf, cfg)
+        kind, slicer, _ = project.classify(lib_file.filename, zf, cfg)
         if kind != project.KIND_PROJECT or cfg is None:
             raise HTTPException(status_code=400, detail=f"This file can only be inspected ({kind})")
         if project.read_structure(zf, cfg)["warnings"]:
             raise HTTPException(status_code=400, detail="This file can only be inspected (unreadable model settings)")
-        new_cfg, applied = ws_settings.apply_changes(cfg, changes)
+        new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
         project.write_copy(data, new_cfg, dest)

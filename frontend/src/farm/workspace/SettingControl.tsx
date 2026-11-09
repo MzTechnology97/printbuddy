@@ -218,7 +218,7 @@ export function SettingControl({ setting, value, errors, onChange, index, disabl
     setting.section === 'filament' ? t('farm.workspace.filament', { n: i + 1 }) : t('farm.workspace.extruder', { n: i + 1 });
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className={`flex flex-col gap-1 ${setting.multiline ? 'w-full' : ''}`}>
       {shown.map((i) => {
         const v = values[i] ?? '';
         const error = errors[i];
@@ -240,6 +240,33 @@ export function SettingControl({ setting, value, errors, onChange, index, disabl
         } else if (setting.type === 'enum') {
           const options = [...(v === NIL ? [{ value: NIL, label: inherit }] : []), ...(setting.options ?? [])];
           input = <EnumSelect label={aria} value={v} options={options} invalid={!!error} onChange={(next) => change(i, next)} />;
+        } else if (setting.type === 'string' && setting.multiline) {
+          // G-code and notes: the full width of the row, as OrcaSlicer's text boxes
+          input = (
+            <textarea
+              aria-label={aria}
+              aria-invalid={error ? true : undefined}
+              title={message}
+              value={v}
+              spellCheck={false}
+              onChange={(e) => change(i, e.target.value)}
+              className={`flex-1 min-w-0 h-36 rounded border bg-bambu-dark p-1.5 font-mono text-[12px] leading-snug text-white outline-none resize-y ${border}`}
+            />
+          );
+        } else if (setting.type === 'string') {
+          input = (
+            <span className={`${BOX} ${border} w-[180px] inline-flex items-center`}>
+              <input
+                type="text"
+                aria-label={aria}
+                aria-invalid={error ? true : undefined}
+                title={message ?? v}
+                value={v}
+                onChange={(e) => change(i, e.target.value)}
+                className="h-full w-full min-w-0 bg-transparent px-2 outline-none"
+              />
+            </span>
+          );
         } else {
           input = (
             <span className={`${BOX} ${border} relative inline-flex items-center`}>

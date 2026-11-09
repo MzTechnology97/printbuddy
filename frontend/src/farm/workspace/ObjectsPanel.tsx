@@ -261,7 +261,6 @@ function PlateSettings({
             key,
             label,
             section: 'process',
-            tab: null,
             type: ({ coBool: 'bool', coEnum: 'enum', coInt: 'int', coFloat: 'float' } as const)[option.type] ?? 'string',
             unit: option.unit ?? null,
             options: option.enum?.map((e) => ({ value: e.value, label: e.label })) ?? null,

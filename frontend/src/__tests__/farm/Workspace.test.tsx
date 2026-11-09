@@ -10,7 +10,8 @@ import userEvent from '@testing-library/user-event';
 import * as THREE from 'three';
 import { render } from '../utils';
 import type { WorkspaceDocument, WorkspaceSetting } from '../../farm/workspace/api';
-import { greyedKeys } from '../../farm/workspace/dependencies';
+import { dependencies } from '../../farm/workspace/dependencies';
+import { consistencyWarnings } from '../../farm/workspace/warnings';
 import { PresetDialog } from '../../farm/workspace/Dialogs';
 import {
   elementError,
@@ -150,14 +151,22 @@ const GCODE: WorkspaceSetting = {
   key: 'machine_start_gcode',
   label: 'Start G-code',
   section: 'printer',
-  group: 'gcode',
-  tab: 'printer',
   type: 'string',
-  editable: false,
-  readonly_reason: 'text',
+  multiline: true,
   value: 'G28',
 };
-const SETTINGS = [LAYER, WALLS, DENSITY, PATTERN, SUPPORT, TYPE, TEMP, PRINTER_ID, GCODE];
+const RAFT: WorkspaceSetting = { ...base, key: 'raft_layers', label: 'Raft layers', section: 'process', type: 'int', value: '0' };
+const MODEL: WorkspaceSetting = {
+  ...base,
+  key: 'printer_model',
+  label: 'printer_model',
+  section: 'printer',
+  type: 'string',
+  editable: false,
+  readonly_reason: 'identity',
+  value: 'Test Printer',
+};
+const SETTINGS = [LAYER, WALLS, DENSITY, PATTERN, SUPPORT, TYPE, TEMP, PRINTER_ID, GCODE, RAFT, MODEL];
 
 describe('workspace draft', () => {
   it('checks numbers, whole numbers, ranges and percentages like the backend', () => {
@@ -192,14 +201,34 @@ describe('workspace draft', () => {
     expect(fromLocaleDecimal('0,12', 'en')).toBe('0,12'); // English: a comma is not a decimal
   });
 
-  it("greys what depends on a switch that is off, as OrcaSlicer's ConfigManipulation", () => {
-    const values: Record<string, string> = { enable_support: '0', raft_layers: '0', brim_type: 'no_brim', wall_loops: '2' };
-    const greyed = greyedKeys((k) => values[k]);
-    expect(greyed.has('support_type')).toBe(true);
-    expect(greyed.has('brim_width')).toBe(true);
-    expect(greyed.has('seam_position')).toBe(false); // walls are on
-    expect(greyedKeys((k) => ({ ...values, enable_support: '1' })[k]).has('support_type')).toBe(false);
-    expect(greyedKeys(() => undefined).size).toBe(0); // a parent the project lacks: nothing greyed
+  it("greys and hides what depends on a switch that is off, as OrcaSlicer's toggle_field / toggle_line", () => {
+    const values: Record<string, string> = {
+      enable_support: '0', raft_layers: '0', brim_type: 'no_brim', wall_loops: '2', support_type: 'tree(auto)', support_style: 'organic',
+      ironing_type: 'no ironing', spiral_mode: '0', fuzzy_skin: 'none',
+    };
+    const off = dependencies((k) => values[k]);
+    expect(off.disabled.has('support_type')).toBe(true); // greyed, as toggle_field
+    expect(off.disabled.has('brim_width')).toBe(true);
+    expect(off.hidden.has('ironing_flow')).toBe(true); // hidden, as toggle_line
+    expect(off.hidden.has('spiral_mode_smooth')).toBe(true);
+    expect(off.hidden.has('fuzzy_skin_thickness')).toBe(false); // "none" is "Painted only" in OrcaSlicer 2.5
+    expect(off.disabled.has('seam_position')).toBe(false); // walls are on
+    const on = dependencies((k) => ({ ...values, enable_support: '1' })[k]);
+    expect(on.disabled.has('support_type')).toBe(false);
+    expect(on.hidden.has('tree_support_tip_diameter')).toBe(false); // organic tree support: its own options
+    expect(on.hidden.has('tree_support_branch_angle')).toBe(true); // the other tree styles' options
+    expect(dependencies(() => undefined).disabled.size).toBe(0); // a parent the project lacks: nothing greyed
+  });
+
+  it("warns about inconsistent values as the slicer does, without changing them", () => {
+    const values: Record<string, string | string[]> = {
+      layer_height: '0.6', nozzle_diameter: ['0.4'], spiral_mode: '1', wall_loops: '2', top_shell_layers: '0', sparse_infill_density: '0%',
+      enable_support: '0', enforce_support_layers: '0', detect_thin_wall: '0', overhang_reverse: '0', timelapse_type: '0',
+      nozzle_temperature: ['250', '240'], nozzle_temperature_range_low: ['190', '230'], nozzle_temperature_range_high: ['230', '260'],
+    };
+    const ids = consistencyWarnings((k) => values[k]).map((w) => w.id);
+    expect(ids).toEqual(['layerNozzle', 'spiral', 'nozzleTemperature']);
+    expect(consistencyWarnings(() => undefined)).toEqual([]);
   });
 });
 
@@ -225,7 +254,7 @@ const LAYOUT: OrcaLayout = {
       { title: 'Filament', icon: 'custom-gcode_filament', groups: [{ title: 'Temperature', icon: null, keys: ['nozzle_temperature'] }] },
     ],
     printer: [
-      { title: 'Machine G-code', icon: 'custom-gcode_gcode', groups: [{ title: 'G-code', icon: null, keys: ['machine_start_gcode'] }] },
+      { title: 'Machine G-code', icon: 'custom-gcode_gcode', groups: [{ title: 'G-code', icon: null, keys: ['machine_start_gcode', 'machine_end_gcode', 'printer_model'] }] },
     ],
   },
   options: {
@@ -253,7 +282,9 @@ const LAYOUT: OrcaLayout = {
       ],
     },
     nozzle_temperature: { type: 'coInts', label: 'Nozzle temperature', mode: 'simple' },
-    machine_start_gcode: { type: 'coString', label: 'Machine start G-code', mode: 'advanced' },
+    machine_start_gcode: { type: 'coString', label: 'Machine start G-code', mode: 'advanced', multiline: true },
+    machine_end_gcode: { type: 'coString', label: 'Machine end G-code', mode: 'advanced', multiline: true },
+    printer_model: { type: 'coString', label: 'Printer type', mode: 'develop' },
   },
   it: { 'Layer height': 'Altezza strato', Quality: 'Qualità' },
   object_keys: ['layer_height', 'wall_loops', 'sparse_infill_density', 'sparse_infill_pattern', 'enable_support', 'support_type'],
@@ -283,7 +314,8 @@ function Harness({
         settings={SETTINGS}
         draft={draft}
         editable={editable}
-        simple={simple}
+        mode={simple ? 'simple' : 'expert'}
+        develop
         index={index}
         object={own ? { own } : undefined}
         onChange={(s, v) => setDraft((d) => withValue(d, s, v))}
@@ -439,13 +471,25 @@ describe('SettingsPanel', () => {
     expect(within(screen.getByTestId('setting-printer_settings_id')).queryByRole('textbox')).not.toBeInTheDocument();
   });
 
-  it('hides read-only settings until asked', async () => {
+  it('edits G-code in a full-width text box, line breaks and all', async () => {
     const user = userEvent.setup();
     render(<Harness section="printer" />);
-    expect(screen.queryByTestId('setting-machine_start_gcode')).not.toBeInTheDocument();
+    const box = screen.getByRole('textbox', { name: 'Machine start G-code' });
+    expect(box.tagName).toBe('TEXTAREA');
+    await user.type(box, '{Enter}G1 Z5');
+    expect(draftOf()).toEqual({ machine_start_gcode: 'G28\nG1 Z5' });
+  });
+
+  it('shows read-only settings with their reason, and an option the file lacks as the system preset value', async () => {
+    const user = userEvent.setup();
+    render(<Harness section="printer" />);
+    expect(screen.getByTestId('setting-printer_model').getAttribute('title')).toContain('Preset or printer identity: read only.');
+    // in the slicer's layout, not in the file: listed, never guessed
+    expect(screen.getByTestId('setting-machine_end_gcode')).toHaveTextContent('from the system preset (not in the file)');
+    expect(within(screen.getByTestId('setting-machine_end_gcode')).queryByRole('textbox')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Filters' }));
     await user.click(screen.getByRole('checkbox', { name: 'Show read only' }));
-    expect(screen.getByTestId('setting-machine_start_gcode').getAttribute('title')).toContain('Text or G-code: read only.');
+    expect(screen.queryByTestId('setting-printer_model')).not.toBeInTheDocument();
   });
 
   it('a file that cannot be edited shows every value as text', () => {

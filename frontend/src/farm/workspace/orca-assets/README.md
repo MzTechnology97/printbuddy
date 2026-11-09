@@ -11,7 +11,13 @@ See `THIRD_PARTY_NOTICES.md` at the repository root.
   only; what can be edited and how values are checked is Printbuddy's (`backend/app/farm/workspace/settings.py`).
 - `icons/`: SVGs copied unchanged from `resources/images/` (icons only, no logos or brand marks).
 
+- `settings-layout-bambu.json`: the same from Bambu Studio `v02.09.01.70`, for projects saved by Bambu Studio
+  (the icons stay OrcaSlicer's).
+- The backend checks values against `backend/app/data/slicer_options/<slicer>.json`, written by the same run.
+
 Regenerate for another release:
 
     git clone --depth 1 --branch <tag> https://github.com/OrcaSlicer/OrcaSlicer /tmp/orca
     python tools/orca_settings/generate.py /tmp/orca <tag>
+    git clone --depth 1 --branch <tag> https://github.com/bambulab/BambuStudio /tmp/bambu
+    python tools/orca_settings/generate.py /tmp/bambu <tag> --slicer bambu_studio

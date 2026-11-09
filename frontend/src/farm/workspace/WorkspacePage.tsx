@@ -83,7 +83,14 @@ export function WorkspacePage() {
     enabled: Number.isFinite(fileId),
     retry: false,
   });
-  const layoutQuery = useQuery({ queryKey: ['orcaLayout'], queryFn: loadOrcaLayout, staleTime: Infinity });
+  // the slicer's own layout: Bambu Studio's for its projects, OrcaSlicer's otherwise
+  const slicer = docQuery.data?.slicer;
+  const layoutQuery = useQuery({
+    queryKey: ['orcaLayout', slicer],
+    queryFn: () => loadOrcaLayout(slicer),
+    enabled: !!docQuery.data,
+    staleTime: Infinity,
+  });
   if (docQuery.isLoading || layoutQuery.isLoading) {
     return (
       <div className="h-screen flex items-center justify-center gap-2 bg-bambu-dark text-bambu-gray">

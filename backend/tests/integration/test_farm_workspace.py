@@ -15,6 +15,7 @@ import os
 import time
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -76,6 +77,7 @@ def project_settings(**extra) -> dict:
         "printer_model": "Bambu Lab P1S",
         "nozzle_diameter": ["0.4"],
         "layer_height": "0.2",
+        "initial_layer_print_height": "0.2",  # the key real projects save (not "initial_layer_height")
         "wall_loops": "3",
         "sparse_infill_density": "15%",
         "sparse_infill_pattern": "grid",
@@ -88,7 +90,7 @@ def project_settings(**extra) -> dict:
         "filament_retraction_length": ["nil", "nil"],
         "retraction_length": ["0.8"],
         "machine_start_gcode": "G28 ; home",
-        "vendor_private_key": "kept as it is",  # a key no schema knows
+        "vendor_private_key": "kept as it is",  # a key the slicer doesn't define
     }
     cfg.update(extra)
     return cfg
@@ -223,28 +225,36 @@ class TestOpen:
         assert doc["plates"][1]["metadata"]["print_sequence"] == "by object"  # the plate's own setting
         assert "print_sequence" not in doc["plates"][0]["metadata"]
 
-    async def test_settings_carry_schema_state_and_overrides(self, async_client, db_session):
+    async def test_settings_carry_the_slicers_types_and_state(self, async_client, db_session):
         f = await add_file(db_session, make_project())
         s = settings_by_key(await open_ws(async_client, f.id))
-        assert has(s["layer_height"], tab="quality", type="float", unit="mm", value="0.2", editable=True)
-        assert ws.catalogue()["prime_tower_enable"]["tab"] == "multimaterial"
-        assert has(s["wall_loops"], tab="strength", type="int", differs_from_system=True)
+        # Types, sections and ranges are OrcaSlicer's own (PrintConfig.cpp, Preset.cpp)
+        assert has(s["layer_height"], section="process", type="float", value="0.2", editable=True)
+        assert has(s["initial_layer_print_height"], section="process", type="float", min=0, editable=True)
+        assert has(s["wall_loops"], type="int", differs_from_system=True)
         assert s["layer_height"]["differs_from_system"] is False  # same as the system preset
-        assert s["sparse_infill_density"]["tab"] == "strength"  # infill: the slicer's Strength tab
-        assert has(s["outer_wall_speed"], tab="speed") and has(s["support_type"], type="enum", tab="support")
-        assert has(s["nozzle_temperature"], tab="filament", value=["220", "240"], editable=True)
+        assert has(s["sparse_infill_density"], type="float", percent="always", max=100)
+        assert has(s["support_type"], type="enum") and "tree(auto)" in [
+            o["value"] for o in s["support_type"]["options"]
+        ]
+        assert has(s["nozzle_temperature"], section="filament", value=["220", "240"], editable=True)
         assert s["nozzle_temperature"]["differs_from_system"] is True
-        assert has(s["retraction_length"], tab="printer", editable=True)
+        assert has(s["retraction_length"], section="printer", editable=True)
+        # one value where OrcaSlicer 2.5 keeps one per extruder variant: saved before, still editable
+        assert has(s["outer_wall_speed"], value="200", editable=True)
+        # text, G-code, material and printer settings change too, as in the client
+        assert has(s["machine_start_gcode"], type="string", multiline=True, editable=True)
+        assert has(s["filament_type"], editable=True) and has(s["nozzle_diameter"], editable=True)
         # The object that slices with its own value says so, by object and part.
         assert [(o["object"], o["part"], o["value"]) for o in s["wall_loops"]["overrides"]] == [("Cube B", None, "5")]
         assert [(o["object"], o["part"]) for o in s["sparse_infill_density"]["overrides"]] == [("Cube B", "Cube B")]
-        # Read only: identifiers, G-code, material identity, inherit-only values, keys no schema knows.
-        assert s["printer_settings_id"]["readonly_reason"] == "unknown"
-        assert s["machine_start_gcode"]["readonly_reason"] == "text"
-        assert s["filament_type"]["readonly_reason"] == "category"
-        assert s["nozzle_diameter"]["readonly_reason"] == "category"
+        # Read only: identity, inherit-only values, keys the slicer doesn't define.
+        assert s["printer_settings_id"]["readonly_reason"] == "identity"
+        assert s["printer_model"]["readonly_reason"] == "identity"
+        assert s["inherits_group"]["readonly_reason"] == "identity"
+        assert s["different_settings_to_system"]["readonly_reason"] == "identity"
         assert s["filament_retraction_length"]["readonly_reason"] == "format"
-        assert has(s["vendor_private_key"], tab=None, editable=False, value="kept as it is")
+        assert has(s["vendor_private_key"], section=None, editable=False, readonly_reason="unknown")
 
     async def test_sliced_file_is_read_only(self, async_client, db_session):
         f = await add_file(db_session, make_project(extra={"Metadata/plate_1.gcode": b"G28\n"}), "cubes.gcode.3mf")
@@ -354,19 +364,23 @@ class TestChanges:
     @pytest.mark.parametrize(
         ("changes", "error"),
         [
-            ({"layer_height": "0.9"}, "above the maximum"),
+            ({"sparse_infill_density": "120"}, "above the maximum"),
             ({"layer_height": "abc"}, "not a number"),
             ({"layer_height": "nan"}, "not a number"),
+            ({"initial_layer_print_height": "-0.1"}, "below the minimum"),
             ({"wall_loops": "2.5"}, "whole number"),
-            ({"wall_loops": "0"}, "below the minimum"),
+            ({"wall_loops": "-1"}, "below the minimum"),
             ({"enable_support": "maybe"}, "yes/no"),
             ({"support_type": "rocket"}, "options"),
             ({"outer_wall_speed": "50%"}, "not a percentage"),
             ({"nozzle_temperature": ["220"]}, "expected 2 value"),
             ({"nozzle_temperature": "220"}, "expected 2 value"),
-            ({"printer_settings_id": "Other printer"}, "read only (unknown)"),
-            ({"machine_start_gcode": "G28"}, "read only (text)"),
-            ({"filament_type": ["PETG", "PETG"]}, "read only (category)"),
+            ({"printer_settings_id": "Other printer"}, "read only (identity)"),
+            ({"inherits_group": ["", "", "", ""]}, "read only (identity)"),
+            ({"vendor_private_key": "x"}, "read only (unknown)"),
+            ({"filament_type": ["PLA\x00", "PETG"]}, "control characters"),
+            ({"filament_type": ["PLA\nX", "PETG"]}, "control characters"),  # one line, not G-code
+            ({"machine_start_gcode": "G28\n" * 200_000}, "longer than"),
             ({"not_in_project": "1"}, "not in this project"),
             ({"layer_height": "nil"}, "inherited value"),
         ],
@@ -376,8 +390,110 @@ class TestChanges:
             self.apply(changes)
         assert error in next(iter(info.value.errors.values()))
 
-    def test_catalogue_covers_the_slicer_tabs(self):
-        assert {f["tab"] for f in ws.catalogue().values()} == set(ws.TABS)
+    def test_initial_layer_print_height_round_trip(self):
+        """The key real projects save: editable with OrcaSlicer's range, and saved."""
+        (described,) = [d for d in ws.describe(project_settings(), {}) if d["key"] == "initial_layer_print_height"]
+        assert (described["editable"], described["min"], described["type"]) == (True, 0, "float")
+        cfg, applied = self.apply({"initial_layer_print_height": "0.24"})
+        assert cfg["initial_layer_print_height"] == "0.24"
+        assert applied == [{"key": "initial_layer_print_height", "before": "0.2", "after": "0.24"}]
+        assert "initial_layer_print_height" in cfg["different_settings_to_system"][0].split(";")
+
+    def test_per_extruder_and_per_filament_lists(self):
+        cfg, _ = self.apply(
+            {"nozzle_diameter": ["0.6"], "retraction_length": [1.2], "nozzle_temperature": ["220", "250"]}
+        )
+        assert (cfg["nozzle_diameter"], cfg["retraction_length"]) == (["0.6"], ["1.2"])
+        assert cfg["nozzle_temperature"] == ["220", "250"]
+        # only the second filament changed: only its section of different_settings_to_system lists it
+        assert cfg["different_settings_to_system"][1:3] == ["", "nozzle_temperature"]
+
+    def test_gcode_and_text_are_saved_as_typed(self):
+        gcode = "G28 ; home\nG1 Z5 F600\n  M117 {layer_num}\t; keep spacing\n"
+        cfg, _ = self.apply({"machine_start_gcode": gcode, "filament_type": ["PLA-CF", "PETG"]})
+        assert cfg["machine_start_gcode"] == gcode
+        assert cfg["filament_type"] == ["PLA-CF", "PETG"]  # an open list: any material name
+
+    def test_bambu_projects_use_bambu_studios_options(self):
+        bambu = ws.options("bambu_studio")
+        assert ws.options("orcaslicer") is not bambu and "counter_coef_1" in bambu  # a Bambu Studio only key
+        cfg, _ = ws.apply_changes(project_settings(), {"layer_height": "0.12"}, "bambu_studio")
+        assert cfg["layer_height"] == "0.12"
+
+
+# ---------------------------------------------------------------- the slicers' own option data
+
+FIXTURES = Path(__file__).resolve().parents[1] / "_fixtures" / "slicer_projects"
+# keys real projects hold that today's slicer no longer defines (renamed or removed since): shown read only
+LEGACY_KEYS = {
+    "bambu_studio_02.00_auto_pa_line_single.json": {
+        "deretract_speed_extruder_change",
+        "layer_time_smoothing",
+        "layer_time_smoothing_threshold",
+        "nozzle_type",
+        "reduce_infill_retraction",
+        "from",
+        "name",
+        "version",
+    },
+    "orcaslicer_repo_pa_pattern.json": {
+        "bed_temperature_difference",
+        "chamber_temp_control",
+        "chamber_temperatures",
+        "end_print_exhaust_fan_speed",
+        "end_print_exhaust_fan_time",
+        "extruder_clearance_max_radius",
+        "initial_layer_flow_ratio",
+        "internal_bridge_support_thickness",
+        "silent_mode",
+        "solid_infill_filament",
+        "sparse_infill_anchor",
+        "sparse_infill_anchor_max",
+        "sparse_infill_filament",
+        "top_one_wall_type",
+        "wall_filament",
+        "wall_infill_order",
+        "from",
+        "name",
+        "version",
+    },
+}
+
+
+class TestSlicerOptions:
+    """Every key of a real project is either an option of its slicer (editable, or read only for a stated
+    reason) or a known legacy key shown read only under "Other values"."""
+
+    @pytest.mark.parametrize(
+        ("fixture", "slicer"),
+        [
+            ("bambu_studio_02.00_auto_pa_line_single.json", "bambu_studio"),  # BambuStudio repo sample
+            ("orcaslicer_repo_pa_pattern.json", "orcaslicer"),  # OrcaSlicer repo sample (older project)
+        ],
+    )
+    def test_every_key_of_a_real_project_has_a_home(self, fixture, slicer):
+        cfg = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
+        described = ws.describe(cfg, {}, slicer)
+        assert {d["key"] for d in described if d["readonly_reason"] == "unknown"} == LEGACY_KEYS[fixture]
+        reasons = {d["readonly_reason"] for d in described}
+        assert reasons <= {None, "identity", "slicer", "project", "format", "unknown"}
+        editable = [d for d in described if d["editable"]]
+        assert len(editable) > 0.8 * len(described) - len(LEGACY_KEYS[fixture])
+        # an editable value can be saved back as it is (the check accepts what the slicer wrote)
+        for d in editable:
+            assert ws.apply_changes(cfg, {d["key"]: d["value"]}, slicer)[1] == [], d["key"]
+
+    def test_the_data_is_the_slicers(self):
+        for slicer in ws.SLICERS:
+            data = json.loads((ws.DATA / f"{slicer}.json").read_text(encoding="utf-8"))
+            assert data["slicer"] == slicer and data["license"] == "AGPL-3.0" and len(data["commit"]) == 40
+            assert len(data["options"]) > 700
+        orca = ws.options("orcaslicer")
+        assert orca["machine_max_speed_x"]["section"] == "printer"  # made in a loop in PrintConfig.cpp
+        assert orca["bottom_surface_pattern"]["enum"] == orca["top_surface_pattern"]["enum"]  # shared list
+        assert orca["filament_retraction_length"]["nullable"] is True
+        assert orca["enable_prime_tower"]["type"] == "coBool"  # not the old schema's "prime_tower_enable"
+        assert orca["fuzzy_skin_point_distance"]["section"] == "process"
 
 
 # ---------------------------------------------------------------- saving a copy
@@ -467,10 +583,10 @@ class TestSaveCopy:
     async def test_invalid_changes_and_names_are_refused(self, async_client, db_session):
         f = await add_file(db_session, make_project())
         doc = await open_ws(async_client, f.id)
-        resp = await save(async_client, doc, {"layer_height": "5", "wall_loops": "x"})
+        resp = await save(async_client, doc, {"sparse_infill_density": "150", "wall_loops": "x"})
         assert resp.status_code == 422
         detail = resp.json()["detail"]
-        assert "layer_height: above the maximum" in detail and "wall_loops: not a whole number" in detail
+        assert "sparse_infill_density: above the maximum" in detail and "wall_loops: not a whole number" in detail
         assert (await save(async_client, doc, {})).status_code == 400  # nothing changed
         assert (await save(async_client, doc, {"layer_height": "0.1"}, filename="../x")).status_code == 422
         assert (await save(async_client, doc, {"layer_height": "0.1"}, filename="x.gcode.3mf")).status_code == 422
