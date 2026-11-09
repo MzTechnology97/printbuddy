@@ -12,6 +12,7 @@ import { MaintenancePage } from './pages/MaintenancePage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProductsPage } from './farm/ProductsPage'; // fork: printfarm products
+import { WorkspacePage } from './farm/workspace/WorkspacePage'; // fork: 3MF Workspace
 import { ProductPage } from './farm/ProductProjectPanel'; // fork: printfarm product sheet
 import { PrintPlanPage } from './farm/PrintPlanPage'; // fork: printfarm what to print
 import { FileManagerPage } from './pages/FileManagerPage';
@@ -186,6 +187,9 @@ function App() {
 
                 {/* TV/kiosk farm monitor - opened from Farm Command Center TV Mode */}
                 <Route path="/farm-monitor" element={<ProtectedRoute><WebSocketProvider><PrintFarmMonitorPage /></WebSocketProvider></ProtectedRoute>} />
+
+                {/* fork: 3MF Workspace, full screen (opened from the File Manager) */}
+                <Route path="/files/:id/workspace" element={<ProtectedRoute><WebSocketProvider><PermissionRoute permission="library:read"><WorkspacePage /></PermissionRoute></WebSocketProvider></ProtectedRoute>} />
 
                 {/* Main app with WebSocket for real-time updates */}
                 <Route element={<ProtectedRoute><WebSocketProvider><Layout /></WebSocketProvider></ProtectedRoute>}>

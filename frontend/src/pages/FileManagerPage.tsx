@@ -41,6 +41,7 @@ import {
   RefreshCw,
   Lock,
   FolderSymlink,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
@@ -59,6 +60,7 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { PrintModal } from '../components/PrintModal';
 import { ModelViewerModal } from '../components/ModelViewerModal';
 import { SliceModal } from '../components/SliceModal';
+import { isProjectFile } from '../farm/projectSliceApi'; // fork: 3MF Workspace
 import { FileUploadModal } from '../components/FileUploadModal';
 import { PurgeOldFilesModal } from '../components/PurgeOldFilesModal';
 import { SourceSnapshotModal } from '../components/SourceSnapshotModal';
@@ -713,6 +715,7 @@ interface FileCardProps {
   onRename?: (file: LibraryFileListItem) => void;
   onGenerateThumbnail?: (file: LibraryFileListItem) => void;
   onSourceDetails?: (file: LibraryFileListItem) => void;
+  onEditProject?: (file: LibraryFileListItem) => void; // fork: 3MF Workspace
   thumbnailVersion?: number;
   hasPermission: (permission: Permission) => boolean;
   canModify: (resource: 'queue' | 'archives' | 'library', action: 'update' | 'delete' | 'reprint', createdById: number | null | undefined) => boolean;
@@ -720,7 +723,7 @@ interface FileCardProps {
   t: TFunction;
 }
 
-function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, onAddToQueue, onPrint, onSlice, useSlicerApi, onPreview3d, onRename, onGenerateThumbnail, onSourceDetails, thumbnailVersion, hasPermission, canModify, authEnabled, t }: FileCardProps) {
+function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, onAddToQueue, onPrint, onSlice, useSlicerApi, onPreview3d, onRename, onGenerateThumbnail, onSourceDetails, onEditProject, thumbnailVersion, hasPermission, canModify, authEnabled, t }: FileCardProps) {
   const [showActions, setShowActions] = useState(false);
 
   return (
@@ -844,6 +847,18 @@ function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, 
                 >
                   <Cog className="w-3.5 h-3.5" />
                   {t('slice.action')}
+                </button>
+              )}
+              {onEditProject && isProjectFile(file.filename) && (
+                <button
+                  className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 ${
+                    hasPermission('library:read') ? 'text-white hover:bg-bambu-dark' : 'text-bambu-gray cursor-not-allowed'
+                  }`}
+                  onClick={() => { if (hasPermission('library:read')) { onEditProject(file); setShowActions(false); } }}
+                  disabled={!hasPermission('library:read')}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  {t('farm.workspace.editAction')}
                 </button>
               )}
               {onPreview3d && (file.file_type === '3mf' || file.file_type === 'gcode' || file.file_type === 'stl') && (
@@ -2051,6 +2066,7 @@ export function FileManagerPage() {
                     onRename={(f) => setRenameItem({ type: 'file', id: f.id, name: f.filename })}
                     onGenerateThumbnail={(f) => singleThumbnailMutation.mutate(f.id)}
                     onSourceDetails={setSourceDetailsFile}
+                    onEditProject={(f) => navigate(`/files/${f.id}/workspace`)}
                     thumbnailVersion={thumbnailVersions[file.id]}
                     hasPermission={hasPermission}
                     canModify={canModify}
@@ -2203,6 +2219,21 @@ export function FileManagerPage() {
                           disabled={!hasPermission('library:upload')}
                         >
                           <Cog className="w-4 h-4" />
+                        </button>
+                      )}
+                      {isProjectFile(file.filename) && (
+                        <button
+                          onClick={() => hasPermission('library:read') && navigate(`/files/${file.id}/workspace`)}
+                          className={`p-1.5 rounded transition-colors ${
+                            hasPermission('library:read')
+                              ? 'hover:bg-bambu-dark text-bambu-gray hover:text-bambu-green'
+                              : 'text-bambu-gray/50 cursor-not-allowed'
+                          }`}
+                          title={t('farm.workspace.editAction')}
+                          aria-label={t('farm.workspace.editAction')}
+                          disabled={!hasPermission('library:read')}
+                        >
+                          <SlidersHorizontal className="w-4 h-4" />
                         </button>
                       )}
                       {(file.file_type === '3mf' || file.file_type === 'gcode' || file.file_type === 'stl') && (
