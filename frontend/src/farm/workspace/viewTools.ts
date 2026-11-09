@@ -15,6 +15,10 @@ export interface ObjectStats {
   volume: number;
   triangles: number;
   printable: boolean;
+  /** edges not shared by exactly two triangles: the mesh is not closed (OrcaSlicer's mesh errors) */
+  openEdges: number;
+  /** the centre of mass, in the scene */
+  centroid: THREE.Vector3;
 }
 
 const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
@@ -56,16 +60,50 @@ export function objectStats(view: ViewerScene): Map<string, ObjectStats> {
     if (out.has(id)) continue;
     let volume = 0;
     let triangles = 0;
+    let open = 0;
+    const weighted = new THREE.Vector3();
+    item.updateMatrixWorld(true);
     item.traverse((o) => {
       if (o instanceof THREE.Mesh) {
-        volume += meshVolume(o.geometry);
+        const v = meshVolume(o.geometry);
+        volume += v;
         triangles += (o.geometry.getIndex()?.count ?? o.geometry.getAttribute('position').count) / 3;
+        open += openEdges(o.geometry);
+        o.geometry.computeBoundingBox();
+        weighted.addScaledVector(o.geometry.boundingBox!.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld), Math.abs(v));
       }
     });
-    const size = new THREE.Box3().setFromObject(item).getSize(new THREE.Vector3());
-    out.set(id, { size: [size.x, size.z, size.y], volume: Math.abs(volume), triangles, printable: item.userData.printable !== false });
+    const box = new THREE.Box3().setFromObject(item);
+    const size = box.getSize(new THREE.Vector3());
+    out.set(id, {
+      size: [size.x, size.z, size.y],
+      volume: Math.abs(volume),
+      triangles,
+      printable: item.userData.printable !== false,
+      openEdges: open,
+      // shortcut: the volume-weighted centre of each mesh's bounding box, not the true centre of mass
+      centroid: volume ? weighted.divideScalar(Math.abs(volume)) : box.getCenter(new THREE.Vector3()),
+    });
   }
   return out;
+}
+
+/** Edges of an indexed mesh not shared by exactly two triangles (0: a closed, manifold mesh). */
+export function openEdges(geometry: THREE.BufferGeometry): number {
+  const index = geometry.getIndex();
+  if (!index) return 0;
+  const count = new Map<string, number>();
+  for (let i = 0; i + 2 < index.count; i += 3) {
+    const t = [index.getX(i), index.getX(i + 1), index.getX(i + 2)];
+    for (let e = 0; e < 3; e++) {
+      const [a, b] = [t[e], t[(e + 1) % 3]];
+      const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+  }
+  let open = 0;
+  for (const n of count.values()) if (n !== 2) open++;
+  return open;
 }
 
 /** The object and the point under the pointer (client coordinates), or null on the empty plate. */
@@ -125,20 +163,203 @@ export function setView(view: ViewerScene, preset: ViewPreset) {
   look(view, bed.union(boxOf(view, null)), new THREE.Vector3(...DIRECTIONS[preset]));
 }
 
+/** Remove a helper group added by name, freeing its geometry. */
+function clear(view: ViewerScene, name: string) {
+  const old = view.scene.getObjectByName(name);
+  if (!old) return;
+  view.scene.remove(old);
+  old.traverse((o) => {
+    if (o instanceof THREE.Mesh || o instanceof THREE.Line) o.geometry.dispose();
+  });
+}
+
 const HIGHLIGHT = 'workspace-selection';
 
-/** A white box round the selected object (as the slicer's selection corners), or none. */
-export function highlight(view: ViewerScene, objectId: string | null) {
-  const old = view.scene.getObjectByName(HIGHLIGHT);
-  if (old) {
-    view.scene.remove(old);
-    (old as THREE.BoxHelper).geometry.dispose();
+/** The selected objects: a white box round each (the slicer's selection corners) and, with ``outline``, their
+ * orange outline (the canvas menu's "Outline"). */
+export function highlight(view: ViewerScene, objectIds: string[], outline = true) {
+  clear(view, HIGHLIGHT);
+  const group = new THREE.Group();
+  group.name = HIGHLIGHT;
+  view.model.updateMatrixWorld(true);
+  for (const item of items(view).filter((c) => objectIds.includes(String(c.userData.objectId)))) {
+    group.add(new THREE.BoxHelper(item, 0xffffff));
+    if (!outline) continue;
+    item.traverse((o) => {
+      if (!(o instanceof THREE.Mesh)) return;
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 40), new THREE.LineBasicMaterial({ color: 0xff9800 }));
+      edges.applyMatrix4(o.matrixWorld);
+      group.add(edges);
+    });
   }
-  const item = itemOf(view, objectId);
-  if (!item) return;
-  const box = new THREE.BoxHelper(item, 0xffffff);
-  box.name = HIGHLIGHT;
-  view.scene.add(box);
+  view.scene.add(group);
+}
+
+/** Light up the object under the pointer (none: null). */
+export function hover(view: ViewerScene, objectId: string | null) {
+  for (const item of items(view)) {
+    const on = String(item.userData.objectId) === objectId;
+    item.traverse((o) => {
+      if (o instanceof THREE.Mesh && o.material instanceof THREE.MeshPhongMaterial) o.material.emissive.setHex(on ? 0x303030 : 0x000000);
+    });
+  }
+}
+
+/** The objects whose centre falls in a screen rectangle (client coordinates), as Shift+drag selects. */
+export function inRectangle(view: ViewerScene, from: { x: number; y: number }, to: { x: number; y: number }): string[] {
+  const rect = view.renderer.domElement.getBoundingClientRect();
+  const [x0, x1, y0, y1] = [Math.min(from.x, to.x), Math.max(from.x, to.x), Math.min(from.y, to.y), Math.max(from.y, to.y)];
+  const out = new Set<string>();
+  for (const item of items(view)) {
+    const p = new THREE.Box3().setFromObject(item).getCenter(new THREE.Vector3()).project(view.camera);
+    const x = rect.left + ((p.x + 1) / 2) * rect.width;
+    const y = rect.top + ((1 - p.y) / 2) * rect.height;
+    if (x >= x0 && x <= x1 && y >= y0 && y <= y1) out.add(String(item.userData.objectId));
+  }
+  return [...out];
+}
+
+/** Where a scene point shows, in pixels from the canvas's top left (null: behind the camera). */
+export function toScreen(view: ViewerScene, point: THREE.Vector3): { x: number; y: number } | null {
+  const p = point.clone().project(view.camera);
+  if (p.z > 1) return null;
+  const canvas = view.renderer.domElement;
+  return { x: ((p.x + 1) / 2) * canvas.clientWidth, y: ((1 - p.y) / 2) * canvas.clientHeight };
+}
+
+/** OrcaSlicer's canvas menu options that change how the scene is drawn. */
+export interface Display {
+  overhangs: boolean;
+  wireframe: boolean;
+  xray: boolean;
+  realistic: boolean;
+  perspective: boolean;
+  axes: boolean;
+  centerOfMass: boolean;
+}
+
+/** Apply the canvas menu's options. ``overhangAngle``: faces looking down steeper than this from horizontal. */
+export function applyDisplay(view: ViewerScene, d: Display, stats: Map<string, ObjectStats>, overhangAngle = 45) {
+  view.model.updateMatrixWorld(true);
+  for (const item of items(view)) {
+    item.traverse((o) => {
+      if (!(o instanceof THREE.Mesh) || !(o.material instanceof THREE.MeshPhongMaterial)) return;
+      Object.assign(o.material, { wireframe: d.wireframe, transparent: d.xray, opacity: d.xray ? 0.35 : 1, depthWrite: !d.xray });
+      o.material.shininess = d.realistic ? 80 : 30;
+      o.material.needsUpdate = true;
+    });
+  }
+  view.scene.traverse((o) => {
+    if (o instanceof THREE.AmbientLight) o.intensity = d.realistic ? 0.35 : 0.6;
+  });
+  clear(view, 'workspace-overhangs');
+  if (d.overhangs) {
+    const group = new THREE.Group();
+    group.name = 'workspace-overhangs';
+    const limit = -Math.cos(THREE.MathUtils.degToRad(overhangAngle));
+    const material = new THREE.MeshBasicMaterial({ color: 0xff3b30, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1 });
+    const [a, b, c] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    for (const item of items(view)) {
+      item.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const pos = o.geometry.getAttribute('position');
+        const index = o.geometry.getIndex();
+        const count = index ? index.count : pos.count;
+        const out: number[] = [];
+        for (let i = 0; i + 2 < count; i += 3) {
+          const ids = index ? [index.getX(i), index.getX(i + 1), index.getX(i + 2)] : [i, i + 1, i + 2];
+          a.fromBufferAttribute(pos, ids[0]).applyMatrix4(o.matrixWorld);
+          b.fromBufferAttribute(pos, ids[1]).applyMatrix4(o.matrixWorld);
+          c.fromBufferAttribute(pos, ids[2]).applyMatrix4(o.matrixWorld);
+          // the outward normal: the unmirrored model (scale z -1) reverses the triangles' winding
+          const outward = new THREE.Vector3().subVectors(c, a).cross(new THREE.Vector3().subVectors(b, a)).normalize();
+          if (outward.y < limit && Math.min(a.y, b.y, c.y) > 0.2) out.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+        }
+        if (!out.length) return;
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+        group.add(new THREE.Mesh(g, material));
+      });
+    }
+    view.scene.add(group);
+  }
+  clear(view, 'workspace-axes');
+  if (d.axes) {
+    // X red, Y green, Z blue from the bed's origin (front left), as the slicer's
+    const group = new THREE.Group();
+    group.name = 'workspace-axes';
+    const origin = new THREE.Vector3(0, 0.2, view.bed.y);
+    const length = Math.max(view.bed.x, view.bed.y) / 4;
+    group.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), origin, length, 0xe53935));
+    group.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), origin, length, 0x43a047));
+    group.add(new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), origin, length, 0x1e88e5));
+    view.scene.add(group);
+  }
+  clear(view, 'workspace-mass');
+  if (d.centerOfMass) {
+    const group = new THREE.Group();
+    group.name = 'workspace-mass';
+    const material = new THREE.MeshBasicMaterial({ color: 0xffeb3b, depthTest: false });
+    for (const s of stats.values()) {
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(1.2, 12, 8), material);
+      dot.position.copy(s.centroid);
+      dot.renderOrder = 10;
+      group.add(dot);
+    }
+    view.scene.add(group);
+  }
+  setPerspective(view, d.perspective);
+}
+
+/** Perspective, or (nearly) orthographic: a narrow field of view from further away, framing the same. */
+export function setPerspective(view: ViewerScene, on: boolean) {
+  const fov = on ? 45 : 1.5;
+  if (view.camera.fov === fov) return;
+  const direction = view.camera.position.clone().sub(view.controls.target);
+  const scale = Math.tan(THREE.MathUtils.degToRad(view.camera.fov / 2)) / Math.tan(THREE.MathUtils.degToRad(fov / 2));
+  view.camera.fov = fov;
+  view.camera.far = Math.max(view.camera.far, direction.length() * scale * 4);
+  view.camera.position.copy(view.controls.target).addScaledVector(direction, scale);
+  view.camera.updateProjectionMatrix();
+  view.controls.update();
+}
+
+/** The section view: the model cut by a plane facing ``normal`` at ``ratio`` (0 to 1) of its extent; null: none. */
+export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; ratio: number } | null) {
+  view.renderer.localClippingEnabled = !!section;
+  let plane: THREE.Plane | null = null;
+  if (section) {
+    const n = section.normal.clone().normalize();
+    const box = new THREE.Box3().setFromObject(view.model);
+    const corners = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
+      new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).dot(n),
+    );
+    const [lo, hi] = [Math.min(...corners), Math.max(...corners)];
+    plane = new THREE.Plane(n.clone().negate(), lo + (hi - lo) * section.ratio); // keeps the side behind the plane
+  }
+  for (const item of items(view)) {
+    item.traverse((o) => {
+      if (o instanceof THREE.Mesh && o.material instanceof THREE.Material) {
+        o.material.clippingPlanes = plane ? [plane] : null;
+        o.material.side = plane ? THREE.DoubleSide : THREE.FrontSide;
+        o.material.needsUpdate = true;
+      }
+    });
+  }
+}
+
+/** Whether the pointer (client coordinates) is over the bed: a right click there opens the plate's menu. */
+export function onBed(view: ViewerScene, clientX: number, clientY: number): boolean {
+  const rect = view.renderer.domElement.getBoundingClientRect();
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), view.camera);
+  const p = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+  return !!p && p.x >= 0 && p.x <= view.bed.x && p.z >= 0 && p.z <= view.bed.y;
+}
+
+/** The direction the camera looks from (the section's "Set viewing angle"). */
+export function viewDirection(view: ViewerScene): THREE.Vector3 {
+  return view.camera.position.clone().sub(view.controls.target).normalize();
 }
 
 const MEASURE = 'workspace-measure';
@@ -200,3 +421,47 @@ export function useCanvasClicks(view: ViewerScene | null, onClick: (e: PointerEv
     };
   }, [view]);
 }
+
+// MainFrame's View menu: Ctrl+0..7 (Shortcuts.cpp); 7 frames the current plate
+export const VIEW_KEYS: Record<string, ViewPreset | 'plate'> = {
+  '0': 'iso',
+  '1': 'top',
+  '2': 'bottom',
+  '3': 'front',
+  '4': 'rear',
+  '5': 'left',
+  '6': 'right',
+  '7': 'plate',
+};
+
+/** The canvas menu's switches (GLCanvas3D.cpp, its order). */
+export interface CanvasOptions {
+  navigator: boolean;
+  zoomButton: boolean;
+  overhangs: boolean;
+  outline: boolean;
+  wireframe: boolean;
+  xray: boolean;
+  realistic: boolean;
+  perspective: boolean;
+  axes: boolean;
+  grid: boolean;
+  focus: boolean;
+  labels: boolean;
+  centerOfMass: boolean;
+}
+export const CANVAS_DEFAULTS: CanvasOptions = {
+  navigator: true,
+  zoomButton: true,
+  overhangs: false,
+  outline: true,
+  wireframe: false,
+  xray: false,
+  realistic: false,
+  perspective: true,
+  axes: true,
+  grid: true,
+  focus: true,
+  labels: false,
+  centerOfMass: false,
+};

@@ -47,9 +47,14 @@ interface Props {
   selection: Selection;
   onSelect: (selection: Selection) => void;
   onMenu: (at: { x: number; y: number }, selection: Exclude<Selection, null>) => void;
+  /** right click on the list's empty space */
+  onEmptyMenu?: (at: { x: number; y: number }) => void;
+  /** the objects selected together (Ctrl / Shift click, or in 3D) */
+  selectedIds?: string[];
+  onToggle?: (objectId: string) => void;
 }
 
-export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, onSelect, onMenu }: Props) {
+export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, onSelect, onMenu, onEmptyMenu, selectedIds = [], onToggle }: Props) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);
   const [query, setQuery] = useState('');
@@ -120,7 +125,16 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
           />
         </label>
       </div>
-      <ul role="tree" aria-label={tr('Objects')} className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1">
+      <ul
+        role="tree"
+        aria-label={tr('Objects')}
+        className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1"
+        onContextMenu={(e) => {
+          if (e.target !== e.currentTarget || !onEmptyMenu) return; // a row has its own menu
+          e.preventDefault();
+          onEmptyMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         {groups.map(({ plate, objects }) => {
           const plateKey = `p${plate?.index ?? 0}`;
           const plateName = plate ? `${tr('Plate')} ${plate.index}${plate.name ? ` · ${plate.name}` : ''}` : tr('Objects');
@@ -147,11 +161,18 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                     const own = Object.keys(ownSettings(obj)).length > 0;
                     const showParts = obj.parts.length > 1 || obj.parts.some((p) => p.type && p.type !== 'normal_part') || obj.overrides.some((o) => o.part && o.part !== obj.name);
                     const n = Number(obj.extruder);
-                    const objSelected = selected?.kind === 'object' && selected.id === id && !selected.part;
+                    const objSelected = (selected?.kind === 'object' && selected.id === id && !selected.part) || selectedIds.includes(id);
                     const sel = { kind: 'object' as const, id, plate: plate?.index ?? null };
                     return (
                       <li key={objKey} role="treeitem" aria-expanded={showParts ? open(objKey) : undefined} aria-selected={objSelected} aria-level={2}>
-                        <div className={`${row(objSelected)} pl-4`} onClick={() => onSelect(sel)} onContextMenu={(e) => menu(e, sel)}>
+                        <div
+                          className={`${row(objSelected)} pl-4`}
+                          onClick={(e) => {
+                            if ((e.ctrlKey || e.metaKey || e.shiftKey) && onToggle) onToggle(id);
+                            onSelect(sel);
+                          }}
+                          onContextMenu={(e) => menu(e, sel)}
+                        >
                           {caret(objKey, showParts)}
                           <span className="flex-1 truncate">{obj.name ?? `#${id}`}</span>
                           {own && <Cog title={ownCount} />}
@@ -176,7 +197,7 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                                 const partSel = { ...sel, part: p.name };
                                 return (
                                   <li key={`${objKey}-${p.id ?? p.name}`} role="treeitem" aria-selected={partSelected} aria-level={3}>
-                                    <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, sel)}>
+                                    <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, partSel)}>
                                       <img src={orcaIcon(PART_ICONS[p.type ?? 'normal_part'] ?? 'menu_add_part')} alt="" className="w-3.5 h-3.5" aria-hidden />
                                       <span className="flex-1 truncate">{p.name ?? `#${p.id}`}</span>
                                       {partOwn && <Cog title={ownCount} />}

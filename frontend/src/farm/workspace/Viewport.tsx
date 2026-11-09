@@ -11,7 +11,7 @@ import { api } from '../../api/client';
 import type { WorkspacePlate } from './api';
 import { toLocaleDecimal } from './draft';
 import { type OrcaLayout, orcaIcon, orcaText } from './orcaLayout';
-import type { ObjectStats, ViewPreset } from './viewTools';
+import type { CanvasOptions, ObjectStats, ViewPreset } from './viewTools';
 import '../i18n';
 
 /** An OrcaSlicer string (its Italian when the UI is Italian). */
@@ -129,47 +129,174 @@ export function MainToolbar({ layout, active, onTool }: { layout: OrcaLayout; ac
   );
 }
 
-// MainFrame's View menu (keys 0-6), in its order
-const VIEWS: { preset: ViewPreset; label: string; key: string }[] = [
-  { preset: 'iso', label: 'Default View', key: '0' },
-  { preset: 'top', label: 'Top View', key: '1' },
-  { preset: 'bottom', label: 'Bottom View', key: '2' },
-  { preset: 'front', label: 'Front View', key: '3' },
-  { preset: 'rear', label: 'Rear View', key: '4' },
-  { preset: 'left', label: 'Left View', key: '5' },
-  { preset: 'right', label: 'Right View', key: '6' },
+const CANVAS_MENU: { key: keyof CanvasOptions; label: string; shortcut?: string }[] = [
+  { key: 'navigator', label: '3D Navigator' },
+  { key: 'zoomButton', label: 'Zoom button' },
+  { key: 'overhangs', label: 'Overhangs' },
+  { key: 'outline', label: 'Outline' },
+  { key: 'wireframe', label: 'Wireframe', shortcut: 'Ctrl+Shift+Enter' },
+  { key: 'xray', label: 'X-Ray' },
+  { key: 'realistic', label: 'Realistic View' },
+  { key: 'perspective', label: 'Perspective' },
+  { key: 'axes', label: 'Axes' },
+  { key: 'grid', label: 'Gridlines' },
+  { key: 'focus', label: 'Focus mode' },
+  { key: 'labels', label: 'Labels', shortcut: 'Ctrl+E' },
+  { key: 'centerOfMass', label: 'Center of mass' },
 ];
-export const VIEW_KEYS: Record<string, ViewPreset> = Object.fromEntries(VIEWS.map((v) => [v.key, v.preset]));
 
-/** Bottom left of the 3D view, as GLCanvas3D's canvas toolbar: section view, the view menu, zoom to fit. */
+/** Bottom left of the 3D view, as GLCanvas3D's canvas toolbar: section view, the canvas menu, zoom to fit. */
 export function CanvasButtons({
   layout,
-  grid,
-  onGrid,
-  onView,
+  options,
+  onOption,
   onFit,
+  section,
+  onSection,
+  onSectionAngle,
 }: {
   layout: OrcaLayout;
-  grid: boolean;
-  onGrid: (on: boolean) => void;
-  onView: (preset: ViewPreset) => void;
+  options: CanvasOptions;
+  onOption: (key: keyof CanvasOptions, on: boolean) => void;
   onFit: () => void;
+  /** where the section plane is (0 to 1); null: no section */
+  section: number | null;
+  onSection: (ratio: number | null) => void;
+  onSectionAngle: () => void;
 }) {
   const tr = useOrcaText(layout);
   const [open, setOpen] = useState(false);
-  const items: MenuItem[] = [
-    ...VIEWS.map((v) => ({ label: tr(v.label), shortcut: v.key, onClick: () => onView(v.preset) })),
-    { label: tr('Gridlines'), checked: grid, onClick: () => onGrid(!grid), separator: true },
-  ];
+  const items: MenuItem[] = CANVAS_MENU.map((m) => ({
+    label: tr(m.label),
+    shortcut: m.shortcut,
+    checked: options[m.key],
+    onClick: () => onOption(m.key, !options[m.key]),
+  }));
   return (
-    <div className="absolute left-3 bottom-24 flex flex-col gap-2 [&_button]:rounded-full [&_button]:bg-bambu-dark-secondary [&_button]:p-1.5">
-      <ToolButton icon="canvas_section_dark" label={tr('Section view')} enabled={false} size="w-5 h-5" />
+    <div className="absolute left-3 bottom-24 flex flex-col gap-2 [&>span>span>button]:rounded-full [&>span>span>button]:bg-bambu-dark-secondary [&>span>span>button]:p-1.5">
       <span className="relative inline-flex">
-        <ToolButton icon="canvas_menu_dark" label={tr('Default View')} enabled active={open} size="w-5 h-5" onClick={() => setOpen(!open)} />
+        <ToolButton
+          icon="canvas_section_dark"
+          label={tr('Section view')}
+          enabled
+          active={section != null}
+          size="w-5 h-5"
+          onClick={() => onSection(section == null ? 1 : null)}
+        />
+        {section != null && (
+          <div className="absolute left-full bottom-0 ml-2 w-64 rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary p-2 text-[12px] text-white shadow-xl">
+            <p className="mb-1 font-semibold">{tr('Section view')}</p>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={section}
+                onChange={(e) => onSection(Number(e.target.value))}
+                aria-label={tr('Section view')}
+                className="flex-1 accent-bambu-green"
+              />
+              <span className="w-10 text-right tabular-nums">{section.toFixed(2)}</span>
+            </div>
+            <div className="mt-1.5 flex gap-1.5">
+              <button onClick={onSectionAngle} className="rounded bg-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-green/40">
+                {tr('Set viewing angle')}
+              </button>
+              <button onClick={() => onSection(1)} className="rounded bg-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-green/40">
+                {tr('Reset')}
+              </button>
+            </div>
+          </div>
+        )}
+      </span>
+      <span className="relative inline-flex">
+        <ToolButton icon="canvas_menu_dark" label={tr('Gridlines')} enabled active={open} size="w-5 h-5" onClick={() => setOpen(!open)} />
         {open && <ContextMenu items={items} onClose={() => setOpen(false)} />}
       </span>
-      <ToolButton icon="canvas_zoom_dark" label={`${tr('Fit camera to scene or selected object.')} [Z]`} enabled size="w-5 h-5" onClick={onFit} />
+      {options.zoomButton && (
+        <span className="inline-flex">
+          <ToolButton icon="canvas_zoom_dark" label={`${tr('Fit camera to scene or selected object.')} [Z]`} enabled size="w-5 h-5" onClick={onFit} />
+        </span>
+      )}
     </div>
+  );
+}
+
+const FACES: { key: ViewPreset; label: string; transform: string }[] = [
+  { key: 'front', label: 'front', transform: 'translateZ(28px)' },
+  { key: 'rear', label: 'rear', transform: 'rotateY(180deg) translateZ(28px)' },
+  { key: 'right', label: 'right', transform: 'rotateY(90deg) translateZ(28px)' },
+  { key: 'left', label: 'left', transform: 'rotateY(-90deg) translateZ(28px)' },
+  { key: 'top', label: 'top', transform: 'rotateX(90deg) translateZ(28px)' },
+  { key: 'bottom', label: 'bottom', transform: 'rotateX(-90deg) translateZ(28px)' },
+];
+
+/** OrcaSlicer's 3D navigator: a cube turning with the camera; a click on a face looks from that side. */
+export function Navigator({ direction, onView }: { direction: () => { x: number; y: number; z: number } | null; onView: (p: ViewPreset) => void }) {
+  const { t } = useTranslation();
+  const cube = useRef<HTMLDivElement>(null);
+  const read = useRef(direction);
+  read.current = direction;
+  useEffect(() => {
+    let frame = 0;
+    const turn = () => {
+      const d = read.current();
+      if (d && cube.current) {
+        const azimuth = (Math.atan2(d.x, d.z) * 180) / Math.PI;
+        const elevation = (Math.asin(Math.max(-1, Math.min(1, d.y))) * 180) / Math.PI;
+        cube.current.style.transform = `rotateX(${-elevation}deg) rotateY(${-azimuth}deg)`;
+      }
+      frame = requestAnimationFrame(turn);
+    };
+    turn();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return (
+    <div className="absolute left-3 bottom-[13.5rem] w-14 h-14" style={{ perspective: 300 }} role="group" aria-label={t('farm.workspace.navigator.title')}>
+      <div ref={cube} className="relative w-full h-full" style={{ transformStyle: 'preserve-3d' }}>
+        {FACES.map((f) => (
+          <button
+            key={f.key}
+            onClick={() => onView(f.key)}
+            title={t(`farm.workspace.navigator.${f.label}`)}
+            className="absolute inset-0 flex items-center justify-center border border-bambu-gray/60 bg-bambu-dark-tertiary/90 text-[8px] text-white hover:bg-bambu-green/60"
+            style={{ transform: f.transform, backfaceVisibility: 'hidden' }}
+          >
+            {t(`farm.workspace.navigator.${f.label}`)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Object names over the 3D view (canvas menu "Labels", Ctrl+E), following the camera. */
+export function Labels({ place }: { place: () => { id: string; name: string; x: number; y: number }[] }) {
+  const [shown, setShown] = useState<{ id: string; name: string; x: number; y: number }[]>([]);
+  const read = useRef(place);
+  read.current = place;
+  useEffect(() => {
+    let frame = 0;
+    const tick = () => {
+      setShown(read.current());
+      frame = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return (
+    <>
+      {shown.map((l) => (
+        <span
+          key={l.id}
+          className="pointer-events-none absolute -translate-x-1/2 -translate-y-full rounded bg-black/70 px-1.5 py-0.5 text-[11px] text-white whitespace-nowrap"
+          style={{ left: l.x, top: l.y }}
+        >
+          {l.name}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -203,7 +330,23 @@ export function PlateButtons({ layout, onSettings }: { layout: OrcaLayout; onSet
 }
 
 /** Bottom right, as OrcaSlicer's object info: name, size, volume, triangles of the selected object. */
-export function ObjectInfo({ layout, name, stats, onClose }: { layout: OrcaLayout; name: string; stats: ObjectStats; onClose: () => void }) {
+export function ObjectInfo({
+  layout,
+  name,
+  part,
+  count = 1,
+  stats,
+  onClose,
+}: {
+  layout: OrcaLayout;
+  name: string;
+  /** the part selected in the list, if one */
+  part?: string | null;
+  /** how many objects are selected (more than one: OrcaSlicer shows the count) */
+  count?: number;
+  stats: ObjectStats;
+  onClose: () => void;
+}) {
   const { t, i18n } = useTranslation();
   const tr = useOrcaText(layout);
   const n = (v: number) => toLocaleDecimal(String(Math.round(v * 100) / 100), i18n.language);
@@ -216,9 +359,15 @@ export function ObjectInfo({ layout, name, stats, onClose }: { layout: OrcaLayou
       <button onClick={onClose} aria-label={tr('Close')} title={tr('Close')} className="absolute right-1 top-1 p-0.5 text-bambu-gray hover:text-white">
         <X className="w-3.5 h-3.5" />
       </button>
+      {count > 1 && <p>{t('farm.workspace.selectedCount', { count })}</p>}
       <p>
         {tr('Object name')}: <span className="text-white">{name}</span>
       </p>
+      {part && (
+        <p>
+          {t('farm.workspace.partName')}: <span className="text-white">{part}</span>
+        </p>
+      )}
       <p>
         {tr('Size')}: {stats.size.map(n).join(' x ')} mm
       </p>
@@ -228,6 +377,7 @@ export function ObjectInfo({ layout, name, stats, onClose }: { layout: OrcaLayou
       <p>
         {tr('Triangles')}: {stats.triangles}
       </p>
+      {stats.openEdges > 0 && <p className="text-red-400">{t('farm.workspace.meshErrors', { count: stats.openEdges })}</p>}
       {!stats.printable && <p className="text-amber-400">{t('farm.workspace.notPrintable')}</p>}
     </div>
   );

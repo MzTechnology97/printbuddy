@@ -4,7 +4,7 @@
 // settings on the existing sidecars and printed through the existing print modal. The 3D view selects, zooms,
 // measures and shows object info as OrcaSlicer's; its menus and tools that would change the project are phase 2.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type * as THREE from 'three';
+import * as THREE from 'three';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -19,7 +19,7 @@ import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog } from './Dialogs';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
-import { objectMenu, plateMenu } from './menus';
+import { emptyMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import type { Selection } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
@@ -27,23 +27,34 @@ import { Sidebar } from './Sidebar';
 import {
   CanvasButtons,
   ContextMenu,
+  Labels,
   MainToolbar,
   type MenuItem,
+  Navigator,
   ObjectInfo,
   PlateBar,
   PlateButtons,
-  VIEW_KEYS,
 } from './Viewport';
 import {
+  CANVAS_DEFAULTS,
+  type CanvasOptions,
   type ObjectStats,
+  VIEW_KEYS,
+  applyDisplay,
   drawMeasure,
   fitTo,
   highlight,
+  hover,
+  inRectangle,
   objectStats,
   pick,
+  setSection,
   setView,
+  toScreen,
+  onBed,
   unmirror,
   useCanvasClicks,
+  viewDirection,
 } from './viewTools';
 import '../i18n';
 
@@ -137,7 +148,13 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuItem[] } | null>(null);
   const [view, setViewScene] = useState<ViewerScene | null>(null);
   const [stats, setStats] = useState<Map<string, ObjectStats>>(new Map());
-  const [grid, setGrid] = useState(true);
+  const [canvas, setCanvas] = useState<CanvasOptions>(CANVAS_DEFAULTS);
+  const [section, setSectionRatio] = useState<number | null>(null);
+  const sectionNormal = useRef(new THREE.Vector3(0, 1, 0)); // a horizontal cut until "Set viewing angle"
+  // several objects selected (Ctrl+click, Shift+drag); ``selection`` is the one the panels show
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [rubber, setRubber] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [sidebarHidden, setSidebarHidden] = useState(false);
   const [tool, setTool] = useState<string | null>(null);
   const [measure, setMeasure] = useState<THREE.Vector3[]>([]);
   const [infoClosed, setInfoClosed] = useState(false);
@@ -177,12 +194,18 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     setMeasure([]);
   }, []);
   const selectedId = selection?.kind === 'object' ? selection.id : null;
+  const shownIds = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
+  const shownKey = shownIds.join(',');
   useEffect(() => {
-    if (view) highlight(view, selectedId);
-  }, [view, selectedId]);
+    if (view) highlight(view, shownKey ? shownKey.split(',') : [], canvas.outline);
+  }, [view, shownKey, canvas.outline]);
   useEffect(() => {
-    if (view?.grid) view.grid.visible = grid;
-  }, [view, grid]);
+    if (view?.grid) view.grid.visible = canvas.grid;
+    if (view) applyDisplay(view, canvas, stats);
+  }, [view, canvas, stats]);
+  useEffect(() => {
+    if (view) setSection(view, section == null ? null : { normal: sectionNormal.current, ratio: section });
+  }, [view, section]);
   useEffect(() => {
     if (view) drawMeasure(view, measure[0] ?? null, measure[1] ?? null);
   }, [view, measure]);
@@ -204,7 +227,37 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     }
   };
   const currentPlate = selectedPlate ?? doc.plates[0]?.index ?? null;
+  const deselect = () => {
+    setSelection(null);
+    setSelectedIds([]);
+  };
+  const openEmptyMenu = (at: { x: number; y: number }) =>
+    setMenu({ at, items: emptyMenu(tr, canvas.labels, { labels: () => setCanvas((c) => ({ ...c, labels: !c.labels })) }) });
   const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>) => {
+    if (sel.kind === 'object' && selectedIds.length > 1 && selectedIds.includes(sel.id)) {
+      setMenu({
+        at,
+        items: multiMenu(tr, t('farm.workspace.deleteKey'), selectedIds.every((id) => stats.get(id)?.printable ?? true), {
+          zoom: () => fitTo(view!, null),
+          deselect,
+        }),
+      });
+      return;
+    }
+    if (sel.kind === 'object' && sel.part) {
+      setMenu({
+        at,
+        items: partMenu(tr, t('farm.workspace.deleteKey'), {
+          select: () => select(sel),
+          zoom: () => zoomTo(sel.id),
+          settings: () => {
+            setPerObject(true);
+            select(sel);
+          },
+        }),
+      });
+      return;
+    }
     if (sel.kind === 'plate') {
       const plateSel = { kind: 'plate' as const, plate: sel.plate };
       setMenu({
@@ -244,38 +297,124 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         if (hit) setMeasure((m) => (m.length === 1 ? [m[0], hit.point] : [hit.point]));
         return;
       }
-      if (hit) {
+      if (hit && (e.ctrlKey || e.metaKey)) {
+        // Ctrl+click adds to (or takes out of) the selection
+        const base = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
+        setSelectedIds(base.includes(hit.objectId) ? base.filter((id) => id !== hit.objectId) : [...base, hit.objectId]);
         select({ kind: 'object', id: hit.objectId, plate: selectedPlate });
-        setPerObject(true);
-      } else setSelection(null);
+      } else if (hit) {
+        setSelectedIds([]);
+        select({ kind: 'object', id: hit.objectId, plate: selectedPlate });
+      } else deselect();
     },
     (e) => {
       const hit = view && pick(view, e.clientX, e.clientY);
       const at = { x: e.clientX, y: e.clientY };
       if (hit) {
         const sel = { kind: 'object' as const, id: hit.objectId, plate: selectedPlate };
-        select(sel);
+        if (!selectedIds.includes(hit.objectId)) {
+          setSelectedIds([]);
+          select(sel);
+        }
         openMenu(at, sel);
-      } else if (currentPlate != null) openMenu(at, { kind: 'plate', plate: currentPlate });
+      } else if (view && currentPlate != null && onBed(view, e.clientX, e.clientY)) openMenu(at, { kind: 'plate', plate: currentPlate });
+      else openEmptyMenu(at);
     },
   );
+  // the 3D view's pointer: hover light, Shift+drag rectangle selection, double click (OrcaSlicer's canvas)
+  const live = useRef({ selectedIds, hovered: null as string | null });
+  live.current.selectedIds = selectedIds;
+  useEffect(() => {
+    const canvasEl = view?.renderer.domElement;
+    const host = canvasEl?.parentElement;
+    if (!view || !canvasEl || !host) return;
+    let frame = 0;
+    let start: { x: number; y: number } | null = null;
+    const move = (e: PointerEvent) => {
+      if (start) {
+        setRubber({ x0: start.x, y0: start.y, x1: e.clientX, y1: e.clientY });
+        return;
+      }
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const id = pick(view, e.clientX, e.clientY)?.objectId ?? null;
+        if (id !== live.current.hovered) hover(view, (live.current.hovered = id));
+      });
+    };
+    const down = (e: PointerEvent) => {
+      if (!e.shiftKey || e.button !== 0) return;
+      start = { x: e.clientX, y: e.clientY };
+      view.controls.enabled = false; // Shift+drag selects instead of panning
+      e.stopPropagation();
+    };
+    const up = (e: PointerEvent) => {
+      if (!start) return;
+      const ids = inRectangle(view, start, { x: e.clientX, y: e.clientY });
+      start = null;
+      setRubber(null);
+      view.controls.enabled = true;
+      setSelectedIds(ids);
+      if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
+    };
+    const leave = () => hover(view, (live.current.hovered = null));
+    const dbl = (e: MouseEvent) => setPerObject(!!pick(view, e.clientX, e.clientY)); // Objects / Global panel
+    host.addEventListener('pointerdown', down, true);
+    canvasEl.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    canvasEl.addEventListener('pointerleave', leave);
+    canvasEl.addEventListener('dblclick', dbl);
+    return () => {
+      cancelAnimationFrame(frame);
+      host.removeEventListener('pointerdown', down, true);
+      canvasEl.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      canvasEl.removeEventListener('pointerleave', leave);
+      canvasEl.removeEventListener('dblclick', dbl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- select reads the plate shown; the view is what matters
+  }, [view]);
   const toggleTool = (key: string) => {
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
-  // OrcaSlicer's keys in the 3D view: 0-6 views, Z zoom to the selection, U measure, Esc leaves a tool / selection
+  // OrcaSlicer's keys (Shortcuts.cpp): Ctrl+0..7 views, Z zoom to the selection, U measure, Ctrl+A select all,
+  // Ctrl+E labels, Ctrl+Shift+Enter wireframe, Tab Prepare / Preview, Shift+Tab sidebar, Esc leaves a tool / selection
   const dialogOpen = saveOpen || !!preset || !!menu || printOpen;
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement | null;
-    if (mode !== 'prepare' || !view || dialogOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (dialogOpen || e.altKey) return;
     if (el?.closest?.('input, textarea, select, [role="listbox"], [role="menu"], [role="combobox"]')) return;
-    if (e.key in VIEW_KEYS) setView(view, VIEW_KEYS[e.key]);
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (e.key === 'Tab' && !ctrl) {
+      e.preventDefault();
+      if (e.shiftKey) setSidebarHidden((h) => !h);
+      else setMode((m) => (m === 'prepare' ? 'preview' : 'prepare'));
+      return;
+    }
+    if (mode !== 'prepare' || !view) return;
+    const handled = () => e.preventDefault();
+    if (ctrl && e.key in VIEW_KEYS) {
+      handled();
+      const preset = VIEW_KEYS[e.key];
+      setView(view, preset === 'plate' ? 'iso' : preset);
+    } else if (ctrl && e.shiftKey && e.key === 'Enter') {
+      handled();
+      setCanvas((c) => ({ ...c, wireframe: !c.wireframe }));
+    } else if (ctrl && (e.key === 'e' || e.key === 'E')) {
+      handled();
+      setCanvas((c) => ({ ...c, labels: !c.labels }));
+    } else if (ctrl && (e.key === 'a' || e.key === 'A')) {
+      handled();
+      const ids = [...stats.keys()];
+      setSelectedIds(ids);
+      if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
+    } else if (ctrl) return;
     else if (e.key === 'z' || e.key === 'Z') fitTo(view, selectedId);
     else if (e.key === 'u' || e.key === 'U') toggleTool('measure');
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
-      else setSelection(null);
+      else deselect();
     }
   };
   useEffect(() => {
@@ -438,7 +577,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       </nav>
       <div className="flex-1 min-h-0 flex">
         <aside
-          className={`${pane === 'settings' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-[24rem] flex-shrink-0 border-r border-bambu-dark-tertiary bg-bambu-dark-secondary min-h-0`}
+          className={`${pane === 'settings' ? 'flex' : 'hidden'} ${sidebarHidden ? 'lg:hidden' : 'lg:flex'} flex-col w-full lg:w-[24rem] flex-shrink-0 border-r border-bambu-dark-tertiary bg-bambu-dark-secondary min-h-0`}
         >
           <Sidebar
             layout={layout}
@@ -453,6 +592,13 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
             selection={selection}
             onSelect={select}
             onMenu={openMenu}
+            onEmptyMenu={openEmptyMenu}
+            selectedIds={shownIds}
+            onToggle={(id) => {
+              // Ctrl / Shift click in the list: add to or take out of the selection, as in 3D
+              const base = shownIds;
+              setSelectedIds(base.includes(id) ? base.filter((x) => x !== id) : [...base, id]);
+            }}
             stats={stats}
           />
         </aside>
@@ -483,11 +629,51 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                 <>
                   <CanvasButtons
                     layout={layout}
-                    grid={grid}
-                    onGrid={setGrid}
-                    onView={(p) => setView(view, p)}
+                    options={canvas}
+                    onOption={(key, on) => {
+                      setCanvas((c) => ({ ...c, [key]: on }));
+                      // focus mode off: every plate at once (on: the plate chosen in the bar)
+                      if (key === 'focus') setSelectedPlate(on ? (doc.plates[0]?.index ?? null) : null);
+                    }}
                     onFit={() => fitTo(view, selectedId)}
+                    section={section}
+                    onSection={setSectionRatio}
+                    onSectionAngle={() => {
+                      sectionNormal.current = viewDirection(view);
+                      setSectionRatio((r) => (r == null ? 1 : r - 1e-9)); // re-apply with the new plane
+                    }}
                   />
+                  {canvas.navigator && (
+                    <Navigator
+                      direction={() => {
+                        const d = viewDirection(view);
+                        return { x: d.x, y: d.y, z: d.z };
+                      }}
+                      onView={(p) => setView(view, p)}
+                    />
+                  )}
+                  {canvas.labels && (
+                    <Labels
+                      place={() =>
+                        [...stats.entries()].flatMap(([id, s]) => {
+                          const at = toScreen(view, s.centroid);
+                          const name = doc.objects.find((o) => o.id === id)?.name ?? `#${id}`;
+                          return at ? [{ id, name, ...at }] : [];
+                        })
+                      }
+                    />
+                  )}
+                  {rubber && (
+                    <div
+                      className="pointer-events-none fixed border border-bambu-green bg-bambu-green/10"
+                      style={{
+                        left: Math.min(rubber.x0, rubber.x1),
+                        top: Math.min(rubber.y0, rubber.y1),
+                        width: Math.abs(rubber.x1 - rubber.x0),
+                        height: Math.abs(rubber.y1 - rubber.y0),
+                      }}
+                    />
+                  )}
                   {currentPlate != null && (
                     <PlateButtons
                       layout={layout}
@@ -503,6 +689,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                 <ObjectInfo
                   layout={layout}
                   name={selectedObject.name ?? `#${selectedId}`}
+                  part={selection?.kind === 'object' ? selection.part : null}
+                  count={Math.max(selectedIds.length, 1)}
                   stats={selectedStats}
                   onClose={() => setInfoClosed(true)}
                 />

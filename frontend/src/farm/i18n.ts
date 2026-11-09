@@ -597,6 +597,11 @@ const en = {
       absent: 'Not in the file: the system preset value applies (never guessed here).',
     },
     notInFile: 'from the system preset (not in the file)',
+    navigator: { title: '3D navigator', front: 'Front', rear: 'Back', right: 'Right', left: 'Left', top: 'Top', bottom: 'Bottom' },
+    selectedCount: 'Number of currently selected objects: {{count}}',
+    partName: 'Part name',
+    meshErrors_one: 'Mesh error: {{count}} open edge (the mesh is not closed)',
+    meshErrors_other: 'Mesh errors: {{count}} open edges (the mesh is not closed)',
     consistency: {
       title: 'Check these settings (as the slicer warns)',
       layerZero: 'Layer height is zero: the slicer resets it to 0.2 mm.',
@@ -1261,6 +1266,11 @@ const it: typeof en = {
       absent: 'Non è nel file: vale il valore del preset di sistema (qui non viene mai indovinato).',
     },
     notInFile: 'dal preset di sistema (non nel file)',
+    navigator: { title: 'Navigatore 3D', front: 'Frontale', rear: 'Posteriore', right: 'Destra', left: 'Sinistra', top: 'Superiore', bottom: 'Inferiore' },
+    selectedCount: 'Numero di oggetti attualmente selezionati: {{count}}',
+    partName: 'Nome parte',
+    meshErrors_one: 'Errore della mesh: {{count}} bordo aperto (la mesh non è chiusa)',
+    meshErrors_other: 'Errori della mesh: {{count}} bordi aperti (la mesh non è chiusa)',
     consistency: {
       title: 'Controlla queste impostazioni (come avvisa lo slicer)',
       layerZero: "L'altezza strato è zero: lo slicer la riporta a 0,2 mm.",

@@ -60,3 +60,57 @@ export function plateMenu(tr: Tr, on: { selectAll: () => void; settings: () => v
     { label: `${tr('Replace all with 3D files')}...`, separator: true },
   ];
 }
+
+/** A part, negative part, modifier, blocker or enforcer (GUI_Factories.cpp part menu). */
+export function partMenu(tr: Tr, deleteKey: string, on: { select: () => void; zoom: () => void; settings: () => void }): MenuItem[] {
+  return [
+    { label: tr('Select'), onClick: on.select },
+    { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
+    { label: tr('Center'), separator: true },
+    { label: tr('Drop') },
+    { label: tr('Transform'), submenu: true },
+    { label: tr('Align/Distribute'), submenu: true },
+    { label: tr('Edit'), submenu: true },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true },
+    { label: tr('Change Type'), submenu: true, separator: true },
+    { label: tr('Precise Seam Type'), submenu: true },
+    { label: tr('Change Filament'), submenu: true },
+    { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
+    { label: tr('Copy Process Settings') },
+    { label: tr('Paste Process Settings') },
+    { label: tr('Edit in Parameter Table') },
+    { label: tr('More'), submenu: true, separator: true },
+  ];
+}
+
+/** Several objects selected (GUI_Factories.cpp multi selection menu). */
+export function multiMenu(tr: Tr, deleteKey: string, printable: boolean, on: { zoom: () => void; deselect: () => void }): MenuItem[] {
+  return [
+    { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
+    { label: tr('Deselect All'), shortcut: 'Esc', onClick: on.deselect },
+    { label: tr('Assemble'), separator: true },
+    { label: tr('Center') },
+    { label: tr('Drop') },
+    { label: tr('Transform'), submenu: true },
+    { label: tr('Align/Distribute'), submenu: true },
+    { label: tr('Fix Model') },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true },
+    { label: tr('Set Filament for selected items'), submenu: true, separator: true },
+    { label: tr('Printable'), shortcut: 'V', checked: printable },
+    { label: tr('Auto Drop'), checked: true },
+    { label: tr('Edit Process Settings'), separator: true },
+    { label: tr('Copy Process Settings') },
+    { label: tr('Paste Process Settings') },
+    { label: tr('More'), submenu: true, separator: true },
+  ];
+}
+
+/** The empty 3D view or list (GUI_Factories.cpp default menu). */
+export function emptyMenu(tr: Tr, labels: boolean, on: { labels: () => void }): MenuItem[] {
+  return [
+    { label: tr('Add Primitive'), icon: 'menu_add_part', submenu: true },
+    { label: tr('Add Handy models'), icon: 'menu_add_part', submenu: true },
+    { label: tr('Add Models'), icon: 'menu_add_part' },
+    { label: tr('Show Labels'), shortcut: 'Ctrl+E', checked: labels, onClick: on.labels, separator: true },
+  ];
+}

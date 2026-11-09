@@ -62,6 +62,9 @@ interface Props {
   selection: Selection;
   onSelect: (selection: Selection) => void;
   onMenu: (at: { x: number; y: number }, selection: Exclude<Selection, null>) => void;
+  onEmptyMenu: (at: { x: number; y: number }) => void;
+  selectedIds: string[];
+  onToggle: (objectId: string) => void;
   stats: Map<string, ObjectStats>;
 }
 
@@ -78,6 +81,9 @@ export function Sidebar({
   selection,
   onSelect,
   onMenu,
+  onEmptyMenu,
+  selectedIds,
+  onToggle,
   stats,
 }: Props) {
   const { t } = useTranslation();
@@ -174,6 +180,9 @@ export function Sidebar({
             selection={selection}
             onSelect={onSelect}
             onMenu={onMenu}
+            onEmptyMenu={onEmptyMenu}
+            selectedIds={selectedIds}
+            onToggle={onToggle}
           />
         </div>
       ) : (

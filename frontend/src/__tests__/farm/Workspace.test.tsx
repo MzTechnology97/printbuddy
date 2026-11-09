@@ -22,11 +22,12 @@ import {
   withoutKey,
   type Draft,
 } from '../../farm/workspace/draft';
-import { objectMenu } from '../../farm/workspace/menus';
+import { emptyMenu, multiMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
 import { ObjectsPanel } from '../../farm/workspace/ObjectsPanel';
 import { SettingsPanel } from '../../farm/workspace/SettingsPanel';
 import { ContextMenu, MainToolbar } from '../../farm/workspace/Viewport';
-import { meshVolume, objectStats } from '../../farm/workspace/viewTools';
+import { CANVAS_DEFAULTS, VIEW_KEYS, meshVolume, objectStats, openEdges } from '../../farm/workspace/viewTools';
+import { CanvasButtons } from '../../farm/workspace/Viewport';
 import type { ViewerScene } from '../../components/ModelViewer';
 import type { OrcaLayout, Section } from '../../farm/workspace/orcaLayout';
 
@@ -644,5 +645,47 @@ describe('3D object info', () => {
     expect(stats.volume).toBeCloseTo(6000);
     expect(stats.triangles).toBe(12);
     expect(stats.printable).toBe(false);
+  });
+});
+
+describe('batch B: selection, menus, canvas', () => {
+  it('counts the open edges of a mesh (mesh errors), none on a closed one', () => {
+    const tetra = new THREE.BufferGeometry();
+    tetra.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1], 3));
+    tetra.setIndex([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]);
+    expect(openEdges(tetra)).toBe(0);
+    tetra.setIndex([0, 2, 1]);
+    expect(openEdges(tetra)).toBe(3);
+  });
+
+  it("has OrcaSlicer's part, multiple selection and empty space menus, only what looks working", () => {
+    const tr = (s: string) => s;
+    const part = partMenu(tr, 'Del', { select: () => {}, zoom: () => {}, settings: () => {} });
+    expect(part.filter((i) => i.onClick).map((i) => i.label)).toEqual(['Select', 'Zoom', 'Edit Process Settings']);
+    expect(part.map((i) => i.label)).toContain('Change Type');
+    const multi = multiMenu(tr, 'Del', true, { zoom: () => {}, deselect: () => {} });
+    expect(multi.filter((i) => i.onClick).map((i) => i.label)).toEqual(['Zoom', 'Deselect All']);
+    const labels = vi.fn();
+    const empty = emptyMenu(tr, false, { labels });
+    expect(empty.map((i) => i.label)).toEqual(['Add Primitive', 'Add Handy models', 'Add Models', 'Show Labels']);
+    empty[3].onClick!();
+    expect(labels).toHaveBeenCalled();
+    expect(VIEW_KEYS['7']).toBe('plate'); // Ctrl+0..7
+  });
+
+  it("lists the canvas menu's switches in OrcaSlicer's order and toggles them", async () => {
+    const user = userEvent.setup();
+    const onOption = vi.fn();
+    render(
+      <CanvasButtons layout={LAYOUT} options={CANVAS_DEFAULTS} onOption={onOption} onFit={() => {}} section={null} onSection={() => {}} onSectionAngle={() => {}} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Gridlines' }));
+    const items = within(screen.getByRole('menu')).getAllByRole('menuitemcheckbox');
+    expect(items.map((i) => i.textContent?.replace(/Ctrl.*/, ''))).toEqual([
+      '3D Navigator', 'Zoom button', 'Overhangs', 'Outline', 'Wireframe', 'X-Ray', 'Realistic View', 'Perspective', 'Axes', 'Gridlines',
+      'Focus mode', 'Labels', 'Center of mass',
+    ]);
+    await user.click(items[4]);
+    expect(onOption).toHaveBeenCalledWith('wireframe', true);
   });
 });
