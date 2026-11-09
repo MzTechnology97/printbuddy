@@ -1,4 +1,5 @@
-// Printfarm (fork): what a chosen printer has loaded, and the plate's AMS/CFS slots, with upstream's mapping.
+// Printfarm (fork): what a chosen printer has loaded, and the plate's AMS/CFS slots, with upstream's mapping
+// (before the slice too: the plate's filaments read from the 3MF).
 import { useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -89,10 +90,11 @@ export function PrinterSlots({ printerId, plateId, plateLabel, color, colorHex, 
   return (
     <div className="space-y-2">
       <Loaded printerId={printerId} />
-      {reqs.data && !reqs.data.sliced && <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsAfterSlice')}</p>}
-      {reqs.data?.sliced && (
+      {reqs.data && !reqs.data.filaments.length && <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsAfterSlice')}</p>}
+      {!!reqs.data?.filaments.length && (
         <>
           <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsFor', { plate: plateLabel })}</p>
+          {!reqs.data.sliced && <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsBeforeSlice')}</p>}
           <FilamentMapping printerId={printerId} filamentReqs={filamentReqs} manualMappings={mappings}
             onManualMappingChange={onMappings} defaultExpanded
             currencySymbol={getCurrencySymbol(settings.data?.currency || 'USD')}

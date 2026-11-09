@@ -148,12 +148,15 @@ async def create_jobs(data: JobsIn, db: AsyncSession = Depends(get_db)) -> list[
 @router.get("/plates/{plate_id}/filaments", dependencies=[_read])
 async def plate_filaments(plate_id: int, color: str | None = None, db: AsyncSession = Depends(get_db)) -> dict:
     """Filament slots of the plate sliced in the component's ``color``, for the print dialog's slot mapping;
-    ``sliced`` false: none yet."""
+    ``sliced`` false: not sliced yet, the filaments read from the project (no grams; empty when unknown)."""
     plate = await db.get(FarmPlate, plate_id)
     if plate is None:
         raise HTTPException(404, "Plate not found")
     filaments = await service.plate_filaments(db, plate, color)
-    return {"plate_id": plate_id, "sliced": filaments is not None, "filaments": filaments or []}
+    sliced = filaments is not None
+    if not sliced:
+        filaments = await service.unsliced_plate_filaments(db, plate, color)
+    return {"plate_id": plate_id, "sliced": sliced, "filaments": filaments or []}
 
 
 @router.get("/jobs", dependencies=[_read])

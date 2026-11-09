@@ -440,6 +440,14 @@ async def test_plate_filaments_for_the_slot_mapping(async_client, farm):
     assert (await async_client.get(f"{API}/plates/99999/filaments")).status_code == 404
 
 
+def test_slots_chosen_before_the_slice_must_cover_it():
+    """Chosen on the 3MF before slicing: a sliced filament left without a slot keeps the job waiting."""
+    slots = [{"slot_id": 1, "type": "PETG"}, {"slot_id": 2, "type": "PLA"}]
+    assert service._unmapped(slots, [1, 128]) == []
+    assert service._unmapped(slots, [1]) == [2]
+    assert service._unmapped(slots, [1, -1]) == [2]
+
+
 def test_slot_mapping_follows_the_component_colour_not_the_3mf():
     """3 filaments in the 3MF, the plate uses the 3rd: the black variant goes on the black tray, the rest -1."""
     used = [{"slot_id": 3, "type": "PETG", "color": "#FFC800"}]  # the 3MF says yellow: it doesn't count
