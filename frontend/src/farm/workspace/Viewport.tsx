@@ -10,8 +10,8 @@ import { Check, ChevronRight, X } from 'lucide-react';
 import { api } from '../../api/client';
 import type { WorkspacePlate } from './api';
 import { toLocaleDecimal } from './draft';
-import { type OrcaLayout, orcaIcon, orcaText } from './orcaLayout';
-import type { ObjectStats, ViewPreset } from './viewTools';
+import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './orcaLayout';
+import { type CanvasOptions, type ObjectStats, type Vec3, type ViewPreset, navigatorView } from './viewTools';
 import '../i18n';
 
 /** An OrcaSlicer string (its Italian when the UI is Italian). */
@@ -64,6 +64,25 @@ const MAIN_TOOLS: Tool[][] = [
 /** The tools that work now: they only look. */
 export const WORKING_TOOLS = new Set(['measure']);
 
+// where a button's tooltip shows: under the top toolbar, beside the canvas (left) and plate (right) buttons
+const TIP_PLACE = {
+  below: 'top-full left-1/2 -translate-x-1/2 mt-1',
+  left: 'right-full top-1/2 -translate-y-1/2 mr-2',
+  right: 'left-full top-1/2 -translate-y-1/2 ml-2',
+};
+
+/** A tooltip shown as soon as the pointer is over its wrapper (``group/tip``), as OrcaSlicer's over its icons. */
+function Tip({ text, place }: { text: string; place: keyof typeof TIP_PLACE }) {
+  return (
+    <span
+      role="tooltip"
+      className={`pointer-events-none absolute z-[60] hidden group-hover/tip:block whitespace-nowrap rounded bg-black/85 px-2 py-1 text-[12px] text-white shadow-lg ${TIP_PLACE[place]}`}
+    >
+      {text}
+    </span>
+  );
+}
+
 function ToolButton({
   icon,
   label,
@@ -71,6 +90,7 @@ function ToolButton({
   active,
   onClick,
   size = 'w-7 h-7',
+  tip = 'below',
 }: {
   icon: string;
   label: string;
@@ -78,24 +98,27 @@ function ToolButton({
   active?: boolean;
   onClick?: () => void;
   size?: string;
+  /** null: no tooltip (its panel is open beside it) */
+  tip?: keyof typeof TIP_PLACE | null;
 }) {
   const { t } = useTranslation();
   const title = enabled ? label : `${label}: ${t('farm.workspace.gizmos.soon')}`;
   return (
-    // a disabled button gets no hover: the wrapper carries the tooltip
-    <span title={title} className="inline-flex">
+    // a disabled button takes no pointer: its wrapper gets the hover and shows the tooltip
+    <span className="relative inline-flex group/tip">
       <button
         type="button"
         disabled={!enabled}
         aria-label={title}
         aria-pressed={active ?? undefined}
         onClick={onClick}
-        className={`p-1 rounded ${enabled ? 'hover:bg-bambu-dark-tertiary' : 'opacity-60 cursor-not-allowed'} ${
+        className={`p-1 rounded ${enabled ? 'hover:bg-bambu-dark-tertiary' : 'opacity-60 cursor-not-allowed pointer-events-none'} ${
           active ? 'bg-bambu-green/30 ring-1 ring-bambu-green' : ''
         }`}
       >
         <img src={orcaIcon(icon)} alt="" className={size} aria-hidden />
       </button>
+      {tip && <Tip text={title} place={tip} />}
     </span>
   );
 }
@@ -129,47 +152,289 @@ export function MainToolbar({ layout, active, onTool }: { layout: OrcaLayout; ac
   );
 }
 
-// MainFrame's View menu (keys 0-6), in its order
-const VIEWS: { preset: ViewPreset; label: string; key: string }[] = [
-  { preset: 'iso', label: 'Default View', key: '0' },
-  { preset: 'top', label: 'Top View', key: '1' },
-  { preset: 'bottom', label: 'Bottom View', key: '2' },
-  { preset: 'front', label: 'Front View', key: '3' },
-  { preset: 'rear', label: 'Rear View', key: '4' },
-  { preset: 'left', label: 'Left View', key: '5' },
-  { preset: 'right', label: 'Right View', key: '6' },
+const CANVAS_MENU: { key: keyof CanvasOptions; label: string; shortcut?: string }[] = [
+  { key: 'navigator', label: '3D Navigator' },
+  { key: 'zoomButton', label: 'Zoom button' },
+  { key: 'overhangs', label: 'Overhangs' },
+  { key: 'outline', label: 'Outline' },
+  { key: 'wireframe', label: 'Wireframe', shortcut: 'Ctrl+Shift+Enter' },
+  { key: 'xray', label: 'X-Ray' },
+  { key: 'realistic', label: 'Realistic View' },
+  { key: 'perspective', label: 'Perspective' },
+  { key: 'axes', label: 'Axes' },
+  { key: 'grid', label: 'Gridlines' },
+  { key: 'focus', label: 'Focus mode' },
+  { key: 'labels', label: 'Labels', shortcut: 'Ctrl+E' },
+  { key: 'centerOfMass', label: 'Center of mass' },
 ];
-export const VIEW_KEYS: Record<string, ViewPreset> = Object.fromEntries(VIEWS.map((v) => [v.key, v.preset]));
 
-/** Bottom left of the 3D view, as GLCanvas3D's canvas toolbar: section view, the view menu, zoom to fit. */
+/** Bottom left of the 3D view, as GLCanvas3D's canvas toolbar: section view, the canvas menu, zoom to fit. */
 export function CanvasButtons({
   layout,
-  grid,
-  onGrid,
-  onView,
+  options,
+  onOption,
   onFit,
+  section,
+  onSection,
+  onToggleSection,
+  onSectionAngle,
 }: {
   layout: OrcaLayout;
-  grid: boolean;
-  onGrid: (on: boolean) => void;
-  onView: (preset: ViewPreset) => void;
+  options: CanvasOptions;
+  onOption: (key: keyof CanvasOptions, on: boolean) => void;
   onFit: () => void;
+  /** where the section plane is: 0 no section, up to 1 all cut (from the camera's side) */
+  section: number;
+  onSection: (ratio: number) => void;
+  /** off, or back to the last cut (half way the first time) */
+  onToggleSection: () => void;
+  /** the plane faces the camera */
+  onSectionAngle: () => void;
 }) {
   const tr = useOrcaText(layout);
   const [open, setOpen] = useState(false);
-  const items: MenuItem[] = [
-    ...VIEWS.map((v) => ({ label: tr(v.label), shortcut: v.key, onClick: () => onView(v.preset) })),
-    { label: tr('Gridlines'), checked: grid, onClick: () => onGrid(!grid), separator: true },
+  const [panel, setPanel] = useState(false);
+  const tips: [string, string][] = [
+    [`Alt+${tr('Mouse wheel')}`, tr('Move section plane')],
+    [tr('Mouse wheel on icon'), tr('Move section plane')],
+    [tr('Right click on icon'), tr('Toggle section view')],
+    [tr('Middle click on icon'), tr('Set viewing angle')],
   ];
+  const items: MenuItem[] = CANVAS_MENU.map((m) => ({
+    label: tr(m.label),
+    shortcut: m.shortcut,
+    checked: options[m.key],
+    onClick: () => onOption(m.key, !options[m.key]),
+  }));
   return (
-    <div className="absolute left-3 bottom-24 flex flex-col gap-2 [&_button]:rounded-full [&_button]:bg-bambu-dark-secondary [&_button]:p-1.5">
-      <ToolButton icon="canvas_section_dark" label={tr('Section view')} enabled={false} size="w-5 h-5" />
+    <div className="absolute left-3 bottom-24 flex flex-col gap-2 [&>span>span>button]:rounded-full [&>span>span>button]:bg-bambu-dark-secondary [&>span>span>button]:p-1.5">
+      <span
+        className="relative inline-flex"
+        onWheel={(e) => onSection(Math.min(1, Math.max(0, section + (e.deltaY > 0 ? -0.01 : 0.01))))}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onToggleSection();
+        }}
+        onMouseDown={(e) => {
+          if (e.button !== 1) return;
+          e.preventDefault(); // no autoscroll
+          onSectionAngle();
+        }}
+      >
+        <ToolButton
+          icon="canvas_section_dark"
+          label={tr('Section view')}
+          enabled
+          active={section > 0}
+          size="w-5 h-5"
+          tip={panel ? null : 'right'}
+          onClick={() => setPanel(!panel)}
+        />
+        {panel && (
+          <div
+            className="absolute left-full bottom-0 ml-2 flex items-center gap-2 whitespace-nowrap rounded-lg border border-bambu-dark-tertiary bg-bambu-dark-secondary px-3 py-2 text-[12px] text-white shadow-xl"
+            role="group"
+            aria-label={tr('Section view')}
+            onWheel={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <span className="relative inline-flex group/tip">
+              <img src={orcaIcon('help')} alt="?" className="w-4 h-4 max-w-none cursor-help invert" tabIndex={0} />
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute bottom-full left-0 mb-2 hidden group-hover/tip:grid group-focus-within/tip:grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5 rounded bg-black/90 px-3 py-2 shadow-lg"
+              >
+                {tips.map(([key, what]) => (
+                  <span key={key} className="contents">
+                    <span className="font-semibold">{key}</span>
+                    <span>{what}</span>
+                  </span>
+                ))}
+              </span>
+            </span>
+            <span>{tr('Section view')}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={section}
+              onChange={(e) => onSection(Number(e.target.value))}
+              aria-label={tr('Section view')}
+              className="w-28 accent-bambu-green"
+            />
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={Number(section.toFixed(2))}
+              onChange={(e) => e.target.value !== '' && onSection(Math.min(1, Math.max(0, Number(e.target.value))))}
+              aria-label={`${tr('Section view')} (0-1)`}
+              className="w-14 rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 tabular-nums"
+            />
+            <button onClick={onSectionAngle} className="rounded bg-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-green/40">
+              {tr('Set viewing angle')}
+            </button>
+            <button
+              onClick={() => onSection(0)}
+              disabled={section === 0}
+              aria-label={tr('Reset')}
+              title={tr('Reset')}
+              className="rounded px-1 text-[14px] leading-none hover:bg-bambu-green/40 disabled:opacity-40"
+            >
+              ↺
+            </button>
+          </div>
+        )}
+      </span>
       <span className="relative inline-flex">
-        <ToolButton icon="canvas_menu_dark" label={tr('Default View')} enabled active={open} size="w-5 h-5" onClick={() => setOpen(!open)} />
+        <ToolButton icon="canvas_menu_dark" label={tr('Gridlines')} enabled active={open} size="w-5 h-5" tip="right" onClick={() => setOpen(!open)} />
         {open && <ContextMenu items={items} onClose={() => setOpen(false)} />}
       </span>
-      <ToolButton icon="canvas_zoom_dark" label={`${tr('Fit camera to scene or selected object.')} [Z]`} enabled size="w-5 h-5" onClick={onFit} />
+      {options.zoomButton && (
+        <span className="inline-flex">
+          <ToolButton
+            icon="canvas_zoom_dark"
+            label={`${tr('Fit camera to scene or selected object.')} [Z]`}
+            enabled
+            size="w-5 h-5"
+            tip="right"
+            onClick={onFit}
+          />
+        </span>
+      )}
     </div>
+  );
+}
+
+const FACES: { key: ViewPreset; label: string; transform: string }[] = [
+  { key: 'front', label: 'front', transform: 'translateZ(28px)' },
+  { key: 'rear', label: 'rear', transform: 'rotateY(180deg) translateZ(28px)' },
+  { key: 'right', label: 'right', transform: 'rotateY(90deg) translateZ(28px)' },
+  { key: 'left', label: 'left', transform: 'rotateY(-90deg) translateZ(28px)' },
+  { key: 'top', label: 'top', transform: 'rotateX(90deg) translateZ(28px)' },
+  { key: 'bottom', label: 'bottom', transform: 'rotateX(-90deg) translateZ(28px)' },
+];
+
+/** OrcaSlicer's 3D navigator: a cube turning with the camera; a click on a face looks from that side (on an
+ * edge or a corner, from between), dragging it turns the view. */
+export function Navigator({
+  direction,
+  onView,
+  onOrbit,
+}: {
+  direction: () => { x: number; y: number; z: number } | null;
+  onView: (p: ViewPreset | Vec3) => void;
+  /** turn the view by a drag of ``dx``, ``dy`` (radians) */
+  onOrbit: (dx: number, dy: number) => void;
+}) {
+  const { t } = useTranslation();
+  const cube = useRef<HTMLDivElement>(null);
+  const read = useRef(direction);
+  read.current = direction;
+  const orbitRef = useRef(onOrbit);
+  orbitRef.current = onOrbit;
+  const dragged = useRef(false);
+  const startDrag = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const start = { x: e.clientX, y: e.clientY };
+    let last = start;
+    dragged.current = false;
+    const move = (ev: PointerEvent) => {
+      if (!dragged.current && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 3) return;
+      dragged.current = true;
+      orbitRef.current((ev.clientX - last.x) * 0.01, (ev.clientY - last.y) * 0.01);
+      last = { x: ev.clientX, y: ev.clientY };
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  useEffect(() => {
+    let frame = 0;
+    let last = '';
+    const turn = () => {
+      frame = requestAnimationFrame(turn);
+      // nothing to do while the view is hidden (the phone's other pane) or the camera hasn't moved
+      if (!cube.current || cube.current.offsetParent === null) return;
+      const d = read.current();
+      if (!d) return;
+      const azimuth = (Math.atan2(d.x, d.z) * 180) / Math.PI;
+      const elevation = (Math.asin(Math.max(-1, Math.min(1, d.y))) * 180) / Math.PI;
+      const transform = `rotateX(${(-elevation).toFixed(2)}deg) rotateY(${(-azimuth).toFixed(2)}deg)`;
+      if (transform !== last) cube.current.style.transform = last = transform;
+    };
+    turn();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return (
+    <div
+      className="absolute left-3 bottom-[13.5rem] w-14 h-14 cursor-grab active:cursor-grabbing touch-none"
+      style={{ perspective: 300 }}
+      role="group"
+      aria-label={t('farm.workspace.navigator.title')}
+      onPointerDown={startDrag}
+    >
+      <div ref={cube} className="relative w-full h-full" style={{ transformStyle: 'preserve-3d' }}>
+        {FACES.map((f) => (
+          <button
+            key={f.key}
+            onClick={(e) => {
+              if (dragged.current) return; // the end of a drag, not a click
+              const el = e.currentTarget;
+              // the keyboard (detail 0) picks the face; the pointer, where on the face (offsetX is in its own plane)
+              onView(e.detail === 0 ? f.key : navigatorView(f.key, e.nativeEvent.offsetX / el.offsetWidth, e.nativeEvent.offsetY / el.offsetHeight));
+            }}
+            title={t(`farm.workspace.navigator.${f.label}`)}
+            className="absolute inset-0 flex items-center justify-center border border-bambu-gray/60 bg-bambu-dark-tertiary/90 text-[8px] text-white hover:bg-bambu-green/60"
+            style={{ transform: f.transform, backfaceVisibility: 'hidden' }}
+          >
+            {t(`farm.workspace.navigator.${f.label}`)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Object names over the 3D view (canvas menu "Labels", Ctrl+E), following the camera. */
+export function Labels({ place }: { place: () => { id: string; name: string; x: number; y: number }[] }) {
+  const [shown, setShown] = useState<{ id: string; name: string; x: number; y: number }[]>([]);
+  const read = useRef(place);
+  read.current = place;
+  useEffect(() => {
+    let frame = 0;
+    let last = '';
+    const tick = () => {
+      frame = requestAnimationFrame(tick);
+      const now = read.current();
+      // a new state (a render) only when a label moved
+      const key = now.map((l) => `${l.id}:${Math.round(l.x)}:${Math.round(l.y)}:${l.name}`).join('|');
+      if (key !== last) {
+        last = key;
+        setShown(now);
+      }
+    };
+    tick();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  return (
+    <>
+      {shown.map((l) => (
+        <span
+          key={l.id}
+          className="pointer-events-none absolute -translate-x-1/2 -translate-y-full rounded bg-black/70 px-1.5 py-0.5 text-[11px] text-white whitespace-nowrap"
+          style={{ left: l.x, top: l.y }}
+        >
+          {l.name}
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -195,6 +460,7 @@ export function PlateButtons({ layout, onSettings }: { layout: OrcaLayout; onSet
           icon={tool.icon}
           label={tr(tool.label)}
           enabled={tool.key === 'settings'}
+          tip="left"
           onClick={tool.key === 'settings' ? onSettings : undefined}
         />
       ))}
@@ -202,11 +468,29 @@ export function PlateButtons({ layout, onSettings }: { layout: OrcaLayout; onSet
   );
 }
 
-/** Bottom right, as OrcaSlicer's object info: name, size, volume, triangles of the selected object. */
-export function ObjectInfo({ layout, name, stats, onClose }: { layout: OrcaLayout; name: string; stats: ObjectStats; onClose: () => void }) {
+/** Bottom right, as OrcaSlicer's object info (Plater.cpp): with one instance or one part selected its name, size,
+ * volume, triangles and mesh errors; with several only how many. */
+export function ObjectInfo({
+  layout,
+  name,
+  part,
+  count = 1,
+  stats,
+  onClose,
+}: {
+  layout: OrcaLayout;
+  name: string;
+  /** the part selected, if one (its name replaces the object's) */
+  part?: string | null;
+  /** how many objects are selected (more than one: only that count) */
+  count?: number;
+  stats?: ObjectStats;
+  onClose: () => void;
+}) {
   const { t, i18n } = useTranslation();
   const tr = useOrcaText(layout);
   const n = (v: number) => toLocaleDecimal(String(Math.round(v * 100) / 100), i18n.language);
+  const f = (text: string, ...values: (string | number)[]) => orcaFormat(layout, text, i18n.language, ...values);
   return (
     <div
       className="absolute right-2 bottom-20 w-72 rounded border border-bambu-dark-tertiary border-l-4 border-l-bambu-green bg-bambu-dark-secondary/95 px-3 py-1.5 text-[12px] text-bambu-gray-light"
@@ -216,19 +500,24 @@ export function ObjectInfo({ layout, name, stats, onClose }: { layout: OrcaLayou
       <button onClick={onClose} aria-label={tr('Close')} title={tr('Close')} className="absolute right-1 top-1 p-0.5 text-bambu-gray hover:text-white">
         <X className="w-3.5 h-3.5" />
       </button>
-      <p>
-        {tr('Object name')}: <span className="text-white">{name}</span>
-      </p>
-      <p>
-        {tr('Size')}: {stats.size.map(n).join(' x ')} mm
-      </p>
-      <p>
-        {tr('Volume')}: {n(stats.volume)} mm³
-      </p>
-      <p>
-        {tr('Triangles')}: {stats.triangles}
-      </p>
-      {!stats.printable && <p className="text-amber-400">{t('farm.workspace.notPrintable')}</p>}
+      {count > 1 || !stats ? (
+        <p>{f('Number of currently selected objects: %1%\n', count)}</p>
+      ) : (
+        <>
+          <p>{part ? f('Part name: %1%\n', part) : f('Object name: %1%\n', name)}</p>
+          <p>{f('Size: %1% x %2% x %3% mm\n', ...stats.size.map(n))}</p>
+          <p>{f('Volume: %1% mm³\n', n(stats.volume))}</p>
+          <p>{f('Triangles: %1%\n', stats.triangles)}</p>
+          {stats.openEdges > 0 && (
+            <div className="text-red-400">
+              <p>{orcaPlural(layout, 'Error: %1$d non-manifold edge.', 'Error: %1$d non-manifold edges.', stats.openEdges, i18n.language)}</p>
+              <p>{tr('Tips:')}</p>
+              <p>{tr('Use "Fix Model" to repair the mesh.')}</p>
+            </div>
+          )}
+          {!stats.printable && <p className="text-amber-400">{t('farm.workspace.notPrintable')}</p>}
+        </>
+      )}
     </div>
   );
 }

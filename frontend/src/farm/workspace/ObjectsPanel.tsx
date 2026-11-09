@@ -1,5 +1,7 @@
 // Fork (printfarm): the Process box's "Objects" view, as OrcaSlicer's object list: a search, the tree Plate N ->
-// objects -> parts and modifiers (printable box, filament chip, a cog on every node with settings of its own),
+// objects -> parts and modifiers, and "Instances" when an object has several; its columns in OrcaSlicer's order
+// (mesh warning in the name, variable layer height, printable, filament chip, support and colour painting,
+// sinking, a cog for settings of its own; a column only when some object needs it),
 // and under it the settings of what is selected: a plate's "Plate Settings" (model_settings.config plate
 // metadata) or an object's (part's) settings by tab, its own values first. Read only in this version: the
 // copy writer rewrites project_settings.config only; per-object editing comes with phase 2.
@@ -8,10 +10,10 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { WorkspaceDocument, WorkspaceObject, WorkspacePlate, WorkspaceSetting } from './api';
 import type { Draft } from './draft';
-import { type OrcaLayout, orcaIcon, orcaText } from './orcaLayout';
+import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './orcaLayout';
 import { SettingControl } from './SettingControl';
 import { SettingsPanel } from './SettingsPanel';
-import { type Selection, ownSettings, plateOwn } from './objects';
+import { type Selection, instancesOf, ownSettings, plateOwn } from './objects';
 import type { ObjectStats } from './viewTools';
 import '../i18n';
 
@@ -38,6 +40,15 @@ function Cog({ title }: { title: string }) {
   return <img src={orcaIcon('cog')} alt={title} title={title} className="w-3.5 h-3.5 flex-shrink-0 opacity-90" />;
 }
 
+/** A column's icon (or its empty cell, keeping the columns in line). */
+function Cell({ icon, title }: { icon?: string | false; title?: string }) {
+  return icon ? (
+    <img src={orcaIcon(icon)} alt={title} title={title} className="w-4 h-4 flex-shrink-0" />
+  ) : (
+    <span className="w-4 flex-shrink-0" aria-hidden />
+  );
+}
+
 interface Props {
   layout: OrcaLayout;
   doc: WorkspaceDocument;
@@ -47,9 +58,14 @@ interface Props {
   selection: Selection;
   onSelect: (selection: Selection) => void;
   onMenu: (at: { x: number; y: number }, selection: Exclude<Selection, null>) => void;
+  /** right click on the list's empty space */
+  onEmptyMenu?: (at: { x: number; y: number }) => void;
+  /** the objects selected together (Ctrl / Shift click, or in 3D) */
+  selectedIds?: string[];
+  onToggle?: (objectId: string) => void;
 }
 
-export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, onSelect, onMenu }: Props) {
+export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, onSelect, onMenu, onEmptyMenu, selectedIds = [], onToggle }: Props) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);
   const [query, setQuery] = useState('');
@@ -59,6 +75,19 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
   const q = query.trim().toLowerCase();
   const hit = (text: string | null | undefined) => !q || (text ?? '').toLowerCase().includes(q);
   const ownCount = t('farm.workspace.ownSettingsTitle');
+  const instances = useMemo(() => instancesOf(doc.plates), [doc.plates]);
+  // OrcaSlicer shows a column only when some object needs it (GUI_ObjectList.cpp, update_..._column_visible)
+  const all = [...stats.values()];
+  const cols = {
+    height: all.some((s) => s.variableLayers),
+    support: all.some((s) => s.paint.supports),
+    color: all.some((s) => s.paint.color),
+    sinking: all.some((s) => s.sinking),
+  };
+  const meshTip = (open: number) =>
+    `${tr('Remaining errors')}:\n\t${orcaPlural(layout, '%1$d non-manifold edge', '%1$d non-manifold edges', open, i18n.language)}\n\n${tr(
+      'Click the icon to repair model object',
+    )}`;
 
   // plates -> their objects (once per plate, however many instances); a project without plates: one list
   const groups: { plate: WorkspacePlate | null; objects: WorkspaceObject[] }[] = doc.plates.length
@@ -81,8 +110,9 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
     onSelect(sel);
     onMenu({ x: e.clientX, y: e.clientY }, sel);
   };
+  // rows 2em high, as OrcaSlicer's (its badges always readable)
   const row = (selected: boolean) =>
-    `group flex items-center gap-1.5 h-[22px] pr-2 text-[12px] cursor-pointer select-none ${
+    `group flex items-center gap-1.5 h-6 pr-2 text-[12px] cursor-pointer select-none ${
       selected ? 'bg-bambu-green/25 text-white' : 'text-bambu-gray-light hover:bg-bambu-dark-tertiary/60'
     }`;
   const caret = (key: string, has: boolean) =>
@@ -120,7 +150,16 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
           />
         </label>
       </div>
-      <ul role="tree" aria-label={tr('Objects')} className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1">
+      <ul
+        role="tree"
+        aria-label={tr('Objects')}
+        className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1"
+        onContextMenu={(e) => {
+          if (e.target !== e.currentTarget || !onEmptyMenu) return; // a row has its own menu
+          e.preventDefault();
+          onEmptyMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
         {groups.map(({ plate, objects }) => {
           const plateKey = `p${plate?.index ?? 0}`;
           const plateName = plate ? `${tr('Plate')} ${plate.index}${plate.name ? ` · ${plate.name}` : ''}` : tr('Objects');
@@ -146,25 +185,55 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                     const objKey = `${plateKey}-o${id}`;
                     const own = Object.keys(ownSettings(obj)).length > 0;
                     const showParts = obj.parts.length > 1 || obj.parts.some((p) => p.type && p.type !== 'normal_part') || obj.overrides.some((o) => o.part && o.part !== obj.name);
+                    const placed = instances.get(id) ?? [];
+                    const showInstances = placed.length > 1;
+                    const s = stats.get(id);
                     const n = Number(obj.extruder);
-                    const objSelected = selected?.kind === 'object' && selected.id === id && !selected.part;
+                    // an instance picked in the list lights its own row (one picked in 3D, the object's when it has one instance)
+                    const objSelected =
+                      (selected?.kind === 'object' && selected.id === id && !selected.part && (selected.instance == null || !showInstances)) ||
+                      selectedIds.includes(id);
                     const sel = { kind: 'object' as const, id, plate: plate?.index ?? null };
                     return (
-                      <li key={objKey} role="treeitem" aria-expanded={showParts ? open(objKey) : undefined} aria-selected={objSelected} aria-level={2}>
-                        <div className={`${row(objSelected)} pl-4`} onClick={() => onSelect(sel)} onContextMenu={(e) => menu(e, sel)}>
-                          {caret(objKey, showParts)}
+                      <li
+                        key={objKey}
+                        role="treeitem"
+                        aria-expanded={showParts || showInstances ? open(objKey) : undefined}
+                        aria-selected={objSelected}
+                        aria-level={2}
+                      >
+                        <div
+                          className={`${row(objSelected)} pl-4`}
+                          onClick={(e) => {
+                            if ((e.ctrlKey || e.metaKey || e.shiftKey) && onToggle) onToggle(id);
+                            onSelect(sel);
+                          }}
+                          onContextMenu={(e) => menu(e, sel)}
+                        >
+                          {caret(objKey, showParts || showInstances)}
+                          {s && s.openEdges > 0 && (
+                            <img src={orcaIcon('obj_warning')} alt={tr('Errors')} title={meshTip(s.openEdges)} className="w-4 h-4 flex-shrink-0" />
+                          )}
                           <span className="flex-1 truncate">{obj.name ?? `#${id}`}</span>
-                          {own && <Cog title={ownCount} />}
+                          {cols.height && <Cell icon={s?.variableLayers && 'obj_variable_layer_height'} title={tr('Variable layer height')} />}
                           <input
                             type="checkbox"
                             readOnly
                             disabled
-                            checked={stats.get(id)?.printable ?? true}
+                            checked={s?.printable ?? true}
                             aria-label={tr('Printable')}
                             title={tr('Printable')}
                             className="w-3.5 h-3.5 accent-bambu-green"
                           />
-                          {Number.isFinite(n) && n > 0 && <Chip colour={colours[n - 1]} n={n} />}
+                          {Number.isFinite(n) && n > 0 ? <Chip colour={colours[n - 1]} n={n} /> : <span className="w-4" aria-hidden />}
+                          {cols.support && (
+                            <Cell icon={s?.paint.supports && 'objlist_support_painting'} title={tr('Click the icon to edit support painting of the object')} />
+                          )}
+                          {cols.color && (
+                            <Cell icon={s?.paint.color && 'objlist_color_painting'} title={tr('Click the icon to edit color painting for the object')} />
+                          )}
+                          {cols.sinking && <Cell icon={s?.sinking && 'objlist_sinking'} title={tr('Click the icon to shift this object to the bed')} />}
+                          {own ? <Cog title={ownCount} /> : <span className="w-3.5" aria-hidden />}
                         </div>
                         {showParts && open(objKey) && (
                           <ul role="group">
@@ -173,10 +242,10 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                               .map((p) => {
                                 const partSelected = selected?.kind === 'object' && selected.id === id && selected.part === p.name;
                                 const partOwn = obj.overrides.some((o) => o.part === p.name && p.name !== obj.name);
-                                const partSel = { ...sel, part: p.name };
+                                const partSel = { ...sel, part: p.name, partId: p.id };
                                 return (
                                   <li key={`${objKey}-${p.id ?? p.name}`} role="treeitem" aria-selected={partSelected} aria-level={3}>
-                                    <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, sel)}>
+                                    <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, partSel)}>
                                       <img src={orcaIcon(PART_ICONS[p.type ?? 'normal_part'] ?? 'menu_add_part')} alt="" className="w-3.5 h-3.5" aria-hidden />
                                       <span className="flex-1 truncate">{p.name ?? `#${p.id}`}</span>
                                       {partOwn && <Cog title={ownCount} />}
@@ -184,6 +253,41 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                                   </li>
                                 );
                               })}
+                          </ul>
+                        )}
+                        {showInstances && open(objKey) && (
+                          <ul role="group">
+                            <li role="treeitem" aria-expanded={open(`${objKey}-i`)} aria-level={3}>
+                              <div className={`${row(false)} pl-9`} onClick={() => toggle(`${objKey}-i`)}>
+                                {caret(`${objKey}-i`, true)}
+                                <span className="flex-1 truncate">{tr('Instances')}</span>
+                              </div>
+                              {open(`${objKey}-i`) && (
+                                <ul role="group">
+                                  {placed.map((inst) => {
+                                    const instSel = { kind: 'object' as const, id, plate: inst.plate, instance: inst.index };
+                                    const instSelected = selected?.kind === 'object' && selected.id === id && selected.instance === inst.index && !selected.part;
+                                    // OrcaSlicer writes the plate's index from 0 (find_instance_belongs): no mark on the first
+                                    const plate0 = inst.plate - 1;
+                                    const label =
+                                      plate0 > 0
+                                        ? orcaFormat(layout, '[P%d]Instance %d', i18n.language, plate0, inst.index + 1)
+                                        : orcaFormat(layout, 'Instance %d', i18n.language, inst.index + 1);
+                                    return (
+                                      <li key={`${inst.plate}-${inst.index}`} role="treeitem" aria-selected={instSelected} aria-level={4}>
+                                        <div
+                                          className={`${row(instSelected)} pl-14`}
+                                          onClick={() => onSelect(instSel)}
+                                          onContextMenu={(e) => menu(e, instSel)}
+                                        >
+                                          <span className="flex-1 truncate">{label}</span>
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              )}
+                            </li>
                           </ul>
                         )}
                       </li>

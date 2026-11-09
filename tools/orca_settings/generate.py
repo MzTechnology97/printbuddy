@@ -16,6 +16,8 @@ one release tag this reads:
   every enum value that has one (as OrcaSlicer's Field.cpp shows them in its lists), copied unchanged.
 
 ``UI_STRINGS`` (the 3D view's toolbars and menus) only add their Italian strings to the layout.
+``src/slic3r/GUI/Shortcuts.cpp``, ``KeyChord.cpp`` and ``KBShortcutsDialog.cpp`` give the "Keyboard
+Shortcuts" dialog: its pages, sections and rows with their default keys (``shortcuts`` in the layout).
 
 It writes ``frontend/src/farm/workspace/orca-assets/`` (``settings-layout.json`` and ``icons/``).
 The layout only drives tabs, groups, order, labels and mode: which settings can change and how a value
@@ -157,6 +159,13 @@ ICONS = [
     "menu_add_modifier",
     "menu_support_blocker",
     "menu_support_enforcer",
+    # objects tree columns (ObjectDataViewModel.cpp), mesh warning, the shortcuts dialog's note
+    "obj_warning",
+    "obj_variable_layer_height",
+    "objlist_support_painting",
+    "objlist_color_painting",
+    "objlist_sinking",
+    "help",
 ]
 # Strings of the 3D view's toolbars, canvas buttons, plate buttons and right-click menus (GLCanvas3D.cpp,
 # GLGizmosManager.cpp, PartPlate.cpp, GUI_Factories.cpp, Plater.cpp, MainFrame.cpp), for their Italian
@@ -254,6 +263,62 @@ UI_STRINGS = [
     "Select",
     "Global",
     "Close",
+    # canvas menu, section view, more right-click menus, object info (batch B)
+    "3D Navigator",
+    "Zoom button",
+    "Overhangs",
+    "Outline",
+    "Wireframe",
+    "X-Ray",
+    "Realistic View",
+    "Perspective",
+    "Focus mode",
+    "Labels",
+    "Center of mass",
+    "Set viewing angle",
+    "Reset",
+    "Toggle section view",
+    "Change Type",
+    "Change Filament",
+    "Set Filament for selected items",
+    "Fix Model",
+    "Precise Seam Type",
+    "Show Labels",
+    "Deselect All",
+    "Errors",
+    # objects tree: instances, columns, mesh errors (ObjectDataViewModel.cpp, GUI_ObjectList.cpp, GUI_Factories.cpp)
+    "Instance %d",
+    "[P%d]Instance %d",
+    "Set as An Individual Object",
+    "Set as Individual Objects",
+    "Remaining errors",
+    "%1$d non-manifold edge",
+    "%1$d non-manifold edges",
+    "Error: %1$d non-manifold edge.",
+    "Error: %1$d non-manifold edges.",
+    "Click the icon to repair model object",
+    "Click the icon to reset all settings of the object",
+    "Click the icon to toggle printable properties of the object",
+    "Click the icon to edit support painting of the object",
+    "Click the icon to edit color painting for the object",
+    "Click the icon to shift this object to the bed",
+    "Color Painting",
+    # the object info box (Plater.cpp), with their placeholders and line ends as OrcaSlicer writes them
+    "Number of currently selected parts: %1%\n",
+    "Number of currently selected objects: %1%\n",
+    "Part name: %1%\n",
+    "Object name: %1%\n",
+    "Size: %1% x %2% x %3% mm\n",
+    "Volume: %1% mm³\n",
+    "Triangles: %1%\n",
+    "Tips:",
+    'Use "Fix Model" to repair the mesh.',
+    # section view panel (GLCanvas3D.cpp) and the shortcuts dialog
+    "Mouse wheel on icon",
+    "Right click on icon",
+    "Middle click on icon",
+    "Move section plane",
+    "Keyboard Shortcuts",
 ]
 # A plate's own settings: the key in model_settings.config -> the option it sets (bbs_3mf.cpp)
 PLATE_KEYS = {
@@ -504,19 +569,194 @@ def object_keys(hpp_src: str) -> list[str]:
     return sorted(set(keys))
 
 
+CTX = "\u0004"  # gettext's separator: a contextual msgid is keyed "context\u0004msgid"
+
+
 def _po(text: str) -> dict[str, str]:
-    """msgid -> msgstr of a .po file (fuzzy, contextual and empty translations left out)."""
+    """msgid -> msgstr of a .po file (fuzzy and empty translations left out); a contextual one under
+    ``context + CTX + msgid``; a plural one under its singular (msgstr[0]) and plural (msgstr[1]) msgid."""
     out: dict[str, str] = {}
+    lit = r"((?:" + _STR + r"\s*)+)"
     for entry in re.split(r"\n\s*\n", text):
-        if "#, fuzzy" in entry or "\nmsgctxt" in entry or entry.startswith("msgctxt"):
+        if "#, fuzzy" in entry:
             continue
-        mid = re.search(r"^msgid\s+((?:" + _STR + r"\s*)+)", entry, re.M)
-        mstr = re.search(r"^msgstr\s+((?:" + _STR + r"\s*)+)", entry, re.M)
+        ctx = re.search(r"^msgctxt\s+" + lit, entry, re.M)
+        prefix = _unescape(ctx.group(1)) + CTX if ctx else ""
+        mid = re.search(r"^msgid\s+" + lit, entry, re.M)
+        plural = re.search(r"^msgid_plural\s+" + lit, entry, re.M)
+        if mid and plural:
+            for key, n in ((mid, 0), (plural, 1)):
+                mstr = re.search(rf"^msgstr\[{n}\]\s+" + lit, entry, re.M)
+                if mstr and _unescape(key.group(1)) and _unescape(mstr.group(1)):
+                    out[prefix + _unescape(key.group(1))] = _unescape(mstr.group(1))
+            continue
+        mstr = re.search(r"^msgstr\s+" + lit, entry, re.M)
         if mid and mstr:
             key, value = _unescape(mid.group(1)), _unescape(mstr.group(1))
             if key and value:
-                out[key] = value
+                out[prefix + key] = value
     return out
+
+
+def _call_args(src: str, start: int) -> tuple[str, int]:
+    """The text between the ``(`` at ``start`` and its matching ``)`` (string literals skipped), and the end."""
+    depth, i, quote = 0, start, False
+    while i < len(src):
+        ch = src[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                quote = False
+        elif ch == '"':
+            quote = True
+        elif ch in "({":
+            depth += 1
+        elif ch in ")}":
+            depth -= 1
+            if depth == 0:
+                return src[start + 1 : i], i
+        i += 1
+    raise SystemExit("unbalanced call")
+
+
+def _split_top(args: str) -> list[str]:
+    """``args`` split at its top-level commas."""
+    parts, depth, quote, cur = [], 0, False, ""
+    for i, ch in enumerate(args):
+        if quote:
+            quote = not (ch == '"' and args[i - 1] != "\\")
+        elif ch == '"':
+            quote = True
+        elif ch in "({":
+            depth += 1
+        elif ch in ")}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    return [p for p in parts + [cur.strip()] if p]
+
+
+KEY_CTX = "Keyboard Shortcut"
+# AppConfig.cpp's defaults: left drag rotates (2), middle and right pan (1); KBShortcutsDialog's mouse_action
+MOUSE_DEFAULTS = {
+    "left_mouse_drag_action": "Rotate View",
+    "middle_mouse_drag_action": "Pan View",
+    "right_mouse_drag_action": "Pan View",
+}
+
+
+def shortcuts(table_src: str, hpp_src: str, chord_src: str, dialog_src: str) -> tuple[list[dict], set[str]]:
+    """OrcaSlicer's "Keyboard Shortcuts" dialog (non-Apple keys): its pages, each with its caption and rows
+    (section, key parts, description, the Shortcut id of a table row), and the strings to translate. A key
+    part translated with the "Keyboard Shortcut" context is written ``KEY_CTX + CTX + part``."""
+    table_src = re.sub(r"#ifdef SLIC3R_CAD.*?#endif", "", _strip_comments(table_src), flags=re.S)
+    # #ifdef __APPLE__ ... #else ...: the later (non-Apple) definition wins
+    chords = {m.group(1): m.group(2) for m in re.finditer(r"constexpr KeyChord (\w+)\{([^}]*)\}", table_src)}
+    contexts: dict[str, set[str]] = {}
+    for m in re.finditer(r"constexpr uint8_t (\w+)\s*=\s*([^;]+);", table_src):
+        bits = re.findall(r"ShortcutContext::(\w+)|\b([A-Z_]+)\b", m.group(2))
+        contexts[m.group(1)] = {b for c, name in bits for b in ({c} if c else contexts.get(name, set()))}
+    mods = {"CTRL": ["Ctrl"], "SHIFT": ["Shift"], "CTRL_SHIFT": ["Ctrl", "Shift"], "wxMOD_RAW_CONTROL": ["Ctrl"]}
+    names = {}
+    for m in re.finditer(
+        r'\{\s*(WXK_\w+),\s*(?:L_CONTEXT\("([^"]+)"[^)]*\)|"([^"]+)"),\s*(?:"[^"]*"|nullptr),\s*'
+        r'(?:nullptr|L_CONTEXT\("([^"]+)"[^)]*\))\s*\}',
+        _strip_comments(chord_src),
+    ):
+        names[m.group(1)] = m.group(4) or m.group(2) or m.group(3)
+    strings: set[str] = set()
+
+    def chord(text: str) -> list[str]:
+        text = chords.get(text.strip(), text).strip().strip("{}").strip()
+        if not text:
+            return []  # no default key
+        key, *modifiers = [p.strip() for p in text.split(",")]
+        parts = [n for mod in modifiers for part in mod.split("|") for n in mods.get(part.strip(), [])]
+        if key.startswith("'"):
+            return parts + [key[1:-1]]
+        label = names.get(key) or (f"F{key[5:]}" if key.startswith("WXK_F") else key)
+        strings.add(KEY_CTX + CTX + label)
+        return parts + [KEY_CTX + CTX + label]
+
+    rows = []
+    for m in re.finditer(
+        r"\b(?:SHORTCUT|REPEATING|STEPPING)\(\s*(\w+),\s*\"\w+\",\s*L\(("
+        + _STR
+        + r")\),\s*([\w| ]+?),\s*(\{[^}]*\}|\w+)\s*\)",
+        table_src,
+    ):
+        ctx = {c for name in m.group(3).split("|") for c in contexts.get(name.strip(), set())}
+        rows.append({"id": m.group(1), "label": _unescape(m.group(2)), "contexts": ctx, "keys": chord(m.group(4))})
+    enum = re.search(r"enum class ShortcutSection[^{]*\{([^}]*)\}", hpp_src).group(1)
+    section_ids = [s.strip() for s in enum.split(",") if s.strip() and s.strip() != "Count"]
+    firsts = [
+        (m.group(1), _unescape(m.group(2)))
+        for m in re.finditer(r"\{\s*Shortcut::(\w+),\s*L\((" + _STR + r")\)\s*\}", table_src)
+    ]
+    order = [r["id"] for r in rows]
+    starts = [order.index(first) for first, _ in firsts]  # section_table: one per ShortcutSection, in order
+    for i, r in enumerate(rows):
+        r["section"] = max(n for n, st in enumerate(starts) if st <= i)
+    section_names = [name for _, name in firsts]
+
+    body = _function_body(_strip_comments(dialog_src), "KBShortcutsDialog::fill_pages")
+    # its only #ifndef __APPLE__ keeps a row for the other systems: drop the directive lines, keep the row
+    body = re.sub(r"^\s*#.*$", "", body, flags=re.M)
+    variables: dict[str, list[str]] = {}
+
+    def value(expr: str) -> list[str]:
+        expr = expr.strip()
+        if "+" in expr and not expr.startswith('"'):
+            return ["".join(p for e in expr.split("+") for p in value(e))]
+        if m := re.fullmatch(r"(?:from_u8\()?KeyChord::modifier_name\(wxMOD_(\w+)\)\)?", expr):
+            return [{"CONTROL": "Ctrl", "ALT": "Alt", "SHIFT": "Shift"}[m.group(1)]]
+        if m := re.fullmatch(r"key\(L_CONTEXT\((" + _STR + r")[^)]*\)\)", expr):
+            strings.add(KEY_CTX + CTX + _unescape(m.group(1)))
+            return [KEY_CTX + CTX + _unescape(m.group(1))]
+        if m := re.fullmatch(r"_?L\((" + _STR + r")\)", expr):
+            strings.add(_unescape(m.group(1)))
+            return [_unescape(m.group(1))]
+        if expr.startswith('"'):
+            return [_unescape(expr)]
+        return variables[expr]
+
+    for m in re.finditer(r"const wxString\s+(\w+)\s*=\s*([^;]+);", body):
+        variables[m.group(1)] = value(m.group(2))
+    pages = []
+    for m in re.finditer(r"\bpage\(_L\(", body):
+        args, _ = _call_args(body, m.end() - 4)
+        title, caption, context, fixed = _split_top(args)
+        out = [dict(r) for r in rows if context.split("::")[1] in r["contexts"]]
+        for call in _split_top(fixed.strip()[1:-1]):
+            kind, inner = call.split("(", 1)
+            parts = _split_top(inner.rsplit(")", 1)[0])
+            section = section_ids.index(parts[0].split("::")[1])
+            if kind.strip() == "fixed":
+                keys = [p for k in _split_top(parts[1].strip()[1:-1]) for p in value(k)]
+                label = _unescape(re.search(r"L\((" + _STR + r")\)", parts[2]).group(1))
+            else:  # mouse(section, button, preference)
+                keys = value(parts[1])
+                label = MOUSE_DEFAULTS[_unescape(parts[2])]
+            out.append({"id": None, "label": label, "keys": keys, "section": section})
+        out.sort(key=lambda r: r["section"])  # stable: table rows first, as the dialog's stable_sort
+        pages.append(
+            {
+                "title": value(title)[0],
+                "caption": value(caption)[0],
+                "context": context.split("::")[1],
+                "rows": [
+                    {"id": r["id"], "section": section_names[r["section"]], "keys": r["keys"], "label": r["label"]}
+                    for r in out
+                ],
+            }
+        )
+        strings |= {pages[-1]["title"], pages[-1]["caption"]} | {r["label"] for r in out}
+    strings |= set(section_names) | {"Shift+"}
+    return pages, strings
 
 
 def _git(src: Path, *args: str) -> str | None:
@@ -606,11 +846,24 @@ def main() -> None:
                 e["icon"] = f"param_{e['value']}"
                 enum_icons.add(e["icon"])
     po = _po((src / conf["po"]).read_text(encoding="utf-8"))
-    wanted = {p["title"] for s in pages.values() for p in s} | set(UI_STRINGS)
+    gui = src / "src" / "slic3r" / "GUI"
+    keyboard, keyboard_strings = (
+        shortcuts(
+            *(
+                (gui / f).read_text(encoding="utf-8")
+                for f in ("Shortcuts.cpp", "Shortcuts.hpp", "KeyChord.cpp", "KBShortcutsDialog.cpp")
+            )
+        )
+        if (gui / "KBShortcutsDialog.cpp").is_file() and (gui / "KeyChord.cpp").is_file()
+        else ([], set())
+    )
+    wanted = {p["title"] for s in pages.values() for p in s} | set(UI_STRINGS) | keyboard_strings
     wanted |= {g["title"] for s in pages.values() for p in s for g in p["groups"]}
     for o in opts.values():
         wanted |= {o["label"], o.get("tooltip", ""), o.get("unit", "")} | {e["label"] for e in o.get("enum", [])}
     italian = {s: po[s] for s in sorted(wanted) if s in po}
+    if "Shift+" in po:  # the modifier's own name, as KeyChord::modifier_name strips the catalogue's "Shift+"
+        italian[KEY_CTX + CTX + "Shift"] = po["Shift+"].rstrip("+ ")
 
     OUT.mkdir(parents=True, exist_ok=True)
     source = {
@@ -628,6 +881,7 @@ def main() -> None:
         "sections": {k: v for k, v in sorted(sections.items()) if k in opts},
         "object_keys": per_object,
         "plate_keys": PLATE_KEYS,
+        "shortcuts": keyboard,
         "it": italian,
     }
     text = json.dumps(data, ensure_ascii=False, indent=1) + "\n"

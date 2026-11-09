@@ -21,7 +21,9 @@ export interface ViewerScene {
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   renderer: THREE.WebGLRenderer;
-  /** One child group per build item (object instance), ``userData`` {objectId, printable}. */
+  /** One child group per build item (object instance), ``userData`` {objectId, printable, instance (its number
+   * among the object's build items, from 0), plateId, paint {supports, color}, variableLayers}; in it one group per
+   * part, ``userData.partId`` (the part's id in model_settings.config). */
   model: THREE.Group;
   grid: THREE.GridHelper | null;
   bed: BuildVolume;
@@ -43,6 +45,10 @@ interface MeshData {
   vertices: number[];
   triangles: number[];
   extruder: number; // Per-mesh extruder index for coloring
+  /** fork (printfarm): the component's object id = the part's id in model_settings.config */
+  partId?: string;
+  /** fork (printfarm): triangles with painted supports / colours (the slicers' paint_supports, paint_color) */
+  paint?: { supports: boolean; color: boolean };
 }
 
 interface ObjectData {
@@ -58,6 +64,7 @@ interface BuildItem {
   extruder?: number; // Can override object's extruder
   plateId?: number | null;
   printable?: boolean; // fork (printfarm): the build item's printable flag
+  instance?: number; // fork (printfarm): its place among the object's build items (bbs_3mf writes them in instance order)
 }
 
 interface Parsed3MFData {
@@ -65,6 +72,8 @@ interface Parsed3MFData {
   buildItems: BuildItem[];
   plateBounds: Map<number, { minX: number; minY: number; maxX: number; maxY: number }>;
   plateOffsets: Map<number, { offsetX: number; offsetY: number }>;
+  /** fork (printfarm): objects with a variable layer height profile (Metadata/layer_heights_profile.txt) */
+  variableLayers?: Set<string>;
 }
 
 // Yield to the browser event loop so the main thread can repaint, process
@@ -134,6 +143,7 @@ async function parseMeshFromDoc(doc: Document, defaultExtruder: number = 0): Pro
     }
 
     const triangleElements = meshEl.getElementsByTagName('triangle');
+    const paint = { supports: false, color: false };
     for (let k = 0; k < triangleElements.length; k++) {
       const t = triangleElements[k];
       triangles.push(
@@ -141,13 +151,16 @@ async function parseMeshFromDoc(doc: Document, defaultExtruder: number = 0): Pro
         parseInt(t.getAttribute('v2') || '0'),
         parseInt(t.getAttribute('v3') || '0')
       );
+      // fork (printfarm): the object list's paint columns (bbs_3mf.cpp writes these per painted triangle)
+      if (!paint.supports && t.hasAttribute('paint_supports')) paint.supports = true;
+      if (!paint.color && (t.hasAttribute('paint_color') || t.hasAttribute('slic3rpe:mmu_segmentation'))) paint.color = true;
       if (k > 0 && k % YIELD_EVERY_N_TRIANGLES === 0) {
         await nextTick();
       }
     }
 
     if (vertices.length > 0 && triangles.length > 0) {
-      meshes.push({ vertices, triangles, extruder: defaultExtruder });
+      meshes.push({ vertices, triangles, extruder: defaultExtruder, paint });
     }
   }
   return meshes;
@@ -171,7 +184,8 @@ function parsePlateIdFromAttributes(element: Element): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
+// eslint-disable-next-line react-refresh/only-export-components -- fork (printfarm): exported for tests
+export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(arrayBuffer);
@@ -200,6 +214,7 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
   const partExtruderMap = new Map<string, number>(); // Key: "objectId:partId"
   const objectNameById = new Map<string, string>();
   const plateAssignmentsByObjectId = new Map<string, number>();
+  const plateAssignmentsByInstance = new Map<string, number>(); // fork (printfarm): "objectId:instanceId"
   const modelSettingsFile = zip.files['Metadata/model_settings.config'];
   if (modelSettingsFile) {
     try {
@@ -292,15 +307,22 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
         for (let j = 0; j < modelInstances.length; j++) {
           const instanceEl = modelInstances[j];
           const instanceMetadata = instanceEl.getElementsByTagName('metadata');
+          let instanceObject: string | null = null;
+          let instanceId: string | null = null;
           for (let k = 0; k < instanceMetadata.length; k++) {
             const metaEl = instanceMetadata[k];
             if (metaEl.getAttribute('key') === 'object_id') {
               const value = metaEl.getAttribute('value');
               if (value) {
+                instanceObject = value;
                 plateAssignmentsByObjectId.set(value, plateId);
               }
+            } else if (metaEl.getAttribute('key') === 'instance_id') {
+              instanceId = metaEl.getAttribute('value');
             }
           }
+          // fork (printfarm): an object's instances can sit on different plates
+          if (instanceObject && instanceId) plateAssignmentsByInstance.set(`${instanceObject}:${instanceId}`, plateId);
         }
       }
     } catch {
@@ -363,6 +385,7 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
 
   // Parse objects - Bambu Studio uses components to reference external files
   const objectElements = mainDoc.getElementsByTagName('object');
+  const objectOrder: string[] = []; // fork (printfarm): the model's objects in order (layer_heights_profile numbers them)
   for (let i = 0; i < objectElements.length; i++) {
     // Yield once per top-level object so the modal stays interactive
     // throughout the parse (#1412). Inner vertex/triangle/component
@@ -373,6 +396,7 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
     const objEl = objectElements[i];
     const objectId = objEl.getAttribute('id');
     if (!objectId) continue;
+    objectOrder.push(objectId);
 
     const objectPlateId = parsePlateIdFromAttributes(objEl) ?? plateAssignmentsByObjectId.get(objectId) ?? null;
 
@@ -460,9 +484,9 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
                 v.applyMatrix4(compTransform);
                 transformedVertices.push(v.x, v.y, v.z);
               }
-              meshes.push({ vertices: transformedVertices, triangles: mesh.triangles, extruder: mesh.extruder });
+              meshes.push({ vertices: transformedVertices, triangles: mesh.triangles, extruder: mesh.extruder, paint: mesh.paint, partId: compObjectId ?? undefined });
             } else {
-              meshes.push(mesh);
+              meshes.push({ ...mesh, partId: compObjectId ?? undefined });
             }
           }
         }
@@ -471,6 +495,18 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
 
     if (meshes.length > 0) {
       objects.set(objectId, { id: objectId, meshes, defaultExtruder, plateId: objectPlateId });
+    }
+  }
+
+  // fork (printfarm): bbs_3mf.cpp writes "object_id=<n>|h;h;..." per object (n: 1, 2... in the model's order);
+  // the object list marks a profile of more than 4 values (GUI_ObjectList.cpp)
+  const variableLayers = new Set<string>();
+  const profileFile = zip.files['Metadata/layer_heights_profile.txt'];
+  if (profileFile) {
+    for (const line of (await profileFile.async('string')).split('\n')) {
+      const m = line.match(/^object_id=(\d+)\|(.*)$/);
+      const id = m ? objectOrder[Number(m[1]) - 1] : undefined;
+      if (m && id && m[2].split(';').filter((v) => v.trim()).length > 4) variableLayers.add(id);
     }
   }
 
@@ -484,7 +520,8 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
       if (!objectId) continue;
 
       const transform = parseTransform(itemEl.getAttribute('transform'));
-      const itemPlateId = parsePlateIdFromAttributes(itemEl);
+      const instance = buildItems.filter((b) => b.objectId === objectId).length;
+      const itemPlateId = parsePlateIdFromAttributes(itemEl) ?? plateAssignmentsByInstance.get(`${objectId}:${instance}`) ?? null;
       const objectPlateId = objects.get(objectId)?.plateId ?? null;
       const objectName = objectNameById.get(objectId);
       const namePlateId = objectName ? plateAssignmentsByName.get(objectName) ?? null : null;
@@ -493,11 +530,12 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
         transform,
         plateId: itemPlateId ?? objectPlateId ?? namePlateId ?? null,
         printable: itemEl.getAttribute('printable') !== '0',
+        instance,
       });
     }
   }
 
-  return { objects, buildItems, plateBounds, plateOffsets };
+  return { objects, buildItems, plateBounds, plateOffsets, variableLayers };
 }
 
 function createGeometryFromMesh(mesh: MeshData): THREE.BufferGeometry {
@@ -536,7 +574,8 @@ function disposeGroup(group: THREE.Group) {
   });
 }
 
-function buildModelGroup(
+// eslint-disable-next-line react-refresh/only-export-components -- fork (printfarm): exported for tests
+export function buildModelGroup(
   parsedData: Parsed3MFData,
   selectedPlateId: number | null,
   filamentColors?: string[],
@@ -569,12 +608,14 @@ function buildModelGroup(
     : buildItems.filter((item) => item.plateId === selectedPlateId);
   const activeBuildItems = plateFilteredItems.length > 0 ? plateFilteredItems : buildItems;
 
+  const byPart = new Map<string, Map<number, THREE.BufferGeometry[]>>();
+
   // If we have build items, use them for positioning
   if (activeBuildItems.length > 0) {
     for (const item of activeBuildItems) {
       const objectData = objects.get(item.objectId);
       if (!objectData) continue;
-      if (perItem) geometriesByExtruder.clear();
+      if (perItem) byPart.clear();
 
       for (const meshData of objectData.meshes) {
         // Use mesh's extruder, or item override, or object default
@@ -598,15 +639,33 @@ function buildModelGroup(
           extruder: extruder,
         });
 
-        if (!geometriesByExtruder.has(extruder)) {
-          geometriesByExtruder.set(extruder, []);
+        const target = perItem ? byPart : null;
+        if (target && !target.has(meshData.partId ?? '')) target.set(meshData.partId ?? '', new Map());
+        const perExtruder = target ? target.get(meshData.partId ?? '')! : geometriesByExtruder;
+        if (!perExtruder.has(extruder)) {
+          perExtruder.set(extruder, []);
         }
-        geometriesByExtruder.get(extruder)!.push(geometry);
+        perExtruder.get(extruder)!.push(geometry);
       }
       if (perItem) {
         const itemGroup = new THREE.Group();
-        itemGroup.userData = { objectId: item.objectId, printable: item.printable !== false };
-        addMergedMeshes(itemGroup, geometriesByExtruder, getMaterial);
+        itemGroup.userData = {
+          objectId: item.objectId,
+          printable: item.printable !== false,
+          instance: item.instance ?? 0,
+          plateId: item.plateId ?? null,
+          paint: {
+            supports: objectData.meshes.some((m) => m.paint?.supports),
+            color: objectData.meshes.some((m) => m.paint?.color),
+          },
+          variableLayers: !!parsedData.variableLayers?.has(item.objectId),
+        };
+        for (const [partId, perExtruder] of byPart) {
+          const partGroup = new THREE.Group();
+          partGroup.userData = { partId: partId || null };
+          addMergedMeshes(partGroup, perExtruder, getMaterial);
+          itemGroup.add(partGroup);
+        }
         itemGroups.push(itemGroup);
       }
     }
@@ -871,8 +930,8 @@ export function ModelViewer({
     const box = new THREE.Box3().setFromObject(group);
     const center = box.getCenter(new THREE.Vector3());
 
-    // Always place models on the build plate (Y=0)
-    group.position.y = -box.min.y;
+    // Always place models on the build plate (Y=0); fork (printfarm): the workspace keeps the slicer's own heights
+    group.position.y = perItem ? 0 : -box.min.y;
 
     const selectedPlateBounds = (!isStlModel && selectedPlateId != null && parsedData!.buildItems.length > 0)
       ? parsedData!.plateBounds.get(selectedPlateId)
