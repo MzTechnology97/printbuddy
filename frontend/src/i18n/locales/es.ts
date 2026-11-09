@@ -2255,6 +2255,8 @@ export default {
     passwordOptional: 'Contraseña (opcional)',
     topicPrefix: 'Prefijo del tema',
     topicPrefixHint: 'Los temas serán: {{prefix}}/printers/<serial>/status, etc.',
+    mqttPrinterEvents: 'Eventos de impresora desconectada/conectada y poco filamento',
+    mqttPrinterEventsHint: 'Publica {{prefix}}/printers/<serial>/offline, /online, /filament/low. Desconectada tras un minuto, no cuando Printbuddy apagó la impresora.',
     // Prometheus
     prometheusMetrics: 'Métricas de Prometheus',
     prometheusEndpointDescription: 'Exponer las métricas de la impresora en <code>/api/v1/metrics</code> para la supervisión con Prometheus/Grafana.',

@@ -158,6 +158,7 @@ async def _build_settings_response(db: AsyncSession, is_api_key: bool = False) -
             "ftp_retry_enabled",
             "mqtt_enabled",
             "mqtt_use_tls",
+            "mqtt_printer_events",
             "panda_breath_enabled",
             "ha_enabled",
             "per_printer_mapping_expanded",
@@ -252,6 +253,7 @@ async def update_settings(
         "mqtt_password",
         "mqtt_topic_prefix",
         "mqtt_use_tls",
+        "mqtt_printer_events",
         "panda_breath_enabled",
         "panda_breath_topic_prefix",
         "panda_breath_printer_assignments",
@@ -285,6 +287,7 @@ async def update_settings(
                 "mqtt_password": await get_setting(db, "mqtt_password") or "",
                 "mqtt_topic_prefix": await get_setting(db, "mqtt_topic_prefix") or "printbuddy",
                 "mqtt_use_tls": (await get_setting(db, "mqtt_use_tls") or "false") == "true",
+                "mqtt_printer_events": (await get_setting(db, "mqtt_printer_events") or "false") == "true",
             }
             await mqtt_relay.configure(mqtt_settings)
             from backend.app.services.panda_breath_mqtt import panda_breath_mqtt

@@ -1240,6 +1240,8 @@ _nozzle_count_updated: set[int] = set()
 PRINTER_OFFLINE_GRACE_SECONDS = 60.0
 _printer_last_connected: dict[int, bool] = {}
 _printer_offline_tasks: dict[int, asyncio.Task] = {}
+# Printers whose MQTT relay offline event went out: their reconnect publishes online, so the two always pair up.
+_printer_offline_published: set[int] = set()
 
 
 async def _notify_printer_offline_after_grace(printer_id: int) -> None:
@@ -1257,6 +1259,9 @@ async def _notify_printer_offline_after_grace(printer_id: int) -> None:
             printer = await db.get(Printer, printer_id)
             if printer is None or not printer.is_active:
                 return
+            if mqtt_relay.printer_events_ready:  # recorded only when sent, so no online without an offline
+                _printer_offline_published.add(printer_id)
+                await mqtt_relay.on_printer_offline(printer_id, printer.name, printer.serial_number)
             logger.info(
                 "Printer %s (%s) offline for %.0fs: notifying", printer_id, printer.name, PRINTER_OFFLINE_GRACE_SECONDS
             )
@@ -1271,7 +1276,8 @@ async def _notify_printer_offline_after_grace(printer_id: int) -> None:
 
 
 def _track_printer_offline(printer_id: int, connected: bool) -> None:
-    """On the connected -> disconnected edge, the offline notification after the grace; a reconnect cancels it."""
+    """On the connected -> disconnected edge, the offline notification (and MQTT relay offline event) after the grace;
+    a reconnect cancels it, or publishes the relay's online event when the offline one went out."""
     was_connected = _printer_last_connected.get(printer_id)
     _printer_last_connected[printer_id] = connected
     if connected:
@@ -1281,6 +1287,12 @@ def _track_printer_offline(printer_id: int, connected: bool) -> None:
         if was_connected is False:  # back: a refused upload is tried again now, a power-off is over
             print_scheduler.clear_upload_backoff(printer_id)
             printer_manager.back_online(printer_id)
+        # Kept while the relay can't send it: the next status update after the broker is back sends it.
+        if printer_id in _printer_offline_published and mqtt_relay.printer_events_ready:
+            _printer_offline_published.discard(printer_id)
+            info = printer_manager.get_printer(printer_id)
+            if info is not None:
+                asyncio.create_task(mqtt_relay.on_printer_online(printer_id, info.name, info.serial_number))
     elif printer_manager.offline_expected(printer_id):
         return  # we powered it off (smart plug auto-off, or after a print): no alert
     elif was_connected and printer_id not in _printer_offline_tasks:
@@ -6190,6 +6202,7 @@ async def lifespan(app: FastAPI):
             "mqtt_password": await get_setting(db, "mqtt_password") or "",
             "mqtt_topic_prefix": await get_setting(db, "mqtt_topic_prefix") or "printbuddy",
             "mqtt_use_tls": (await get_setting(db, "mqtt_use_tls") or "false") == "true",
+            "mqtt_printer_events": (await get_setting(db, "mqtt_printer_events") or "false") == "true",
         }
         await mqtt_relay.configure(mqtt_settings)
         from backend.app.services.panda_breath_mqtt import panda_breath_mqtt
@@ -6310,6 +6323,9 @@ async def lifespan(app: FastAPI):
     # registered but on_print_start never fires)
     start_expected_prints_cleanup()
 
+    # MQTT relay filament/low events (no-op unless the relay's printer events are on)
+    filament_low_relay_task = asyncio.create_task(mqtt_relay.run_filament_low_checks())
+
     # L-2: Start periodic auth cleanup (stale TOTP + expired revoked JTIs)
     start_auth_cleanup()
 
@@ -6368,6 +6384,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.warning("Failed to shut down camera broadcasters: %s", e)
     stop_expected_prints_cleanup()
+    filament_low_relay_task.cancel()
     stop_auth_cleanup()
     printer_manager.disconnect_all()
     await close_spoolman_client()

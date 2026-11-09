@@ -2252,6 +2252,8 @@ export default {
     passwordOptional: 'パスワード（オプション）',
     topicPrefix: 'トピックプレフィックス',
     topicPrefixHint: 'トピック形式: {{prefix}}/printers/<serial>/status 等',
+    mqttPrinterEvents: 'プリンターのオフライン/オンラインとフィラメント残量低下のイベント',
+    mqttPrinterEventsHint: '{{prefix}}/printers/<serial>/offline, /online, /filament/low を送信します。オフラインは1分後。Printbuddy が電源を切った場合は送信しません。',
     // Prometheus
     prometheusMetrics: 'Prometheusメトリクス',
     prometheusEndpointDescription: 'Prometheus/Grafanaモニタリング用に<code>/api/v1/metrics</code>でプリンターメトリクスを公開。',

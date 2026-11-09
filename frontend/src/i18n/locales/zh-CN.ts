@@ -2242,6 +2242,8 @@ export default {
     passwordOptional: '密码（可选）',
     topicPrefix: '主题前缀',
     topicPrefixHint: '主题格式：{{prefix}}/printers/<serial>/status 等',
+    mqttPrinterEvents: '打印机离线/上线和耗材不足事件',
+    mqttPrinterEventsHint: '发布 {{prefix}}/printers/<serial>/offline, /online, /filament/low。离线一分钟后发送；Printbuddy 关闭打印机电源时不发送。',
     prometheusMetrics: 'Prometheus 指标',
     prometheusEndpointDescription: '在 <code>/api/v1/metrics</code> 公开打印机指标，用于Prometheus/Grafana监控。',
     bearerTokenOptional: 'Bearer令牌（可选）',
