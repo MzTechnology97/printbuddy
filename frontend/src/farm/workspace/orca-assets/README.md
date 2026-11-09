@@ -5,7 +5,9 @@ See `THIRD_PARTY_NOTICES.md` at the repository root.
 
 - `settings-layout.json`: generated, do not edit. Pages, option groups and order of the process, filament and
   printer settings (`Tab.cpp`), option labels, tooltips, units, ranges, enum labels and Simple / Advanced mode
-  (`PrintConfig.cpp`), and their Italian strings (`OrcaSlicer_it.po`). It drives the workspace's layout and labels
+  (`PrintConfig.cpp`), each enum value's `param_<value>` icon, the settings an object can have of its own
+  (`PrintConfig.hpp`), a plate's own settings, and the Italian strings of all of them and of the 3D view's toolbar
+  and menus (`OrcaSlicer_it.po`). It drives the workspace's layout and labels
   only; what can be edited and how values are checked is Printbuddy's (`backend/app/farm/workspace/settings.py`).
 - `icons/`: SVGs copied unchanged from `resources/images/` (icons only, no logos or brand marks).
 

@@ -1,6 +1,7 @@
 // Fork (printfarm): the workspace's dialogs: save as a copy (with the list of changes), and the printer or
-// filament settings of the project, edited apart from the process as in the slicer clients.
-import { useState } from 'react';
+// filament settings of the project, edited apart from the process as in the slicer clients (the filament window
+// edits one filament, as OrcaSlicer's). Esc closes them.
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Save, X } from 'lucide-react';
 import { Button } from '../../components/Button';
@@ -12,6 +13,12 @@ import '../i18n';
 
 function Dialog({ title, intro, onClose, children }: { title: string; intro?: string; onClose: () => void; children: React.ReactNode }) {
   const { t } = useTranslation();
+  useEffect(() => {
+    // a list open inside the dialog takes its own Esc first (it stops the event)
+    const close = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
       <div className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-lg bg-bambu-dark-secondary border border-bambu-dark-tertiary">
@@ -42,11 +49,11 @@ interface SaveProps {
 }
 
 export function SaveCopyDialog({ filename, draft, settings, invalid, saving, error, onSave, onClose }: SaveProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [name, setName] = useState('');
   const inherit = t('farm.workspace.inherit');
   return (
-    <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={onClose}>
+    <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={saving ? () => {} : onClose}>
       <ul className="p-4 space-y-1 overflow-y-auto text-sm">
         {Object.entries(draft).map(([key, value]) => {
           const s = settings.get(key)!;
@@ -54,7 +61,7 @@ export function SaveCopyDialog({ filename, draft, settings, invalid, saving, err
             <li key={key} className={invalid.includes(key) ? 'text-red-400' : ''}>
               <span className="text-white">{s.label}</span>{' '}
               <span className="text-bambu-gray">
-                {formatValue(s, s.value, inherit)} → {formatValue(s, value, inherit)}
+                {formatValue(s, s.value, inherit, i18n.language)} → {formatValue(s, value, inherit, i18n.language)}
               </span>
             </li>
           );
@@ -93,6 +100,8 @@ export function SaveCopyDialog({ filename, draft, settings, invalid, saving, err
 interface PresetProps {
   layout: OrcaLayout;
   kind: 'printer' | 'filament';
+  /** The filament the window edits (its element of every per-filament value). */
+  filament?: number;
   name: string | null;
   settings: WorkspaceSetting[];
   draft: Draft;
@@ -102,14 +111,14 @@ interface PresetProps {
   onClose: () => void;
 }
 
-export function PresetDialog({ layout, kind, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
+export function PresetDialog({ layout, kind, filament = 0, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
   const { t } = useTranslation();
-  const first = (key: string) => {
+  const at = (key: string, i: number) => {
     const v = settings.find((s) => s.key === key)?.value;
-    return (Array.isArray(v) ? v[0] : v) ?? null;
+    return (Array.isArray(v) ? (v[i] ?? v[0]) : v) ?? null;
   };
-  const preset = kind === 'filament' ? first('filament_settings_id') : (name ?? first('printer_settings_id'));
-  const colour = kind === 'filament' ? first('filament_colour') : null;
+  const preset = kind === 'filament' ? at('filament_settings_id', filament) : (name ?? at('printer_settings_id', 0));
+  const colour = kind === 'filament' ? at('filament_colour', filament) : null;
   // multi-extruder printers (Direct Drive / Bowden, SF / HF...): shown only when the project has variants
   const raw = settings.find((s) => s.key === `${kind}_extruder_variant`)?.value;
   const variants = [...new Set((Array.isArray(raw) ? raw : raw ? [raw] : []).filter(Boolean))];
@@ -128,10 +137,18 @@ export function PresetDialog({ layout, kind, name, settings, draft, editable, on
           editable={editable}
           onChange={onChange}
           onReset={onReset}
+          index={kind === 'filament' ? filament : undefined}
           header={
             <>
               <div className="flex items-center gap-2 rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary px-2 h-7 text-[13px] text-white">
-                {colour && <span className="w-3 h-3 rounded-sm border border-white/30" style={{ backgroundColor: colour }} />}
+                {kind === 'filament' && (
+                  <span
+                    className="inline-flex items-center justify-center w-5 h-5 rounded-sm border border-white/30 text-[11px] font-semibold text-black"
+                    style={{ backgroundColor: colour ?? '#777' }}
+                  >
+                    {filament + 1}
+                  </span>
+                )}
                 <span className="truncate">{preset ?? '—'}</span>
               </div>
               {variants.length > 1 && (

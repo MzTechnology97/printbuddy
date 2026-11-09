@@ -10,7 +10,12 @@ one release tag this reads:
 * ``src/libslic3r/PrintConfig.cpp``: per option its label, tooltip, unit (sidetext), min/max, enum
   values and labels, and mode (simple / advanced / develop; simple when an option sets none);
 * ``localization/i18n/it/OrcaSlicer_it.po``: the Italian strings of those labels and tooltips;
-* ``resources/images/*.svg``: the icons listed in ``ICONS`` (never logos), copied unchanged.
+* ``src/libslic3r/PrintConfig.hpp``: the keys of PrintObjectConfig and PrintRegionConfig, the settings an
+  object (or a part) can have of its own (OrcaSlicer's object settings show only these);
+* ``resources/images/*.svg``: the icons listed in ``ICONS`` (never logos) and the ``param_<value>`` icon of
+  every enum value that has one (as OrcaSlicer's Field.cpp shows them in its lists), copied unchanged.
+
+``UI_STRINGS`` (the 3D view's toolbars and menus) only add their Italian strings to the layout.
 
 It writes ``frontend/src/farm/workspace/orca-assets/`` (``settings-layout.json`` and ``icons/``).
 The layout only drives tabs, groups, order, labels and mode: which settings can change and how a value
@@ -73,7 +78,149 @@ ICONS = [
     "search",
     "edit",
     "plate_settings_dark",
+    # 3D view: main toolbar (GLCanvas3D::_init_main_toolbar), gizmos (GLGizmosManager), assembly view
+    "toolbar_open_dark",
+    "toolbar_add_plate_dark",
+    "toolbar_orient_dark",
+    "toolbar_arrange_dark",
+    "instance_add_dark",
+    "instance_remove_dark",
+    "split_objects_dark",
+    "split_parts_dark",
+    "toolbar_variable_layer_height_dark",
+    "toolbar_flatten_dark",
+    "toolbar_meshboolean_dark",
+    "toolbar_fuzzy_skin_paint_dark",
+    "toolbar_texture_displacement",
+    "toolbar_text_dark",
+    "toolbar_measure_dark",
+    "toolbar_assembly_dark",
+    "toolbar_brimears_dark",
+    "toolbar_assemble_dark",
+    # 3D view: canvas buttons (bottom left) and the plate's own buttons (PartPlate.cpp)
+    "canvas_section_dark",
+    "canvas_menu_dark",
+    "canvas_zoom_dark",
+    "plate_close_dark",
+    "plate_orient_dark",
+    "plate_arrange_dark",
+    "plate_unlocked_dark",
+    "plate_name_edit_dark",
+    "plate_move_front_dark",
+    # objects tree: a part's kind, own settings
+    "cog",
+    "menu_add_part",
+    "menu_add_negative",
+    "menu_add_modifier",
+    "menu_support_blocker",
+    "menu_support_enforcer",
 ]
+# Strings of the 3D view's toolbars, canvas buttons, plate buttons and right-click menus (GLCanvas3D.cpp,
+# GLGizmosManager.cpp, PartPlate.cpp, GUI_Factories.cpp, Plater.cpp, MainFrame.cpp), for their Italian
+UI_STRINGS = [
+    "Add",
+    "Add plate",
+    "Auto orientation",
+    "Arrange all objects",
+    "Add instance",
+    "Remove instance",
+    "Split to objects",
+    "Split to parts",
+    "Variable layer height",
+    "Move",
+    "Rotate",
+    "Scale",
+    "Lay on Face",
+    "Cut",
+    "Mesh Boolean",
+    "Support Painting",
+    "Seam painting",
+    "Paint-on fuzzy skin",
+    "Texture displacement",
+    "Emboss",
+    "Measure",
+    "Assemble",
+    "Brim Ears",
+    "Assembly View",
+    "Section view",
+    "Fit camera to scene or selected object.",
+    "Gridlines",
+    "Axes",
+    "Default View",
+    "Top View",
+    "Bottom View",
+    "Front View",
+    "Rear View",
+    "Left View",
+    "Right View",
+    "Remove current plate (if not last one)",
+    "Auto orient objects on current plate",
+    "Arrange objects on current plate",
+    "Lock current plate",
+    "Edit current plate name",
+    "Move plate to the front",
+    "Customize current plate",
+    "Clone",
+    "Instances",
+    "Center",
+    "Drop",
+    "Transform",
+    "Align/Distribute",
+    "Edit",
+    "Delete",
+    "Add Part",
+    "Add Negative Part",
+    "Add Modifier",
+    "Add Support Blocker",
+    "Add Support Enforcer",
+    "Add Precise Seam",
+    "Height Range Modifier",
+    "Printable",
+    "Auto Drop",
+    "Edit Process Settings",
+    "Copy Process Settings",
+    "Paste Process Settings",
+    "Edit in Parameter Table",
+    "More",
+    "Select All",
+    "Select All Plates",
+    "Delete All",
+    "Arrange",
+    "Auto Rotate",
+    "Edit Plate Name",
+    "Lock",
+    "Delete Plate",
+    "Add Primitive",
+    "Add Handy models",
+    "Add Models",
+    "Reload All",
+    "Order By",
+    "Replace all with 3D files",
+    "Plate Settings",
+    "Frequent",
+    "Search plate, object and part.",
+    "Object name",
+    "Size",
+    "Volume",
+    "Triangles",
+    "Plate",
+    "Objects",
+    "Object",
+    "Zoom",
+    "Info",
+    "Select",
+    "Global",
+    "Close",
+]
+# A plate's own settings: the key in model_settings.config -> the option it sets (bbs_3mf.cpp)
+PLATE_KEYS = {
+    "bed_type": "curr_bed_type",
+    "skirt_start_angle": "skirt_start_angle",
+    "print_sequence": "print_sequence",
+    "spiral_mode": "spiral_mode",
+    "first_layer_print_sequence": "first_layer_print_sequence",
+    "other_layers_print_sequence": "other_layers_print_sequence",
+}
 
 _STR = r'"(?:[^"\\]|\\.)*"'
 
@@ -243,6 +390,17 @@ def options(cfg_src: str, keys: set[str]) -> dict[str, dict]:
     return out
 
 
+def object_keys(hpp_src: str) -> list[str]:
+    """The keys of PrintObjectConfig and PrintRegionConfig (PrintConfig.hpp): what an object or part can override."""
+    keys: list[str] = []
+    for name in ("PrintObjectConfig", "PrintRegionConfig"):
+        m = re.search(rf"PRINT_CONFIG_CLASS_DEFINE\(\s*{name},(.*?)\n\)", hpp_src, re.S)
+        if not m:
+            raise SystemExit(f"{name} not found in PrintConfig.hpp")
+        keys += re.findall(r"\(\(ConfigOption[\w<>:]+,\s*(\w+)\)\)", _strip_comments(m.group(1)))
+    return sorted(set(keys))
+
+
 def _po(text: str) -> dict[str, str]:
     """msgid -> msgstr of a .po file (fuzzy, contextual and empty translations left out)."""
     out: dict[str, str] = {}
@@ -286,10 +444,20 @@ def main() -> None:
         (src / "src/slic3r/GUI/Tab.cpp").read_text(encoding="utf-8"),
         (src / "src/libslic3r/PublishSettings.cpp").read_text(encoding="utf-8"),
     )
+    per_object = object_keys((src / "src/libslic3r/PrintConfig.hpp").read_text(encoding="utf-8"))
     keys = {k for section in pages.values() for p in section for g in p["groups"] for k in g["keys"]}
+    keys |= set(PLATE_KEYS.values())
     opts = options((src / "src/libslic3r/PrintConfig.cpp").read_text(encoding="utf-8"), keys)
+    # an enum value's own icon, as Field.cpp shows it (param_<value>.svg when there is one)
+    images = src / "resources" / "images"
+    enum_icons = set()
+    for o in opts.values():
+        for e in o.get("enum", []):
+            if (images / f"param_{e['value']}.svg").is_file():
+                e["icon"] = f"param_{e['value']}"
+                enum_icons.add(e["icon"])
     po = _po((src / "localization/i18n/it/OrcaSlicer_it.po").read_text(encoding="utf-8"))
-    wanted = {p["title"] for s in pages.values() for p in s}
+    wanted = {p["title"] for s in pages.values() for p in s} | set(UI_STRINGS)
     wanted |= {g["title"] for s in pages.values() for p in s for g in p["groups"]}
     for o in opts.values():
         wanted |= {o["label"], o.get("tooltip", ""), o.get("unit", "")} | {e["label"] for e in o.get("enum", [])}
@@ -304,6 +472,8 @@ def main() -> None:
         "note": "Generated by tools/orca_settings/generate.py from OrcaSlicer: do not edit by hand.",
         "pages": pages,
         "options": opts,
+        "object_keys": per_object,
+        "plate_keys": PLATE_KEYS,
         "it": italian,
     }
     text = json.dumps(data, ensure_ascii=False, indent=1) + "\n"
@@ -312,7 +482,7 @@ def main() -> None:
     icons.mkdir(exist_ok=True)
     # the listed icons, and the option groups' own ones ("param_layer_height"...)
     group_icons = {g["icon"] for s in pages.values() for p in s for g in p["groups"] if g["icon"]}
-    names = list(ICONS) + sorted(n for n in group_icons if (src / "resources" / "images" / f"{n}.svg").is_file())
+    names = list(ICONS) + sorted(n for n in group_icons | enum_icons if (images / f"{n}.svg").is_file())
     for name in names:
         shutil.copyfile(src / "resources" / "images" / f"{name}.svg", icons / f"{name}.svg")
     print(

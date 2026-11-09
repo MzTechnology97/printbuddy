@@ -14,7 +14,8 @@ export interface OrcaOption {
   max?: number;
   /** simple | advanced | expert | develop */
   mode: string;
-  enum?: { value: string; label: string }[];
+  /** icon: OrcaSlicer's param_<value> icon of that value, when it has one (orca-assets/icons) */
+  enum?: { value: string; label: string; icon?: string }[];
 }
 
 export interface OrcaGroup {
@@ -34,6 +35,10 @@ export interface OrcaLayout {
   source: string;
   pages: Record<Section, OrcaPage[]>;
   options: Record<string, OrcaOption>;
+  /** Settings an object or part can have of its own (PrintObjectConfig + PrintRegionConfig) */
+  object_keys: string[];
+  /** A plate's own settings: key in model_settings.config -> the option it sets */
+  plate_keys: Record<string, string>;
   /** English (as in OrcaSlicer) -> Italian (its it.po) */
   it: Record<string, string>;
 }

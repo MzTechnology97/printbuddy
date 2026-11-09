@@ -9,13 +9,34 @@ export type ValueError = 'number' | 'integer' | 'min' | 'max' | 'percent' | 'opt
 
 export const ON = new Set(['1', 'true']);
 
-export function formatValue(setting: WorkspaceSetting, value: SettingValue, inherit: string): string {
+const DECIMAL = /^-?\d*\.\d*%?$/; // with "0." as typed ("0,"), so the comma stays on screen
+const DECIMAL_COMMA = /^-?\d*,\d*%?$/;
+
+/** A number as the UI language writes it (``0,2`` in Italian); the 3MF keeps the point. Other text as it is. */
+export function toLocaleDecimal(value: string, language: string | undefined): string {
+  return language?.startsWith('it') && DECIMAL.test(value.trim()) ? value.replace('.', ',') : value;
+}
+
+/** What was typed, back to the 3MF's point (``0,2`` -> ``0.2``); other text as it is. */
+export function fromLocaleDecimal(text: string, language: string | undefined): string {
+  return language?.startsWith('it') && DECIMAL_COMMA.test(text.trim()) ? text.replace(',', '.') : text;
+}
+
+/** ``index``: only that element of a per-filament / per-extruder value. */
+export function formatValue(
+  setting: WorkspaceSetting,
+  value: SettingValue,
+  inherit: string,
+  language?: string,
+  index?: number,
+): string {
   const one = (v: string) => {
     if (v === NIL) return inherit;
     if (setting.type === 'bool') return ON.has(v) ? '✓' : '✗';
     if (setting.type === 'enum') return setting.options?.find((o) => o.value === v)?.label ?? v;
-    return v;
+    return toLocaleDecimal(v, language);
   };
+  if (Array.isArray(value) && index != null) return one(value[index] ?? '');
   return Array.isArray(value) ? value.map(one).join(' / ') : one(value);
 }
 

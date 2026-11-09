@@ -1,26 +1,50 @@
 // Fork (printfarm): 3MF Workspace, a full-screen page opened from the File Manager ("Edit 3MF"), laid out as the
 // slicer clients: Prepare (sidebar with printer, filaments, objects and process settings; 3D plate view) and
 // Preview (the sliced G-code). Settings are saved as a copy (the original is never written), sliced with its own
-// settings on the existing sidecars and printed through the existing print modal.
-import { useEffect, useMemo, useState } from 'react';
+// settings on the existing sidecars and printed through the existing print modal. The 3D view selects, zooms,
+// measures and shows object info as OrcaSlicer's; its menus and tools that would change the project are phase 2.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type * as THREE from 'three';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Box, Cog, Download, Loader2, Printer, Save, X } from 'lucide-react';
 import { api } from '../../api/client';
 import { Button } from '../../components/Button';
-import { ModelViewer } from '../../components/ModelViewer';
+import { ModelViewer, type ViewerScene } from '../../components/ModelViewer';
 import { PrintModal } from '../../components/PrintModal';
 import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog } from './Dialogs';
-import { useSettingsDraft } from './draft';
-import { type OrcaLayout, loadOrcaLayout } from './orcaLayout';
+import { toLocaleDecimal, useSettingsDraft } from './draft';
+import { objectMenu, plateMenu } from './menus';
+import type { Selection } from './objects';
+import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
-import { GizmoToolbar, PlateBar } from './Viewport';
+import {
+  CanvasButtons,
+  ContextMenu,
+  MainToolbar,
+  type MenuItem,
+  ObjectInfo,
+  PlateBar,
+  PlateButtons,
+  VIEW_KEYS,
+} from './Viewport';
+import {
+  type ObjectStats,
+  drawMeasure,
+  fitTo,
+  highlight,
+  objectStats,
+  pick,
+  setView,
+  unmirror,
+  useCanvasClicks,
+} from './viewTools';
 import '../i18n';
 
 type Mode = 'prepare' | 'preview';
@@ -89,7 +113,7 @@ export function WorkspacePage() {
 }
 
 function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -100,7 +124,17 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const [pane, setPane] = useState<Pane>('view');
   const [selectedPlate, setSelectedPlate] = useState<number | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
-  const [preset, setPreset] = useState<'printer' | 'filament' | null>(null);
+  const [preset, setPreset] = useState<{ kind: 'printer' | 'filament'; filament: number } | null>(null);
+  const [perObject, setPerObject] = useState(false);
+  const [selection, setSelection] = useState<Selection>(null);
+  const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuItem[] } | null>(null);
+  const [view, setViewScene] = useState<ViewerScene | null>(null);
+  const [stats, setStats] = useState<Map<string, ObjectStats>>(new Map());
+  const [grid, setGrid] = useState(true);
+  const [tool, setTool] = useState<string | null>(null);
+  const [measure, setMeasure] = useState<THREE.Vector3[]>([]);
+  const [infoClosed, setInfoClosed] = useState(false);
+  const zoomAfterBuild = useRef<string | null>(null);
   const [sliceJob, setSliceJob] = useState<{ id: number; plate: number | null } | null>(null);
   const jobId = sliceJob?.id ?? null;
   const [printOpen, setPrintOpen] = useState(false);
@@ -122,6 +156,129 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     printer: project?.printer_preset ?? (byKey.get('printer_settings_id')?.value as string | undefined) ?? null,
     process: project?.process_preset ?? (byKey.get('print_settings_id')?.value as string | undefined) ?? null,
   };
+
+  // --- 3D view: selection, menus, tools (they only look; see Viewport.tsx) ---
+  const tr = useCallback((text: string) => orcaText(layout, text, i18n.language), [layout, i18n.language]);
+  const onScene = useCallback((scene: ViewerScene) => {
+    unmirror(scene);
+    // the whole bed, as the slicer opens a plate (or the object a menu asked to zoom to)
+    if (zoomAfterBuild.current) fitTo(scene, zoomAfterBuild.current);
+    else setView(scene, 'iso');
+    zoomAfterBuild.current = null;
+    setViewScene(scene);
+    setStats(objectStats(scene));
+    setMeasure([]);
+  }, []);
+  const selectedId = selection?.kind === 'object' ? selection.id : null;
+  useEffect(() => {
+    if (view) highlight(view, selectedId);
+  }, [view, selectedId]);
+  useEffect(() => {
+    if (view?.grid) view.grid.visible = grid;
+  }, [view, grid]);
+  useEffect(() => {
+    if (view) drawMeasure(view, measure[0] ?? null, measure[1] ?? null);
+  }, [view, measure]);
+
+  const plateOf = (objectId: string) => doc.plates.find((p) => p.object_ids.includes(objectId))?.index ?? null;
+  const select = (sel: Selection) => {
+    setSelection(sel);
+    setInfoClosed(false);
+    const plate = sel?.kind === 'plate' ? sel.plate : sel?.kind === 'object' ? (sel.plate ?? plateOf(sel.id)) : null;
+    // the 3D view follows to the plate when it shows one plate
+    if (plate != null && (sel?.kind === 'plate' || (selectedPlate != null && selectedPlate !== plate))) setSelectedPlate(plate);
+  };
+  const zoomTo = (objectId: string) => {
+    if (!view) return;
+    if (stats.has(objectId)) fitTo(view, objectId);
+    else {
+      zoomAfterBuild.current = objectId; // on another plate: zoom once that plate is built
+      setSelectedPlate(plateOf(objectId));
+    }
+  };
+  const currentPlate = selectedPlate ?? doc.plates[0]?.index ?? null;
+  const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>) => {
+    if (sel.kind === 'plate') {
+      const plateSel = { kind: 'plate' as const, plate: sel.plate };
+      setMenu({
+        at,
+        items: plateMenu(tr, {
+          selectAll: () => select(plateSel),
+          settings: () => {
+            setPerObject(true);
+            select(plateSel);
+          },
+        }),
+      });
+      return;
+    }
+    const objSel = { kind: 'object' as const, id: sel.id, plate: sel.plate };
+    setMenu({
+      at,
+      items: objectMenu(tr, t('farm.workspace.deleteKey'), stats.get(sel.id)?.printable ?? true, {
+        select: () => select(objSel),
+        zoom: () => {
+          select(objSel);
+          zoomTo(sel.id);
+        },
+        info: () => select(objSel),
+        settings: () => {
+          setPerObject(true);
+          select(sel);
+        },
+      }),
+    });
+  };
+  useCanvasClicks(
+    view,
+    (e) => {
+      const hit = view && pick(view, e.clientX, e.clientY);
+      if (tool === 'measure') {
+        if (hit) setMeasure((m) => (m.length === 1 ? [m[0], hit.point] : [hit.point]));
+        return;
+      }
+      if (hit) {
+        select({ kind: 'object', id: hit.objectId, plate: selectedPlate });
+        setPerObject(true);
+      } else setSelection(null);
+    },
+    (e) => {
+      const hit = view && pick(view, e.clientX, e.clientY);
+      const at = { x: e.clientX, y: e.clientY };
+      if (hit) {
+        const sel = { kind: 'object' as const, id: hit.objectId, plate: selectedPlate };
+        select(sel);
+        openMenu(at, sel);
+      } else if (currentPlate != null) openMenu(at, { kind: 'plate', plate: currentPlate });
+    },
+  );
+  const toggleTool = (key: string) => {
+    setTool((cur) => (cur === key ? null : key));
+    setMeasure([]);
+  };
+  // OrcaSlicer's keys in the 3D view: 0-6 views, Z zoom to the selection, U measure, Esc leaves a tool / selection
+  const dialogOpen = saveOpen || !!preset || !!menu || printOpen;
+  const keys = useRef<(e: KeyboardEvent) => void>(() => {});
+  keys.current = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (mode !== 'prepare' || !view || dialogOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (el?.closest?.('input, textarea, select, [role="listbox"], [role="menu"], [role="combobox"]')) return;
+    if (e.key in VIEW_KEYS) setView(view, VIEW_KEYS[e.key]);
+    else if (e.key === 'z' || e.key === 'Z') fitTo(view, selectedId);
+    else if (e.key === 'u' || e.key === 'U') toggleTool('measure');
+    else if (e.key === 'Escape') {
+      if (tool) toggleTool(tool);
+      else setSelection(null);
+    }
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => keys.current(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const selectedObject = selectedId != null ? doc.objects.find((o) => o.id === selectedId) : undefined;
+  const selectedStats = selectedId != null ? stats.get(selectedId) : undefined;
+  const distance = measure.length === 2 ? measure[0].distanceTo(measure[1]) : null;
 
   useEffect(() => {
     if (!count) return;
@@ -280,11 +437,16 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
             layout={layout}
             doc={doc}
             presets={presets}
-            selectedPlate={selectedPlate}
             draft={draft}
             onChange={set}
             onReset={reset}
-            onEditPreset={setPreset}
+            onEditPreset={(kind, filament = 0) => setPreset({ kind, filament })}
+            perObject={perObject}
+            onPerObject={setPerObject}
+            selection={selection}
+            onSelect={select}
+            onMenu={openMenu}
+            stats={stats}
           />
         </aside>
         <main className={`${pane === 'view' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-w-0 relative`}>
@@ -297,8 +459,47 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                 filamentColors={colours}
                 selectedPlateId={selectedPlate}
                 className="w-full h-full"
+                onScene={onScene}
               />
-              <GizmoToolbar />
+              <MainToolbar layout={layout} active={tool} onTool={toggleTool} />
+              {tool === 'measure' && (
+                <div
+                  className="absolute top-12 left-1/2 -translate-x-1/2 rounded bg-bambu-dark-secondary/95 border border-bambu-dark-tertiary px-3 py-1 text-[12px] text-white"
+                  role="status"
+                >
+                  {distance != null
+                    ? t('farm.workspace.measure.distance', { value: toLocaleDecimal(distance.toFixed(2), i18n.language) })
+                    : t('farm.workspace.measure.hint')}
+                </div>
+              )}
+              {view && (
+                <>
+                  <CanvasButtons
+                    layout={layout}
+                    grid={grid}
+                    onGrid={setGrid}
+                    onView={(p) => setView(view, p)}
+                    onFit={() => fitTo(view, selectedId)}
+                  />
+                  {currentPlate != null && (
+                    <PlateButtons
+                      layout={layout}
+                      onSettings={() => {
+                        setPerObject(true);
+                        select({ kind: 'plate', plate: currentPlate });
+                      }}
+                    />
+                  )}
+                </>
+              )}
+              {selectedObject && selectedStats && !infoClosed && (
+                <ObjectInfo
+                  layout={layout}
+                  name={selectedObject.name ?? `#${selectedId}`}
+                  stats={selectedStats}
+                  onClose={() => setInfoClosed(true)}
+                />
+              )}
               <PlateBar fileId={fileId} plates={doc.plates} selected={selectedPlate} onSelect={setSelectedPlate} />
             </div>
           ) : (
@@ -331,11 +532,13 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
           onClose={() => setSaveOpen(false)}
         />
       )}
+      {menu && <ContextMenu items={menu.items} at={menu.at} onClose={() => setMenu(null)} />}
       {preset && (
         <PresetDialog
           layout={layout}
-          kind={preset}
-          name={preset === 'printer' ? presets.printer : null}
+          kind={preset.kind}
+          filament={preset.filament}
+          name={preset.kind === 'printer' ? presets.printer : null}
           settings={doc.settings}
           draft={draft}
           editable={doc.editable}

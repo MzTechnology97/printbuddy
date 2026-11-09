@@ -25,7 +25,7 @@ export interface WorkspaceSetting {
   min?: number | null;
   max?: number | null;
   step?: number | null;
-  options?: { value: string; label: string }[] | null;
+  options?: { value: string; label: string; icon?: string }[] | null;
   /** OrcaSlicer's mode for the key (Simple shows fewer settings); absent for keys no schema knows. */
   mode?: 'simple' | 'advanced';
   value: SettingValue;
@@ -51,6 +51,8 @@ export interface WorkspacePlate {
   object_ids: string[];
   /** Each placement of an object on the plate: the identity a future 3D editor moves, rotates or duplicates. */
   instances: { object_id: string; instance_id: string | null }[];
+  /** The plate's metadata in model_settings.config: its own settings (bed_type, print_sequence...) among them. */
+  metadata?: Record<string, string>;
 }
 
 export type WorkspaceKind = 'project' | 'sliced' | 'model' | 'other_slicer';

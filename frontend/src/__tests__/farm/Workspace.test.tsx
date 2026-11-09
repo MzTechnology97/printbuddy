@@ -1,16 +1,32 @@
 /**
- * Printfarm (fork): 3MF Workspace. The draft of unsaved changes (checks, back to the original) and the
- * settings panel (edit, see original and changed values, restore, search, read-only settings).
+ * Printfarm (fork): 3MF Workspace. The draft of unsaved changes (checks, back to the original, decimal comma),
+ * the settings panel (edit, original and changed values, restore, search, read-only and greyed settings, the
+ * pattern listbox, one filament, an object's own settings), the objects tree, the 3D toolbar and menus.
  */
 import { useState } from 'react';
-import { describe, it, expect } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as THREE from 'three';
 import { render } from '../utils';
-import type { WorkspaceSetting } from '../../farm/workspace/api';
-import { elementError, valueErrors, withValue, withoutKey, type Draft } from '../../farm/workspace/draft';
+import type { WorkspaceDocument, WorkspaceSetting } from '../../farm/workspace/api';
+import { greyedKeys } from '../../farm/workspace/dependencies';
+import { PresetDialog } from '../../farm/workspace/Dialogs';
+import {
+  elementError,
+  fromLocaleDecimal,
+  toLocaleDecimal,
+  valueErrors,
+  withValue,
+  withoutKey,
+  type Draft,
+} from '../../farm/workspace/draft';
+import { objectMenu } from '../../farm/workspace/menus';
+import { ObjectsPanel } from '../../farm/workspace/ObjectsPanel';
 import { SettingsPanel } from '../../farm/workspace/SettingsPanel';
-import { GizmoToolbar } from '../../farm/workspace/Viewport';
+import { ContextMenu, MainToolbar } from '../../farm/workspace/Viewport';
+import { meshVolume, objectStats } from '../../farm/workspace/viewTools';
+import type { ViewerScene } from '../../components/ModelViewer';
 import type { OrcaLayout, Section } from '../../farm/workspace/orcaLayout';
 
 const base = {
@@ -88,6 +104,21 @@ const TYPE: WorkspaceSetting = {
   ],
   value: 'normal(auto)',
 };
+const PATTERN: WorkspaceSetting = {
+  ...base,
+  key: 'sparse_infill_pattern',
+  label: 'Sparse infill pattern',
+  section: 'process',
+  group: 'infill',
+  tab: 'strength',
+  type: 'enum',
+  options: [
+    { value: 'grid', label: 'Grid' },
+    { value: 'gyroid', label: 'Gyroid' },
+    { value: 'honeycomb', label: 'Honeycomb' },
+  ],
+  value: 'grid',
+};
 const TEMP: WorkspaceSetting = {
   ...base,
   key: 'nozzle_temperature',
@@ -126,7 +157,7 @@ const GCODE: WorkspaceSetting = {
   readonly_reason: 'text',
   value: 'G28',
 };
-const SETTINGS = [LAYER, WALLS, DENSITY, SUPPORT, TYPE, TEMP, PRINTER_ID, GCODE];
+const SETTINGS = [LAYER, WALLS, DENSITY, PATTERN, SUPPORT, TYPE, TEMP, PRINTER_ID, GCODE];
 
 describe('workspace draft', () => {
   it('checks numbers, whole numbers, ranges and percentages like the backend', () => {
@@ -150,6 +181,26 @@ describe('workspace draft', () => {
     expect(draft).toEqual({ nozzle_temperature: ['225', '240'] });
     expect(withoutKey(draft, 'nozzle_temperature')).toEqual({});
   });
+
+  it('writes numbers with a decimal comma in Italian and keeps the point in the project', () => {
+    expect(toLocaleDecimal('0.2', 'it')).toBe('0,2');
+    expect(toLocaleDecimal('0.', 'it')).toBe('0,'); // while typing "0,"
+    expect(toLocaleDecimal('0.2', 'en')).toBe('0.2');
+    expect(toLocaleDecimal('0.2,0.3', 'it')).toBe('0.2,0.3'); // not one number: as it is
+    expect(fromLocaleDecimal('0,12', 'it')).toBe('0.12');
+    expect(fromLocaleDecimal('15,5%', 'it')).toBe('15.5%');
+    expect(fromLocaleDecimal('0,12', 'en')).toBe('0,12'); // English: a comma is not a decimal
+  });
+
+  it("greys what depends on a switch that is off, as OrcaSlicer's ConfigManipulation", () => {
+    const values: Record<string, string> = { enable_support: '0', raft_layers: '0', brim_type: 'no_brim', wall_loops: '2' };
+    const greyed = greyedKeys((k) => values[k]);
+    expect(greyed.has('support_type')).toBe(true);
+    expect(greyed.has('brim_width')).toBe(true);
+    expect(greyed.has('seam_position')).toBe(false); // walls are on
+    expect(greyedKeys((k) => ({ ...values, enable_support: '1' })[k]).has('support_type')).toBe(false);
+    expect(greyedKeys(() => undefined).size).toBe(0); // a parent the project lacks: nothing greyed
+  });
 });
 
 // A small OrcaSlicer layout: the real one (orca-assets/settings-layout.json) is generated and large.
@@ -162,7 +213,7 @@ const LAYOUT: OrcaLayout = {
       {
         title: 'Strength',
         icon: 'custom-gcode_strength',
-        groups: [{ title: 'Walls', icon: null, keys: ['wall_loops', 'sparse_infill_density'] }],
+        groups: [{ title: 'Walls', icon: null, keys: ['wall_loops', 'sparse_infill_density', 'sparse_infill_pattern'] }],
       },
       {
         title: 'Support',
@@ -181,6 +232,16 @@ const LAYOUT: OrcaLayout = {
     layer_height: { type: 'coFloat', label: 'Layer height', tooltip: 'Slicing height for each layer', unit: 'mm', mode: 'simple' },
     wall_loops: { type: 'coInt', label: 'Wall loops', mode: 'simple' },
     sparse_infill_density: { type: 'coPercent', label: 'Sparse infill density', mode: 'advanced' },
+    sparse_infill_pattern: {
+      type: 'coEnum',
+      label: 'Sparse infill pattern',
+      mode: 'simple',
+      enum: [
+        { value: 'grid', label: 'Grid', icon: 'param_grid' },
+        { value: 'gyroid', label: 'Gyroid', icon: 'param_gyroid' },
+        { value: 'honeycomb', label: 'Honeycomb', icon: 'param_honeycomb' },
+      ],
+    },
     enable_support: { type: 'coBool', label: 'Enable support', mode: 'simple' },
     support_type: {
       type: 'coEnum',
@@ -195,16 +256,22 @@ const LAYOUT: OrcaLayout = {
     machine_start_gcode: { type: 'coString', label: 'Machine start G-code', mode: 'advanced' },
   },
   it: { 'Layer height': 'Altezza strato', Quality: 'Qualità' },
+  object_keys: ['layer_height', 'wall_loops', 'sparse_infill_density', 'sparse_infill_pattern', 'enable_support', 'support_type'],
+  plate_keys: { print_sequence: 'print_sequence' },
 };
 
 function Harness({
   editable = true,
   section = 'process',
   simple = false,
+  index,
+  own,
 }: {
   editable?: boolean;
   section?: Section;
   simple?: boolean;
+  index?: number;
+  own?: Record<string, string>;
 }) {
   const [draft, setDraft] = useState<Draft>({});
   return (
@@ -217,6 +284,8 @@ function Harness({
         draft={draft}
         editable={editable}
         simple={simple}
+        index={index}
+        object={own ? { own } : undefined}
         onChange={(s, v) => setDraft((d) => withValue(d, s, v))}
         onReset={(key) => setDraft((d) => withoutKey(d, key))}
       />
@@ -233,8 +302,9 @@ describe('SettingsPanel', () => {
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Quality', 'Strength', 'Support', 'Other values']);
     expect(screen.getByRole('heading', { name: 'Layer height' })).toBeInTheDocument();
     expect(screen.getByTestId('setting-layer_height')).toHaveTextContent('Layer height');
-    await user.click(screen.getByRole('tab', { name: /Support/ }));
-    expect(screen.getByRole('option', { name: 'Tree (auto)' })).toBeInTheDocument(); // the slicer's enum label
+    await user.click(screen.getByRole('tab', { name: /Strength/ }));
+    await user.click(screen.getByRole('combobox', { name: 'Sparse infill pattern' }));
+    expect(screen.getByRole('option', { name: 'Gyroid' })).toBeInTheDocument(); // the slicer's enum label
   });
 
   it('shows the Italian wording of the slicer', async () => {
@@ -244,6 +314,13 @@ describe('SettingsPanel', () => {
       render(<Harness />);
       expect(screen.getByRole('tab', { name: 'Qualità' })).toBeInTheDocument();
       expect(screen.getByTestId('setting-layer_height')).toHaveTextContent('Altezza strato');
+      // a decimal comma on screen, a point in the change
+      const input = screen.getByRole('textbox', { name: 'Altezza strato' });
+      expect(input).toHaveValue('0,2');
+      await userEvent.setup().clear(input);
+      await userEvent.setup().type(input, '0,12');
+      expect(draftOf()).toEqual({ layer_height: '0.12' });
+      expect(input).toHaveValue('0,12');
     } finally {
       await i18n.changeLanguage('en');
     }
@@ -276,8 +353,13 @@ describe('SettingsPanel', () => {
     const user = userEvent.setup();
     render(<Harness />);
     await user.click(screen.getByRole('tab', { name: /Support/ }));
+    // greyed while support is off, as the slicer
+    expect(screen.getByTestId('setting-support_type')).toHaveAttribute('data-greyed', 'true');
+    expect(screen.queryByRole('combobox', { name: 'Type' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('checkbox', { name: 'Enable support' }));
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Type' }), 'tree(auto)');
+    expect(screen.getByTestId('setting-support_type')).not.toHaveAttribute('data-greyed');
+    await user.click(screen.getByRole('combobox', { name: 'Type' }));
+    await user.click(screen.getByRole('option', { name: 'Tree (auto)' }));
     expect(draftOf()).toEqual({ enable_support: '1', support_type: 'tree(auto)' });
     expect(screen.getByRole('tab', { name: /Support\s*2/ })).toBeInTheDocument();
   });
@@ -289,6 +371,48 @@ describe('SettingsPanel', () => {
     await user.clear(second);
     await user.type(second, '245');
     expect(draftOf()).toEqual({ nozzle_temperature: ['220', '245'] });
+  });
+
+  it("edits one filament's value in that filament's window", async () => {
+    const user = userEvent.setup();
+    render(<Harness section="filament" index={1} />);
+    const input = screen.getByRole('textbox', { name: 'Nozzle temperature' }); // one input, no per-filament list
+    expect(input).toHaveValue('240');
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    await user.clear(input);
+    await user.type(input, '250');
+    expect(draftOf()).toEqual({ nozzle_temperature: ['220', '250'] });
+  });
+
+  it('picks a pattern from the listbox with the keyboard, its icons shown', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.click(screen.getByRole('tab', { name: /Strength/ }));
+    const box = screen.getByRole('combobox', { name: 'Sparse infill pattern' });
+    expect(box.querySelector('img')).not.toBeNull(); // the value's icon in the closed field
+    box.focus();
+    await user.keyboard('{ArrowDown}');
+    const list = screen.getByRole('listbox');
+    expect(box).toHaveAttribute('aria-expanded', 'true');
+    expect(within(list).getAllByRole('option')).toHaveLength(3);
+    within(list).getAllByRole('option').forEach((o) => expect(o.querySelector('img')).not.toBeNull());
+    await user.keyboard('{ArrowDown}');
+    expect(box.getAttribute('aria-activedescendant')).toBe(within(list).getByRole('option', { name: 'Gyroid' }).id);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(draftOf()).toEqual({});
+    await user.keyboard('{ArrowDown}h{Enter}'); // type-ahead
+    expect(draftOf()).toEqual({ sparse_infill_pattern: 'honeycomb' });
+  });
+
+  it("shows an object's settings read only, its own first with the global value", async () => {
+    render(<Harness own={{ wall_loops: '5' }} />);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Frequent1', 'Quality', 'Strength1', 'Support']);
+    const row = screen.getByTestId('setting-wall_loops');
+    expect(row).toHaveTextContent('5');
+    expect(row).toHaveTextContent('global: 3');
+    expect(within(row).queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('setting-nozzle_temperature')).not.toBeInTheDocument();
   });
 
   it('shows the system preset state and the objects with their own value', async () => {
@@ -341,11 +465,140 @@ describe('client layout', () => {
     expect(screen.queryByRole('tab', { name: /Other values/ })).not.toBeInTheDocument();
   });
 
-  it('shows the object tools disabled, saying they come in phase 2', () => {
-    render(<GizmoToolbar />);
+  it("shows OrcaSlicer's toolbar in its order: measure works, geometry tools are phase 2", async () => {
+    const user = userEvent.setup();
+    const onTool = vi.fn();
+    render(<MainToolbar layout={LAYOUT} active={null} onTool={onTool} />);
     const tools = within(screen.getByRole('toolbar')).getAllByRole('button');
-    expect(tools).toHaveLength(6);
-    tools.forEach((b) => expect(b).toBeDisabled());
-    expect(tools[0]).toHaveAccessibleName(/Move: coming in phase 2/);
+    expect(tools).toHaveLength(24);
+    expect(tools[0]).toHaveAccessibleName(/^Add \[Ctrl\+I\]: coming in phase 2/);
+    expect(tools[9]).toHaveAccessibleName(/^Move \[M\]: coming in phase 2/);
+    expect(tools.filter((b) => !b.hasAttribute('disabled')).map((b) => b.getAttribute('aria-label'))).toEqual(['Measure [U]']);
+    await user.click(screen.getByRole('button', { name: 'Measure [U]' }));
+    expect(onTool).toHaveBeenCalledWith('measure');
+  });
+
+  it('opens a right-click menu where only what looks works, and Esc closes it', async () => {
+    const user = userEvent.setup();
+    const on = { select: vi.fn(), zoom: vi.fn(), info: vi.fn(), settings: vi.fn() };
+    const onClose = vi.fn();
+    render(<ContextMenu items={objectMenu((s) => s, 'Del', true, on)} at={{ x: 10, y: 10 }} onClose={onClose} />);
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: 'Clone Ctrl+K' })).toHaveAttribute('aria-disabled', 'true');
+    expect(within(menu).getByRole('menuitemcheckbox', { name: /Printable/ })).toHaveAttribute('aria-checked', 'true');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Edit Process Settings' }));
+    expect(on.settings).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await user.click(within(menu).getByRole('menuitem', { name: 'Clone Ctrl+K' }));
+    expect(onClose).toHaveBeenCalledTimes(1); // disabled: nothing happens
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes a settings window with Esc, but an open list first', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <PresetDialog
+        layout={LAYOUT}
+        kind="filament"
+        filament={1}
+        name={null}
+        settings={SETTINGS}
+        draft={{}}
+        editable
+        onChange={() => {}}
+        onReset={() => {}}
+        onClose={onClose}
+      />,
+    );
+    expect(screen.getByRole('dialog')).toHaveTextContent('2'); // the filament's own chip
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+const DOC = {
+  plates: [
+    { index: 1, name: 'First', object_ids: ['2'], instances: [], metadata: { plater_id: '1' } },
+    { index: 2, name: null, object_ids: ['4'], instances: [], metadata: { plater_id: '2', print_sequence: 'by object' } },
+  ],
+  objects: [
+    { id: '2', name: 'Cube A', extruder: '1', parts: [{ id: '1', name: 'Cube A', type: 'normal_part' }], overrides: [] },
+    {
+      id: '4',
+      name: 'Cube B',
+      extruder: '2',
+      parts: [
+        { id: '1', name: 'Cube B', type: 'normal_part' },
+        { id: '2', name: 'Blocker', type: 'support_blocker' },
+      ],
+      overrides: [{ key: 'wall_loops', value: '5', part: null }],
+    },
+  ],
+  settings: [...SETTINGS, { ...base, key: 'print_sequence', label: 'Print sequence', section: 'process', tab: 'other', type: 'string', value: 'by layer' }],
+} as unknown as WorkspaceDocument;
+
+describe('objects view', () => {
+  it('lists plates, objects and parts, marks own settings, selects and opens menus', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMenu = vi.fn();
+    render(
+      <ObjectsPanel
+        layout={LAYOUT}
+        doc={DOC}
+        draft={{}}
+        colours={['#ff0000', '#00ff00']}
+        stats={new Map()}
+        selection={null}
+        onSelect={onSelect}
+        onMenu={onMenu}
+      />,
+    );
+    const tree = screen.getByRole('tree');
+    expect(within(tree).getByText('Plate 1 · First')).toBeInTheDocument();
+    expect(within(tree).getByText('Blocker')).toBeInTheDocument(); // a part of its own kind
+    const cubeB = within(tree).getAllByText('Cube B')[0].closest('div')!; // the object (its part has its name too)
+    expect(within(cubeB).getByAltText('Has settings of its own')).toBeInTheDocument();
+    expect(within(within(tree).getByText('Cube A').closest('div')!).queryByAltText('Has settings of its own')).toBeNull();
+    await user.click(within(tree).getAllByText('Cube B')[0]);
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'object', id: '4', plate: 2 });
+    fireEvent.contextMenu(within(tree).getByText('Plate 2'), { clientX: 5, clientY: 6 });
+    expect(onMenu).toHaveBeenCalledWith({ x: 5, y: 6 }, { kind: 'plate', plate: 2 });
+    await user.type(screen.getByRole('searchbox'), 'cube a');
+    expect(within(tree).queryByText('Cube B')).not.toBeInTheDocument();
+  });
+
+  it("shows a plate's own settings against the project's", () => {
+    render(
+      <ObjectsPanel
+        layout={LAYOUT}
+        doc={DOC}
+        draft={{}}
+        colours={[]}
+        stats={new Map()}
+        selection={{ kind: 'plate', plate: 2 }}
+        onSelect={() => {}}
+        onMenu={() => {}}
+      />,
+    );
+    expect(screen.getByTestId('plate-print_sequence')).toHaveTextContent('by object');
+  });
+});
+
+describe('3D object info', () => {
+  it('measures volume, size and triangles of each object', () => {
+    expect(meshVolume(new THREE.BoxGeometry(2, 3, 4))).toBeCloseTo(24);
+    const model = new THREE.Group();
+    const item = new THREE.Group();
+    item.userData = { objectId: '4', printable: false };
+    item.add(new THREE.Mesh(new THREE.BoxGeometry(10, 20, 30)));
+    model.add(item);
+    const stats = objectStats({ model } as unknown as ViewerScene).get('4')!;
+    expect(stats.size).toEqual([10, 30, 20]); // the slicer's X, Y, Z (three.js Y is up)
+    expect(stats.volume).toBeCloseTo(6000);
+    expect(stats.triangles).toBe(12);
+    expect(stats.printable).toBe(false);
   });
 });

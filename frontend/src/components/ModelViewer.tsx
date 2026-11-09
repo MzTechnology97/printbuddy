@@ -15,6 +15,18 @@ interface BuildVolume {
   z: number;
 }
 
+/** Fork (printfarm): what the 3MF Workspace's 3D tools work on, handed over after each model build. */
+export interface ViewerScene {
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  controls: OrbitControls;
+  renderer: THREE.WebGLRenderer;
+  /** One child group per build item (object instance), ``userData`` {objectId, printable}. */
+  model: THREE.Group;
+  grid: THREE.GridHelper | null;
+  bed: BuildVolume;
+}
+
 interface ModelViewerProps {
   url: string;
   fileType?: string;
@@ -22,6 +34,9 @@ interface ModelViewerProps {
   filamentColors?: string[];
   selectedPlateId?: number | null;
   className?: string;
+  /** Fork (printfarm): keep each object apart (pickable) and hand the scene over; the viewer's own zoom buttons
+   * are left out (the caller has its own). */
+  onScene?: (scene: ViewerScene) => void;
 }
 
 interface MeshData {
@@ -42,6 +57,7 @@ interface BuildItem {
   transform: THREE.Matrix4;
   extruder?: number; // Can override object's extruder
   plateId?: number | null;
+  printable?: boolean; // fork (printfarm): the build item's printable flag
 }
 
 interface Parsed3MFData {
@@ -472,7 +488,12 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
       const objectPlateId = objects.get(objectId)?.plateId ?? null;
       const objectName = objectNameById.get(objectId);
       const namePlateId = objectName ? plateAssignmentsByName.get(objectName) ?? null : null;
-      buildItems.push({ objectId, transform, plateId: itemPlateId ?? objectPlateId ?? namePlateId ?? null });
+      buildItems.push({
+        objectId,
+        transform,
+        plateId: itemPlateId ?? objectPlateId ?? namePlateId ?? null,
+        printable: itemEl.getAttribute('printable') !== '0',
+      });
     }
   }
 
@@ -519,6 +540,7 @@ function buildModelGroup(
   parsedData: Parsed3MFData,
   selectedPlateId: number | null,
   filamentColors?: string[],
+  perItem = false,
 ): THREE.Group {
   const { objects, buildItems } = parsedData;
   const group = new THREE.Group();
@@ -538,6 +560,8 @@ function buildModelGroup(
 
   // Group geometries by extruder index (using per-mesh extruder)
   const geometriesByExtruder = new Map<number, THREE.BufferGeometry[]>();
+  // fork (printfarm): one group per build item, its meshes merged per filament, for picking and selection
+  const itemGroups: THREE.Group[] = [];
 
   const hasPlateAssignments = buildItems.some((item) => item.plateId != null);
   const plateFilteredItems = selectedPlateId == null || !hasPlateAssignments
@@ -550,6 +574,7 @@ function buildModelGroup(
     for (const item of activeBuildItems) {
       const objectData = objects.get(item.objectId);
       if (!objectData) continue;
+      if (perItem) geometriesByExtruder.clear();
 
       for (const meshData of objectData.meshes) {
         // Use mesh's extruder, or item override, or object default
@@ -578,6 +603,12 @@ function buildModelGroup(
         }
         geometriesByExtruder.get(extruder)!.push(geometry);
       }
+      if (perItem) {
+        const itemGroup = new THREE.Group();
+        itemGroup.userData = { objectId: item.objectId, printable: item.printable !== false };
+        addMergedMeshes(itemGroup, geometriesByExtruder, getMaterial);
+        itemGroups.push(itemGroup);
+      }
     }
   } else {
     // Fallback: just add all objects without transforms
@@ -594,7 +625,20 @@ function buildModelGroup(
     }
   }
 
-  // Create meshes for each extruder group
+  if (itemGroups.length > 0) {
+    group.add(...itemGroups);
+    return group;
+  }
+  addMergedMeshes(group, geometriesByExtruder, getMaterial);
+  return group;
+}
+
+// Create meshes for each extruder group
+function addMergedMeshes(
+  group: THREE.Group,
+  geometriesByExtruder: Map<number, THREE.BufferGeometry[]>,
+  getMaterial: (extruder: number) => THREE.Material,
+) {
   for (const [extruder, geometries] of geometriesByExtruder) {
     if (geometries.length === 0) continue;
 
@@ -615,8 +659,6 @@ function buildModelGroup(
       }
     }
   }
-
-  return group;
 }
 
 // One object for every render: the load effect depends on it (a literal default reloaded the file forever).
@@ -629,6 +671,7 @@ export function ModelViewer({
   filamentColors,
   selectedPlateId = null,
   className = '',
+  onScene,
 }: ModelViewerProps) {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -643,6 +686,9 @@ export function ModelViewer({
   const [error, setError] = useState<string | null>(null);
   const [parsedData, setParsedData] = useState<Parsed3MFData | null>(null);
   const [stlGeometry, setStlGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const onSceneRef = useRef(onScene);
+  onSceneRef.current = onScene;
+  const perItem = !!onScene;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -817,7 +863,7 @@ export function ModelViewer({
           stlGroup.add(mesh);
           return stlGroup;
         })()
-      : buildModelGroup(parsedData!, selectedPlateId ?? null, filamentColors);
+      : buildModelGroup(parsedData!, selectedPlateId ?? null, filamentColors, perItem);
     modelGroupRef.current = group;
     sceneRef.current.add(group);
 
@@ -891,8 +937,19 @@ export function ModelViewer({
     controlsRef.current.target.copy(finalCenter);
     controlsRef.current.update();
 
+    if (onSceneRef.current && rendererRef.current) {
+      onSceneRef.current({
+        scene: sceneRef.current,
+        camera: cameraRef.current,
+        controls: controlsRef.current,
+        renderer: rendererRef.current,
+        model: group,
+        grid: gridRef.current,
+        bed: buildVolume,
+      });
+    }
     setLoading(false);
-  }, [parsedData, stlGeometry, selectedPlateId, filamentColors, buildVolume]);
+  }, [parsedData, stlGeometry, selectedPlateId, filamentColors, buildVolume, perItem]);
 
   const resetView = () => {
     if (cameraRef.current && controlsRef.current) {
@@ -924,7 +981,7 @@ export function ModelViewer({
         </div>
       )}
 
-      {!loading && !error && (
+      {!loading && !error && !onScene && (
         <div className="absolute bottom-4 right-4 flex gap-2">
           <Button variant="secondary" size="sm" onClick={() => zoom(0.8)}>
             <ZoomIn className="w-4 h-4" />

@@ -1,13 +1,15 @@
 // Fork (printfarm): the workspace's left sidebar, laid out as OrcaSlicer's: Stampante (preset box, nozzle
-// "Variante"), Filamento (a numbered colour chip per filament), Processo (Globale: the process settings by tab;
-// Oggetti: the objects with the settings they slice with on their own, read only).
+// "Variante"), Filamento (a numbered colour chip per filament, each with its own settings window), Processo
+// (Globale: the process settings by tab; Oggetti: the plates and objects tree with their own settings, read only).
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { SettingValue, WorkspaceDocument, WorkspaceObject, WorkspaceSetting } from './api';
+import type { SettingValue, WorkspaceDocument, WorkspaceSetting } from './api';
 import type { Draft } from './draft';
+import type { Selection } from './objects';
+import { ObjectsPanel } from './ObjectsPanel';
 import { type OrcaLayout, orcaIcon } from './orcaLayout';
 import { SettingsPanel } from './SettingsPanel';
+import type { ObjectStats } from './viewTools';
 import '../i18n';
 
 function values(doc: WorkspaceDocument, key: string): string[] {
@@ -44,68 +46,45 @@ function Chip({ colour, n }: { colour: string | undefined; n: number }) {
   );
 }
 
-function ObjectRow({ obj, colours }: { obj: WorkspaceObject; colours: string[] }) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const n = Number(obj.extruder);
-  const own = obj.overrides.length;
-  const more = own > 0 || obj.parts.length > 1;
-  return (
-    <li>
-      <button
-        onClick={() => setOpen(!open)}
-        aria-expanded={more ? open : undefined}
-        disabled={!more}
-        className="w-full flex items-center gap-2 h-7 text-left text-[13px] text-white disabled:cursor-default"
-      >
-        {more ? (
-          open ? <ChevronDown className="w-3.5 h-3.5 text-bambu-gray" /> : <ChevronRight className="w-3.5 h-3.5 text-bambu-gray" />
-        ) : (
-          <span className="w-3.5" />
-        )}
-        <span className="truncate flex-1">{obj.name ?? `#${obj.id}`}</span>
-        {own > 0 && <span className="text-[11px] text-amber-400">{t('farm.workspace.ownSettings', { count: own })}</span>}
-        {Number.isFinite(n) && n > 0 && <Chip colour={colours[n - 1]} n={n} />}
-      </button>
-      {open && (
-        <ul className="ml-6 mb-1 text-[11px] text-bambu-gray space-y-0.5">
-          {obj.parts.length > 1 && obj.parts.map((p) => <li key={p.id ?? p.name}>{p.name}</li>)}
-          {obj.overrides.map((o) => (
-            <li key={`${o.part}-${o.key}`} className="font-mono break-all">
-              {o.part && o.part !== obj.name ? `${o.part} › ` : ''}
-              {o.key} = {o.value}
-            </li>
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
 interface Props {
   layout: OrcaLayout;
   doc: WorkspaceDocument;
   presets: { printer: string | null; process: string | null };
-  selectedPlate: number | null;
   draft: Draft;
   onChange: (setting: WorkspaceSetting, value: SettingValue) => void;
   onReset: (key: string) => void;
-  onEditPreset: (kind: 'printer' | 'filament') => void;
+  /** ``filament``: which filament's window (from 0). */
+  onEditPreset: (kind: 'printer' | 'filament', filament?: number) => void;
+  /** The Process box shows the objects (Oggetti) instead of the global settings (Globale). */
+  perObject: boolean;
+  onPerObject: (on: boolean) => void;
+  selection: Selection;
+  onSelect: (selection: Selection) => void;
+  onMenu: (at: { x: number; y: number }, selection: Exclude<Selection, null>) => void;
+  stats: Map<string, ObjectStats>;
 }
 
-export function Sidebar({ layout, doc, presets, selectedPlate, draft, onChange, onReset, onEditPreset }: Props) {
+export function Sidebar({
+  layout,
+  doc,
+  presets,
+  draft,
+  onChange,
+  onReset,
+  onEditPreset,
+  perObject,
+  onPerObject,
+  selection,
+  onSelect,
+  onMenu,
+  stats,
+}: Props) {
   const { t } = useTranslation();
   const [simple, setSimple] = useState(true);
-  const [perObject, setPerObject] = useState(false);
   const colours = values(doc, 'filament_colour');
   const names = values(doc, 'filament_settings_id');
   const types = values(doc, 'filament_type');
   const nozzle = values(doc, 'nozzle_diameter')[0];
-  const plate = doc.plates.find((p) => p.index === selectedPlate);
-  const byId = new Map(doc.objects.map((o) => [o.id, o]));
-  const objects = plate
-    ? plate.object_ids.map((id) => byId.get(id)).filter((o): o is WorkspaceObject => !!o)
-    : doc.objects;
   const hasSettings = doc.settings.length > 0;
   const box = 'rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary';
 
@@ -138,7 +117,10 @@ export function Sidebar({ layout, doc, presets, selectedPlate, draft, onChange, 
               <span className="truncate">{names[i] || types[i] || '—'}</span>
             </span>
             {hasSettings && (
-              <EditButton label={t('farm.workspace.editPreset', { name: t('farm.workspace.filaments') })} onClick={() => onEditPreset('filament')} />
+              <EditButton
+                label={t('farm.workspace.editFilament', { n: i + 1 })}
+                onClick={() => onEditPreset('filament', i)}
+              />
             )}
           </li>
         ))}
@@ -149,7 +131,7 @@ export function Sidebar({ layout, doc, presets, selectedPlate, draft, onChange, 
           {[false, true].map((v) => (
             <button
               key={String(v)}
-              onClick={() => setPerObject(v)}
+              onClick={() => onPerObject(v)}
               aria-pressed={perObject === v}
               className={`px-2 rounded-full ${perObject === v ? 'bg-bambu-green text-white' : 'text-bambu-gray hover:text-white'}`}
             >
@@ -165,16 +147,17 @@ export function Sidebar({ layout, doc, presets, selectedPlate, draft, onChange, 
         )}
       </Header>
       {perObject ? (
-        <div className="px-3 py-1">
-          {objects.length === 0 ? (
-            <p className="text-[13px] text-bambu-gray">—</p>
-          ) : (
-            <ul>
-              {objects.map((o, i) => (
-                <ObjectRow key={`${o.id}-${i}`} obj={o} colours={colours} />
-              ))}
-            </ul>
-          )}
+        <div className="flex-1 min-h-[32rem] lg:min-h-0">
+          <ObjectsPanel
+            layout={layout}
+            doc={doc}
+            draft={draft}
+            colours={colours}
+            stats={stats}
+            selection={selection}
+            onSelect={onSelect}
+            onMenu={onMenu}
+          />
         </div>
       ) : (
         hasSettings && (

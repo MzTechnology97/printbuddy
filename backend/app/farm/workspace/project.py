@@ -123,7 +123,8 @@ def _meta(el) -> dict[str, str]:
 
 
 def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
-    """Plates and objects from ``model_settings.config``: name, filament, per-object setting overrides.
+    """Plates and objects from ``model_settings.config``: name, filament, per-object setting overrides,
+    each plate's metadata.
 
     An override is a key of the object (or of one of its parts) that is also a project setting: the
     slicer applies it to that object instead of the project value. ``warnings`` lists what could not
@@ -171,6 +172,8 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
                 "name": meta.get("plater_name") or None,
                 "object_ids": [i["object_id"] for i in instances if i["object_id"]],
                 "instances": [i for i in instances if i["object_id"]],
+                # the plate's own settings (bed_type, print_sequence, spiral_mode...), shown read only for now
+                "metadata": meta,
             }
         )
     return {"plates": sorted(plates, key=lambda p: p["index"]), "objects": objects, "warnings": []}

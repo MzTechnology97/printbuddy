@@ -1584,6 +1584,26 @@
    "max": 300.0,
    "mode": "simple"
   },
+  "curr_bed_type": {
+   "type": "coEnum",
+   "label": "Bed type",
+   "tooltip": "Plate types supported by the printer",
+   "mode": "simple"
+  },
+  "first_layer_print_sequence": {
+   "type": "coInts",
+   "label": "First layer print sequence",
+   "min": 0.0,
+   "max": 16.0,
+   "mode": "simple"
+  },
+  "other_layers_print_sequence": {
+   "type": "coInts",
+   "label": "Other layers print sequence",
+   "min": 0.0,
+   "max": 16.0,
+   "mode": "simple"
+  },
   "before_layer_change_gcode": {
    "type": "coString",
    "label": "Before layer change G-code",
@@ -2251,39 +2271,48 @@
    "enum": [
     {
      "value": "monotonic",
-     "label": "Monotonic"
+     "label": "Monotonic",
+     "icon": "param_monotonic"
     },
     {
      "value": "monotonicline",
-     "label": "Monotonic line"
+     "label": "Monotonic line",
+     "icon": "param_monotonicline"
     },
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "alignedrectilinear",
-     "label": "Aligned Rectilinear"
+     "label": "Aligned Rectilinear",
+     "icon": "param_alignedrectilinear"
     },
     {
      "value": "concentric",
-     "label": "Concentric"
+     "label": "Concentric",
+     "icon": "param_concentric"
     },
     {
      "value": "spiralinset",
-     "label": "Spiral Inset"
+     "label": "Spiral Inset",
+     "icon": "param_spiralinset"
     },
     {
      "value": "hilbertcurve",
-     "label": "Hilbert Curve"
+     "label": "Hilbert Curve",
+     "icon": "param_hilbertcurve"
     },
     {
      "value": "archimedeanchords",
-     "label": "Archimedean Chords"
+     "label": "Archimedean Chords",
+     "icon": "param_archimedeanchords"
     },
     {
      "value": "octagramspiral",
-     "label": "Octagram Spiral"
+     "label": "Octagram Spiral",
+     "icon": "param_octagramspiral"
     }
    ]
   },
@@ -3060,107 +3089,133 @@
    "enum": [
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "alignedrectilinear",
-     "label": "Aligned Rectilinear"
+     "label": "Aligned Rectilinear",
+     "icon": "param_alignedrectilinear"
     },
     {
      "value": "zigzag",
-     "label": "Zig Zag"
+     "label": "Zig Zag",
+     "icon": "param_zigzag"
     },
     {
      "value": "crosszag",
-     "label": "Cross Zag"
+     "label": "Cross Zag",
+     "icon": "param_crosszag"
     },
     {
      "value": "lockedzag",
-     "label": "Locked Zag"
+     "label": "Locked Zag",
+     "icon": "param_lockedzag"
     },
     {
      "value": "line",
-     "label": "Line"
+     "label": "Line",
+     "icon": "param_line"
     },
     {
      "value": "grid",
-     "label": "Grid"
+     "label": "Grid",
+     "icon": "param_grid"
     },
     {
      "value": "triangles",
-     "label": "Triangles"
+     "label": "Triangles",
+     "icon": "param_triangles"
     },
     {
      "value": "tri-hexagon",
-     "label": "Tri-hexagon"
+     "label": "Tri-hexagon",
+     "icon": "param_tri-hexagon"
     },
     {
      "value": "cubic",
-     "label": "Cubic"
+     "label": "Cubic",
+     "icon": "param_cubic"
     },
     {
      "value": "adaptivecubic",
-     "label": "Adaptive Cubic"
+     "label": "Adaptive Cubic",
+     "icon": "param_adaptivecubic"
     },
     {
      "value": "quartercubic",
-     "label": "Quarter Cubic"
+     "label": "Quarter Cubic",
+     "icon": "param_quartercubic"
     },
     {
      "value": "supportcubic",
-     "label": "Support Cubic"
+     "label": "Support Cubic",
+     "icon": "param_supportcubic"
     },
     {
      "value": "lightning",
-     "label": "Lightning"
+     "label": "Lightning",
+     "icon": "param_lightning"
     },
     {
      "value": "honeycomb",
-     "label": "Honeycomb"
+     "label": "Honeycomb",
+     "icon": "param_honeycomb"
     },
     {
      "value": "3dhoneycomb",
-     "label": "3D Honeycomb"
+     "label": "3D Honeycomb",
+     "icon": "param_3dhoneycomb"
     },
     {
      "value": "lateral-honeycomb",
-     "label": "Lateral Honeycomb"
+     "label": "Lateral Honeycomb",
+     "icon": "param_lateral-honeycomb"
     },
     {
      "value": "lateral-lattice",
-     "label": "Lateral Lattice"
+     "label": "Lateral Lattice",
+     "icon": "param_lateral-lattice"
     },
     {
      "value": "crosshatch",
-     "label": "Cross Hatch"
+     "label": "Cross Hatch",
+     "icon": "param_crosshatch"
     },
     {
      "value": "tpmsd",
-     "label": "TPMS-D"
+     "label": "TPMS-D",
+     "icon": "param_tpmsd"
     },
     {
      "value": "tpmsfk",
-     "label": "TPMS-FK"
+     "label": "TPMS-FK",
+     "icon": "param_tpmsfk"
     },
     {
      "value": "gyroid",
-     "label": "Gyroid"
+     "label": "Gyroid",
+     "icon": "param_gyroid"
     },
     {
      "value": "concentric",
-     "label": "Concentric"
+     "label": "Concentric",
+     "icon": "param_concentric"
     },
     {
      "value": "hilbertcurve",
-     "label": "Hilbert Curve"
+     "label": "Hilbert Curve",
+     "icon": "param_hilbertcurve"
     },
     {
      "value": "archimedeanchords",
-     "label": "Archimedean Chords"
+     "label": "Archimedean Chords",
+     "icon": "param_archimedeanchords"
     },
     {
      "value": "octagramspiral",
-     "label": "Octagram Spiral"
+     "label": "Octagram Spiral",
+     "icon": "param_octagramspiral"
     }
    ]
   },
@@ -4223,11 +4278,13 @@
    "enum": [
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "concentric",
-     "label": "Concentric"
+     "label": "Concentric",
+     "icon": "param_concentric"
     }
    ]
   },
@@ -5739,23 +5796,28 @@
     },
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "rectilinear-grid",
-     "label": "Rectilinear grid"
+     "label": "Rectilinear grid",
+     "icon": "param_rectilinear-grid"
     },
     {
      "value": "honeycomb",
-     "label": "Honeycomb"
+     "label": "Honeycomb",
+     "icon": "param_honeycomb"
     },
     {
      "value": "lightning",
-     "label": "Lightning"
+     "label": "Lightning",
+     "icon": "param_lightning"
     },
     {
      "value": "hollow",
-     "label": "Hollow"
+     "label": "Hollow",
+     "icon": "param_hollow"
     }
    ]
   },
@@ -5771,23 +5833,28 @@
     },
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "concentric",
-     "label": "Concentric"
+     "label": "Concentric",
+     "icon": "param_concentric"
     },
     {
      "value": "spiralinset",
-     "label": "Spiral Inset"
+     "label": "Spiral Inset",
+     "icon": "param_spiralinset"
     },
     {
      "value": "rectilinear_interlaced",
-     "label": "Rectilinear Interlaced"
+     "label": "Rectilinear Interlaced",
+     "icon": "param_rectilinear_interlaced"
     },
     {
      "value": "grid",
-     "label": "Grid"
+     "label": "Grid",
+     "icon": "param_grid"
     }
    ]
   },
@@ -5826,7 +5893,8 @@
     },
     {
      "value": "grid",
-     "label": "Grid"
+     "label": "Grid",
+     "icon": "param_grid"
     },
     {
      "value": "snug",
@@ -6069,11 +6137,13 @@
    "enum": [
     {
      "value": "rectilinear",
-     "label": "Rectilinear"
+     "label": "Rectilinear",
+     "icon": "param_rectilinear"
     },
     {
      "value": "concentric",
-     "label": "Concentric"
+     "label": "Concentric",
+     "icon": "param_concentric"
     }
    ]
   },
@@ -6743,6 +6813,356 @@
    ]
   }
  },
+ "object_keys": [
+  "adaptive_infill_gradient",
+  "adaptive_infill_interior_density",
+  "adaptive_infill_mode",
+  "align_infill_direction_to_model",
+  "alternate_extra_wall",
+  "belt_purge_tower_object",
+  "bottom_color_penetration_layers",
+  "bottom_layer_direction",
+  "bottom_shell_layers",
+  "bottom_shell_thickness",
+  "bottom_solid_infill_flow_ratio",
+  "bottom_surface_density",
+  "bottom_surface_filament_id",
+  "bottom_surface_fill_order",
+  "bottom_surface_pattern",
+  "bridge_acceleration",
+  "bridge_angle",
+  "bridge_density",
+  "bridge_flow",
+  "bridge_line_width",
+  "bridge_no_support",
+  "bridge_speed",
+  "brim_ears_detection_length",
+  "brim_ears_max_angle",
+  "brim_ears_outer_only",
+  "brim_flow_ratio",
+  "brim_object_gap",
+  "brim_type",
+  "brim_use_efc_outline",
+  "brim_width",
+  "calib_flowrate_topinfill_special_order",
+  "center_of_surface_pattern",
+  "counterbore_hole_bridging",
+  "default_acceleration",
+  "default_jerk",
+  "default_junction_deviation",
+  "detect_narrow_internal_solid_infill",
+  "detect_overhang_wall",
+  "detect_thin_wall",
+  "dont_filter_internal_bridges",
+  "elefant_foot_compensation",
+  "elefant_foot_compensation_layers",
+  "elefant_foot_layers_density",
+  "emit_machine_limits_to_gcode",
+  "enable_extra_bridge_layer",
+  "enable_overhang_speed",
+  "enable_support",
+  "enforce_support_layers",
+  "ensure_vertical_shell_thickness",
+  "extra_brim_width",
+  "extra_perimeters_on_overhangs",
+  "extra_solid_infills",
+  "filament_ironing_flow",
+  "filament_ironing_inset",
+  "filament_ironing_spacing",
+  "filament_ironing_speed",
+  "fill_multiline",
+  "filter_out_gap_fill",
+  "first_layer_flow_ratio",
+  "flush_into_infill",
+  "flush_into_objects",
+  "flush_into_support",
+  "fuzzy_skin",
+  "fuzzy_skin_first_layer",
+  "fuzzy_skin_layers_between_ripple_offset",
+  "fuzzy_skin_mode",
+  "fuzzy_skin_noise_type",
+  "fuzzy_skin_octaves",
+  "fuzzy_skin_persistence",
+  "fuzzy_skin_point_distance",
+  "fuzzy_skin_ripple_offset",
+  "fuzzy_skin_ripples_per_layer",
+  "fuzzy_skin_scale",
+  "fuzzy_skin_thickness",
+  "gap_fill_flow_ratio",
+  "gap_fill_target",
+  "gap_infill_speed",
+  "gyroid_optimized",
+  "hole_to_polyhole",
+  "hole_to_polyhole_max_edges",
+  "hole_to_polyhole_threshold",
+  "hole_to_polyhole_twisted",
+  "imex_head_filament_map",
+  "imex_parallel_mode",
+  "infill_anchor",
+  "infill_anchor_max",
+  "infill_combination",
+  "infill_combination_max_layer_height",
+  "infill_complete_top",
+  "infill_direction",
+  "infill_jerk",
+  "infill_lock_depth",
+  "infill_overhang_angle",
+  "infill_shift_step",
+  "infill_wall_overlap",
+  "initial_layer_acceleration",
+  "initial_layer_jerk",
+  "initial_layer_min_bead_width",
+  "inner_wall_acceleration",
+  "inner_wall_filament_id",
+  "inner_wall_flow_ratio",
+  "inner_wall_jerk",
+  "inner_wall_line_width",
+  "inner_wall_speed",
+  "input_shaping_damp_x",
+  "input_shaping_damp_y",
+  "input_shaping_emit",
+  "input_shaping_freq_x",
+  "input_shaping_freq_y",
+  "input_shaping_type",
+  "interface_shells",
+  "interlocking_beam",
+  "interlocking_beam_layer_count",
+  "interlocking_beam_width",
+  "interlocking_boundary_avoidance",
+  "interlocking_depth",
+  "interlocking_orientation",
+  "internal_bridge_angle",
+  "internal_bridge_density",
+  "internal_bridge_flow",
+  "internal_bridge_speed",
+  "internal_solid_filament_id",
+  "internal_solid_infill_acceleration",
+  "internal_solid_infill_flow_ratio",
+  "internal_solid_infill_line_width",
+  "internal_solid_infill_pattern",
+  "internal_solid_infill_speed",
+  "ironing_angle",
+  "ironing_angle_fixed",
+  "ironing_direction",
+  "ironing_flow",
+  "ironing_inset",
+  "ironing_pattern",
+  "ironing_spacing",
+  "ironing_speed",
+  "ironing_type",
+  "is_infill_first",
+  "lateral_lattice_angle_1",
+  "lateral_lattice_angle_2",
+  "layer_height",
+  "leading_brim_length",
+  "lightning_overhang_angle",
+  "lightning_prune_angle",
+  "lightning_straightening_angle",
+  "line_width",
+  "machine_bed_mass_Y",
+  "machine_max_acceleration_e",
+  "machine_max_acceleration_extruding",
+  "machine_max_acceleration_retracting",
+  "machine_max_acceleration_travel",
+  "machine_max_acceleration_x",
+  "machine_max_acceleration_y",
+  "machine_max_acceleration_z",
+  "machine_max_force_Y",
+  "machine_max_jerk_e",
+  "machine_max_jerk_x",
+  "machine_max_jerk_y",
+  "machine_max_jerk_z",
+  "machine_max_junction_deviation",
+  "machine_max_printed_mass",
+  "machine_max_speed_e",
+  "machine_max_speed_x",
+  "machine_max_speed_y",
+  "machine_max_speed_z",
+  "machine_min_extruding_rate",
+  "machine_min_travel_rate",
+  "make_overhang_printable",
+  "make_overhang_printable_angle",
+  "make_overhang_printable_hole_size",
+  "max_bridge_length",
+  "max_resonance_avoidance_speed",
+  "min_bead_width",
+  "min_feature_size",
+  "min_length_factor",
+  "min_resonance_avoidance_speed",
+  "min_width_top_surface",
+  "minimum_sparse_infill_area",
+  "mmu_segmented_region_interlocking_depth",
+  "mmu_segmented_region_max_width",
+  "only_one_wall_first_layer",
+  "only_one_wall_top",
+  "outer_wall_acceleration",
+  "outer_wall_filament_id",
+  "outer_wall_flow_ratio",
+  "outer_wall_jerk",
+  "outer_wall_line_width",
+  "outer_wall_speed",
+  "overhang_1_4_speed",
+  "overhang_2_4_speed",
+  "overhang_3_4_speed",
+  "overhang_4_4_speed",
+  "overhang_flow_ratio",
+  "overhang_reverse",
+  "overhang_reverse_internal_only",
+  "overhang_reverse_threshold",
+  "precise_outer_wall",
+  "precise_z_height",
+  "print_extruder_id",
+  "print_extruder_variant",
+  "print_flow_ratio",
+  "raft_contact_distance",
+  "raft_expansion",
+  "raft_first_layer_density",
+  "raft_first_layer_expansion",
+  "raft_layers",
+  "relative_bridge_angle",
+  "resonance_avoidance",
+  "role_based_wipe_speed",
+  "scarf_angle_threshold",
+  "scarf_joint_flow_ratio",
+  "scarf_joint_speed",
+  "scarf_overhang_threshold",
+  "seam_gap",
+  "seam_position",
+  "seam_slope_conditional",
+  "seam_slope_entire_loop",
+  "seam_slope_inner_walls",
+  "seam_slope_min_length",
+  "seam_slope_start_height",
+  "seam_slope_steps",
+  "seam_slope_type",
+  "separated_infills",
+  "set_other_flow_ratios",
+  "skeleton_infill_density",
+  "skeleton_infill_line_width",
+  "skin_infill_density",
+  "skin_infill_depth",
+  "skin_infill_line_width",
+  "skirt_start_angle",
+  "slice_closing_radius",
+  "slicing_mode",
+  "slowdown_for_curled_perimeters",
+  "small_area_infill_flow_compensation",
+  "small_perimeter_speed",
+  "small_perimeter_threshold",
+  "small_support_perimeter_speed",
+  "small_support_perimeter_threshold",
+  "solid_infill_direction",
+  "solid_infill_rotate_template",
+  "sparse_infill_acceleration",
+  "sparse_infill_density",
+  "sparse_infill_filament_id",
+  "sparse_infill_flow_ratio",
+  "sparse_infill_line_width",
+  "sparse_infill_pattern",
+  "sparse_infill_rotate_template",
+  "sparse_infill_smooth_factor",
+  "sparse_infill_speed",
+  "staggered_inner_seams",
+  "support_angle",
+  "support_base_pattern",
+  "support_base_pattern_spacing",
+  "support_bottom_interface_spacing",
+  "support_bottom_z_distance",
+  "support_critical_regions_only",
+  "support_expansion",
+  "support_filament",
+  "support_flow_ratio",
+  "support_interface_bottom_layers",
+  "support_interface_filament",
+  "support_interface_flow_ratio",
+  "support_interface_loop_pattern",
+  "support_interface_not_for_body",
+  "support_interface_pattern",
+  "support_interface_spacing",
+  "support_interface_speed",
+  "support_interface_top_layers",
+  "support_ironing",
+  "support_ironing_flow",
+  "support_ironing_pattern",
+  "support_ironing_spacing",
+  "support_line_width",
+  "support_object_first_layer_gap",
+  "support_object_xy_distance",
+  "support_on_build_plate_only",
+  "support_remove_small_overhang",
+  "support_speed",
+  "support_style",
+  "support_threshold_angle",
+  "support_threshold_overlap",
+  "support_top_z_distance",
+  "support_type",
+  "symmetric_infill_y_axis",
+  "thick_bridges",
+  "thick_internal_bridges",
+  "top_bottom_infill_wall_overlap",
+  "top_color_penetration_layers",
+  "top_layer_direction",
+  "top_shell_layers",
+  "top_shell_thickness",
+  "top_solid_infill_flow_ratio",
+  "top_surface_acceleration",
+  "top_surface_density",
+  "top_surface_expansion",
+  "top_surface_expansion_direction",
+  "top_surface_expansion_margin",
+  "top_surface_filament_id",
+  "top_surface_fill_order",
+  "top_surface_jerk",
+  "top_surface_line_width",
+  "top_surface_pattern",
+  "top_surface_speed",
+  "travel_acceleration",
+  "travel_jerk",
+  "tree_support_angle_slow",
+  "tree_support_auto_brim",
+  "tree_support_branch_angle",
+  "tree_support_branch_angle_organic",
+  "tree_support_branch_diameter",
+  "tree_support_branch_diameter_angle",
+  "tree_support_branch_diameter_organic",
+  "tree_support_branch_distance",
+  "tree_support_branch_distance_organic",
+  "tree_support_brim_width",
+  "tree_support_tip_diameter",
+  "tree_support_top_rate",
+  "tree_support_wall_count",
+  "unsupported_wall_last",
+  "wall_direction",
+  "wall_distribution_count",
+  "wall_generator",
+  "wall_infill_order",
+  "wall_loops",
+  "wall_maximum_deviation",
+  "wall_maximum_resolution",
+  "wall_sequence",
+  "wall_transition_angle",
+  "wall_transition_filter_deviation",
+  "wall_transition_length",
+  "wipe_before_external_loop",
+  "wipe_inward",
+  "wipe_inward_distance",
+  "wipe_on_loops",
+  "wipe_speed",
+  "xy_contour_compensation",
+  "xy_hole_compensation",
+  "zaa_dont_alternate_fill_direction",
+  "zaa_enabled",
+  "zaa_min_z",
+  "zaa_minimize_perimeter_height"
+ ],
+ "plate_keys": {
+  "bed_type": "curr_bed_type",
+  "skirt_start_angle": "skirt_start_angle",
+  "print_sequence": "print_sequence",
+  "spiral_mode": "spiral_mode",
+  "first_layer_print_sequence": "first_layer_print_sequence",
+  "other_layers_print_sequence": "other_layers_print_sequence"
+ },
  "it": {
   "%": "%",
   "0 (no open anchors)": "0 (senza ancoraggi aperti)",
@@ -6768,9 +7188,21 @@
   "Adaptive gradient": "Gradiente adattivo",
   "Adaptive pressure advance measurements (beta)": "Misurazioni Pressure Advance adattivo (beta)",
   "Adaptive volumetric speed": "Velocità volumetrica adattiva",
+  "Add": "Aggiungi",
+  "Add Handy models": "Aggiungi modelli utili",
+  "Add Models": "Aggiungi modelli",
+  "Add Modifier": "Aggiungi modificatore",
+  "Add Negative Part": "Aggiungi parte negativa",
+  "Add Part": "Aggiungi parte",
+  "Add Precise Seam": "Aggiungi cucitura precisa",
+  "Add Primitive": "Aggiungi Primitiva",
+  "Add Support Blocker": "Aggiungi divieto di supporto",
+  "Add Support Enforcer": "Aggiungi supporto di rinforzo",
   "Add end G-code when finishing the entire print.": "G-code finale quando si termina l'intera stampa.",
   "Add end G-code when finishing the printing of this filament.": "G-code finale quando si termina la stampa di questo filamento.",
+  "Add instance": "Aggiungi istanza",
   "Add line number": "Aggiungi numero di riga",
+  "Add plate": "Aggiungi piatto",
   "Add sets of pressure advance (PA) values, the volumetric flow speeds and accelerations they were measured at, separated by a comma. One set of values per line. For example\n0.04,3.96,3000\n0.033,3.96,10000\n0.029,7.91,3000\n0.026,7.91,10000\n\nHow to calibrate:\n1. Run the pressure advance test for at least 3 speeds per acceleration value. It is recommended that the test is run for at least the speed of the external perimeters, the speed of the internal perimeters and the fastest feature print speed in your profile (usually its the sparse or solid infill). Then run them for the same speeds for the slowest and fastest print accelerations, and no faster than the recommended maximum acceleration as given by the Klipper input shaper\n2. Take note of the optimal PA value for each volumetric flow speed and acceleration. You can find the flow number by selecting flow from the color scheme drop down and move the horizontal slider over the PA pattern lines. The number should be visible at the bottom of the page. The ideal PA value should be decreasing the higher the volumetric flow is. If it is not, confirm that your extruder is functioning correctly. The slower and with less acceleration you print, the larger the range of acceptable PA values. If no difference is visible, use the PA value from the faster test\n3. Enter the triplets of PA values, Flow and Accelerations in the text box here and save your filament profile.": "Aggiungi i valori di Pressure Advance (AP), portata volumetrica e accelerazione secondo le prove effettuate, separati da una virgola. Digita un gruppo di valori per riga. Ad esempio\n0.04,3.96,3000\n0.033,3.96,10000\n0.029,7.91,3000\n0.026,7.91,10000\n\nCome calibrare:\n1. Esegui il test del Pressure Advance per almeno 3 velocità per ogni valore di accelerazione. Si consiglia di eseguire il test almeno per la velocità delle pareti esterne, la velocità delle pareti interne e la velocità di stampa più rapida nel tuo profilo (solitamente è il riempimento sparso o solido), quindi eseguire i test con queste velocità per ogni valore di accelerazione, dal più lento al più veloce. Non superare l'accelerazione massima consigliata fornita dal firmware Klipper\n2. Prendi nota del valore AP ottimale per ogni portata volumetrica e accelerazione. Puoi trovare il numero relativo alla portata volumetrica dal menu a discesa dello schema di colori e spostando il cursore orizzontale sulle linee del modello AP. Il numero dovrebbe essere visibile nella parte inferiore della pagina. Il valore AP ideale dovrebbe decrescere all'aumentare della portata volumetrica. In caso contrario, verifica che l'estrusore funzioni correttamente. Più lentamente e con meno accelerazione stampi, più ampio è l'intervallo di valori AP accettabili. Se non è visibile alcuna differenza, usa il valore AP dal test più veloce\n3. Inserisci le triplette dei valori di Pressure Advance, portata e accelerazione nella casella di testo qui e salva il tuo profilo di filamento.",
   "Add solid infill near sloping surfaces to guarantee the vertical shell thickness (top+bottom solid layers)\nNone: No solid infill will be added anywhere. Caution: Use this option carefully if your model has sloped surfaces\nCritical Only: Avoid adding solid infill for walls\nModerate: Add solid infill for heavily sloping surfaces only\nAll: Add solid infill for all suitable sloping surfaces\nDefault value is All.": "Aggiunge un riempimento solido in prossimità di superfici inclinate per garantire lo spessore verticale del guscio (strati solidi superiori e inferiori)\nNessuno: Non viene aggiunto alcun riempimento solido. Attenzione: utilizzare questa opzione con precauzione se il modello presenta superfici inclinate\nSolo Critico: Evita l'aggiunta di riempimenti solidi per le pareti\nModerato: Aggiunge il riempimento solido solo per le superfici fortemente inclinate.\nTutto: aggiunge un riempimento solido per tutte le superfici inclinate idonee\nIl valore predefinito è Tutto.",
   "Adhesiveness Category": "Categoria di adesività",
@@ -6781,6 +7213,7 @@
   "Advanced": "Avanzate",
   "After a tool change, the exact position of the newly loaded filament inside the nozzle may not be known, and the filament pressure is likely not yet stable. Before purging the print head into an infill or a sacrificial object, Orca Slicer will always prime this amount of material into the wipe tower to produce successive infill or sacrificial object extrusions reliably.": "Dopo un cambio di testina, l'esatta posizione del filamento appena caricato dentro l'ugello potrebbe essere sconosciuta, e la pressione del filamento potrebbe non essere stabile. Prima di estrudere materiale su un riempimento o un oggetto sacrificale, OrcaSlicer posizionerà questo materiale in una torre di spurgo al fine di ottenere una successiva estrusione affidabile su oggetti sacrificali o riempimenti.",
   "Align directions to model": "Allinea le direzioni al modello",
+  "Align/Distribute": "Allinea/Distribuisci",
   "Aligned": "Allineato",
   "Aligned Rectilinear": "Rettilineo allineato",
   "Aligned back": "Allineato dietro",
@@ -6808,9 +7241,18 @@
   "Arachne": "Arachne",
   "Arc fitting": "Adattamento ad arco",
   "Archimedean Chords": "Corde di Archimede",
+  "Arrange": "Disponi",
+  "Arrange all objects": "Disponi tutti gli oggetti",
+  "Arrange objects on current plate": "Disponi gli oggetti sul piatto corrente",
   "As object list": "Come elenco di oggetti",
+  "Assemble": "Assembla",
+  "Assembly View": "Vista di montaggio",
   "Auto": "Auto",
+  "Auto Drop": "Rilascio automatico",
+  "Auto Rotate": "Rotazione automatica",
   "Auto brim width": "Larghezza tesa automatica",
+  "Auto orient objects on current plate": "Orienta automaticamente gli oggetti sul piatto corrente",
+  "Auto orientation": "Orientamento automatico",
   "Automatically combine sparse infill of several layers to print together in order to reduce time. Walls are still printed with original layer height.": "Combina automaticamente il riempimento sparso di più strati per per ridurre i tempi di stampa. La parete viene comunque stampata secondo l'altezza originale dello strato.",
   "Automatically orient STL files on the Z axis upon initial import.": "Orienta automaticamente gli STL sull'asse Z al momento dell'importazione iniziale.",
   "Auxiliary part cooling fan": "Ventola di raffreddamento ausiliaria",
@@ -6818,6 +7260,7 @@
   "Avoid crossing walls - Max detour length": "Evitare di attraversare le pareti - Lunghezza massima della deviazione",
   "Avoid interface filament for base": "Evita filamento interfaccia per base",
   "Avoid using support interface filament to print support base if possible.": "Se possibile, evita di utilizzare il filamento dell'interfaccia di supporto per stampare la base del supporto.",
+  "Axes": "Assi",
   "Axis the mesh is rotated about before slicing. This is the belt printer's tilt: an isometric (no distortion) rotation that also drives bed rendering and support gravity tilt, and that the G-code back-transform inverts before the machine-frame shear/scale and remap. X is the typical gantry tilt (belt travels along Y).": "Asse attorno al quale la mesh viene ruotata prima dell'elaborazione. È l'inclinazione della stampante a nastro: una rotazione isometrica (senza distorsione) che determina anche la visualizzazione del piatto e l'inclinazione della gravità per i supporti, e che la trasformazione inversa del G-code annulla prima di taglio/scala e rimappatura nel sistema di riferimento macchina. X è l'inclinazione tipica del portale (il nastro scorre lungo Y).",
   "Back": "Posteriore",
   "Base pattern": "Motivo base",
@@ -6827,6 +7270,7 @@
   "Bed mesh min": "Punto minimo matrice piatto",
   "Bed temperature": "Temperatura piatto",
   "Bed temperature type": "Tipo temperatura piatto",
+  "Bed type": "Tipo di piatto",
   "Before layer change G-code": "G-code prima del cambio strato",
   "Belt printer": "Stampante a nastro",
   "Belt printers only. Extends the brim AHEAD of the object along the belt, on every downhill-facing edge of its contact area - both the object's first contact with the belt and any island that lands later. This apron is laid onto the belt before the object reaches it, so the leading edge has something already stuck down to hold on to.\n\nMeasured on the belt surface, and added on top of Brim width: the brim reaches Brim-object gap + Leading brim length + Brim width ahead of the object. Set Brim-object gap to 0, or the apron will not touch the object it is meant to anchor.\n\nOn a tilted belt each layer lays one strip of the brim, so the thickness of the resulting brim sheet is set by flow rather than by layer height. Use Brim flow ratio to tune it.\n\nSet to 0 to disable.": "Solo stampanti a nastro. Estende la tesa DAVANTI all'oggetto lungo il nastro, su ogni bordo rivolto verso valle della sua area di contatto: sia il primo contatto dell'oggetto con il nastro sia ogni isola che vi si appoggia in seguito. Questo grembiule viene steso sul nastro prima che l'oggetto lo raggiunga, così il bordo d'attacco ha già qualcosa di aderente a cui ancorarsi.\n\nMisurata sulla superficie del nastro e aggiunta a Larghezza tesa: la tesa arriva a Spazio tesa-oggetto + Lunghezza tesa d'attacco + Larghezza tesa davanti all'oggetto. Imposta Spazio tesa-oggetto a 0, altrimenti il grembiule non toccherà l'oggetto che dovrebbe ancorare.\n\nSu un nastro inclinato ogni strato stende una striscia della tesa, quindi lo spessore del foglio di tesa risultante dipende dal flusso e non dall'altezza strato. Usa Flusso di stampa tese per regolarlo.\n\nImposta a 0 per disattivare.",
@@ -6843,6 +7287,7 @@
   "Billow": "Ondulato",
   "Both": "Entrambi",
   "Bottom Only": "Solo inferiore",
+  "Bottom View": "Vista dal basso",
   "Bottom Z distance": "Distanza Z inferiore",
   "Bottom interface layers": "Strati interfaccia inferiore",
   "Bottom interface spacing": "Spaziatura interfaccia inferiore",
@@ -6864,6 +7309,7 @@
   "Bridge flow ratio": "Flusso di stampa ponti",
   "Bridging": "Ponti",
   "Brim": "Tesa",
+  "Brim Ears": "Tese ad orecchio",
   "Brim ear detection radius": "Raggio di rilevamento tesa ad orecchio",
   "Brim ear max angle": "Angolo massimo della tesa ad orecchio",
   "Brim ears outer only": "Tesa ad orecchio solo sul contorno esterno",
@@ -6880,6 +7326,7 @@
   "By layer": "Per strato",
   "By object": "Per oggetto",
   "By reducing the speed of the outer wall to avoid the resonance zone of the printer, ringing on the surface of the model are avoided.\nPlease turn this option off when testing ringing.": "Riducendo la velocità nelle pareti esterne per evitare la zona di risonanza della stampante, si evitano le ondulazioni o ronzii (ringing) sulla superficie del modello.\nDisattivare questa opzione quando si testa il ronzio .",
+  "Center": "Centro",
   "Center surface pattern on": "Centra il motivo della superficie su",
   "Centers the internal infill of each part on itself, as if it were sliced on its own, instead of on the whole assembly. Parts that touch or overlap are treated as one body and share a center; separate parts (or distinct 3D objects) each get their own.\nUseful when an assembly groups several objects that should each keep a consistent, self-centered infill.\nAdaptive Cubic and Support Cubic always center each part on itself, and Lightning infill is generated for the whole object and is unaffected.": "Centra il riempimento interno di ogni parte su se stessa, come se fosse elaborata singolarmente, invece che sull'intero assieme. Le parti che si toccano o si sovrappongono vengono trattate come un unico corpo e condividono un centro; le parti separate (o oggetti 3D distinti) ne ottengono ciascuna uno proprio.\nUtile quando un assieme raggruppa più oggetti che dovrebbero mantenere ciascuno un riempimento coerente e centrato su se stesso.\nCubico adattivo e Supporto cubico centrano sempre ogni parte su se stessa, mentre il riempimento Fulmine viene generato per l'intero oggetto e non ne è influenzato.",
   "Chamber minimal temperature": "Temperatura minima della camera",
@@ -6898,6 +7345,8 @@
   "Classic": "Classico",
   "Clearance radius around extruder: used for collision avoidance in by-object printing.": "Raggio di sicurezza attorno all'estrusore: utilizzato per evitare collisioni nella stampa Per oggetto.",
   "Clockwise": "Senso orario",
+  "Clone": "Clona",
+  "Close": "Chiudi",
   "Close holes": "Chiudi fori",
   "Clumping Detection G-code": "G-code rilevamento ammassi",
   "Clumping detection G-code": "G-code rilevamento ammassi",
@@ -6935,6 +7384,7 @@
   "Cooling moves are gradually accelerating towards this speed.": "I movimenti di raffreddamento accelerano gradualmente verso questa velocità.",
   "Cooling tube length": "Lunghezza tubo di raffreddamento",
   "Cooling tube position": "Posizione tubo di raffreddamento",
+  "Copy Process Settings": "Copia impostazioni di processo",
   "CoreXY": "CoreXY",
   "Counter clockwise": "Senso antiorario",
   "Cracks smaller than 2x gap closing radius are being filled during the triangle mesh slicing. The gap closing operation may reduce the final print resolution, therefore it is advisable to keep the value reasonably low.": "Le fessure più piccole di 2 volte il raggio di chiusura degli spazi vuoti, vengono riempite durante l'elaborazione della maglia triangolare. Questa operazione può ridurre la risoluzione di stampa finale, pertanto si consiglia di mantenere un valore ragionevolmente basso.",
@@ -6945,17 +7395,23 @@
   "Cubic": "Cubico",
   "Custom G-code": "G-code personalizzato",
   "Custom filament sequence used by the cyclic toolchange ordering, as filament numbers separated by commas (e.g. \"3,2,1,4\").\nEach layer prints its filaments following this sequence; filaments not listed are printed last, in ascending order.\nLeave empty to cycle through the filaments in ascending order.": "Sequenza di filamenti personalizzata usata dall'ordinamento ciclico dei cambi testina, come numeri di filamento separati da virgole (ad es. \"3,2,1,4\").\nOgni strato stampa i suoi filamenti seguendo questa sequenza; i filamenti non elencati vengono stampati per ultimi, in ordine crescente.\nLascia vuoto per scorrere i filamenti in ordine crescente.",
+  "Customize current plate": "Personalizza il piatto corrente",
+  "Cut": "Taglia",
   "Cyclic order": "Ordine ciclico",
   "Damping ratio for the X axis input shaper.\nZero will use the firmware damping ratio.\nTo disable input shaping, use the Disable type.\nRRF: X and Y values are equal.": "Rapporto di smorzamento per la compensazione della risonanza sull'asse X.\nSe impostato a zero, verranno utilizzate le impostazioni di rapporto di smorzamento del firmware.\nPer disabilitare la compensazione della risonanza, selezionare il tipo \"Disabilita\".\nRRF: i valori X e Y sono uguali.",
   "Damping ratio for the Y axis input shaper.\nZero will use the firmware damping ratio.\nTo disable input shaping, use the Disable type.": "Rapporto di smorzamento per la compensazione della risonanza sull'asse Y.\nSe impostato a zero, verranno utilizzate le impostazioni di rapporto di smorzamento del firmware.\nPer disabilitare la compensazione della risonanza, selezionare il tipo \"Disabilita\".",
   "Decouple machine-frame tilt": "Disaccoppia inclinazione del sistema di riferimento macchina",
   "Default": "Predefinito",
   "Default (Grid/Organic)": "Predefinito (Griglia/Organico)",
+  "Default View": "Vista predefinita",
   "Default color": "Colore predefinito",
   "Default filament color.\nRight click to reset value to system default.": "Colore filamento predefinito.\nFare clic con il pulsante destro per reimpostare al valore predefinito di sistema.",
   "Default jerk.": "Jerk predefinito.",
   "Default line width if other line widths are set to 0. If expressed as a %, it will be computed over the nozzle diameter.": "Larghezza di linea predefinita se le altre larghezze di linea sono impostate su 0. Se espresso come una %, verrà calcolato sul diametro del ugello.",
   "Delay after unloading": "Ritardo dopo lo scarico",
+  "Delete": "Elimina",
+  "Delete All": "Elimina tutto",
+  "Delete Plate": "Elimina piatto",
   "Delta": "Delta",
   "Density": "Densità",
   "Density of internal solid infill for Elephant foot layers compensation.\nThe initial value for the second layer is set.\nSubsequent layers become linearly denser by the height specified in elefant_foot_compensation_layers.": "Densità del riempimento solido interno per gli strati di compensazione dell'effetto zampa d'elefante.\nIl valore iniziale è impostato per il secondo strato.\nGli strati successivi aumentano di densità in modo lineare in base all'altezza specificata in elefant_foot_compensation_layers.",
@@ -6995,13 +7451,20 @@
   "Don't slow down outer walls": "Non rallentare su pareti esterne",
   "Don't support bridges": "Non supportare i ponti",
   "Draft shield": "Scudo protettivo",
+  "Drop": "Lascia",
   "During print": "Durante la stampa",
   "Each Assembly": "Ogni assieme",
   "Each Model": "Ogni modello",
   "Each Surface": "Ogni superficie",
+  "Edit": "Modifica",
+  "Edit Plate Name": "Modifica nome piatto",
+  "Edit Process Settings": "Modifica impostazioni di processo",
+  "Edit current plate name": "Modifica il nome del piatto corrente",
+  "Edit in Parameter Table": "Modifica nella tabella dei parametri",
   "Elephant foot compensation": "Compensazione zampa d'elefante",
   "Elephant foot compensation layers": "Strati compensazione zampa d'elefante",
   "Elephant foot layers density": "Densità strati zampa d'elefante",
+  "Emboss": "Rilievo",
   "Emit a max fan speed command for this amount of seconds before reducing to target speed to kick-start the cooling fan.\nThis is useful for fans where a low PWM/power may be insufficient to get the fan started spinning from a stop, or to get the fan up to speed faster.\nSet to 0 to deactivate.": "Per avviare la ventola di raffreddamento, verrà inviato un comando di velocità massima alla ventola per questo numero di secondi prima di rallentarla alla velocità obiettivo.\nQuesta funzione è utile per le ventole in cui un basso valore PWM/potenza potrebbe non essere sufficiente per far ripartire la ventola da ferma, o per fargli raggiungere la velocità necessaria più rapidamente.\nImpostare su 0 per disattivare.",
   "Emit input shaping": "Sovrascrivi compensazione risonanza",
   "Emit limits to G-code": "Emetti limiti al G-code",
@@ -7140,10 +7603,12 @@
   "First layer infill": "Riempimento primo strato",
   "First layer minimum wall width": "Larghezza minima parete del primo strato",
   "First layer nozzle temperature": "Temperatura ugello primo strato",
+  "First layer print sequence": "Sequenza di stampa del primo strato",
   "First layer speed": "Velocità primo strato",
   "First layer travel": "Spostamento primo strato",
   "First layer travel speed": "Velocità spostamento primo strato",
   "Fit G2 and G3 arc moves to the toolpaths. Walls and surfaces are fitted within the resolution, while sparse infill, supports and the wipe tower use fixed tolerances.\n - Disabled: only straight G1 moves are used.\n - Enabled: arcs are fitted to all toolpaths.\n - Sparse infill only: arcs are fitted to the sparse infill only, which shortens the G-code of curved infill patterns without affecting the walls and surfaces.\n\nNote: For Klipper machines, Disabled is recommended. Klipper splits arcs back into line segments, which lowers the surface quality and can increase the print time.": "Adatta i movimenti ad arco G2 e G3 ai percorsi utensile. Pareti e superfici sono adattate entro la risoluzione, mentre riempimento sparso, supporti e torre di spurgo usano tolleranze fisse.\n - Disabilitato: vengono usati solo movimenti rettilinei G1.\n - Abilitato: gli archi vengono adattati a tutti i percorsi utensile.\n - Solo riempimento sparso: gli archi vengono adattati solo al riempimento sparso, il che accorcia il G-code dei motivi di riempimento curvi senza influire su pareti e superfici.\n\nNota: per le macchine Klipper si consiglia Disabilitato. Klipper suddivide nuovamente gli archi in segmenti di linea, il che riduce la qualità della superficie e può aumentare il tempo di stampa.",
+  "Fit camera to scene or selected object.": "Adatta la fotocamera alla scena o all'oggetto selezionato.",
   "Fixed angle for the bottom solid infill lines.\nSet to -1 to follow the default solid infill direction.": "Angolo fisso per le linee del riempimento solido inferiore.\nImposta a -1 per seguire la direzione predefinita del riempimento solido.",
   "Fixed angle for the top solid infill and ironing lines.\nSet to -1 to follow the default solid infill direction.": "Angolo fisso per il riempimento solido superiore e le linee di stiratura.\nImposta a -1 per seguire la direzione predefinita del riempimento solido.",
   "Fixed ironing angle": "Angolo di stiratura fisso",
@@ -7160,6 +7625,8 @@
   "Force cooling for overhangs and bridges": "Forza raffreddamento per sporgenze e ponti",
   "Force the generation of solid shells between adjacent materials/volumes. Useful for multi-extruder prints with translucent materials or manual soluble support material.": "Forza la generazione di perimetri solidi tra volumi o materiali adiacenti. Utile per stampe multiestrusore con materiali traslucidi o supporti con materiali solubili.",
   "Force the toolhead to travel to the wipe tower before issuing the tool change command (Tx).\n\nOnly relevant for multi-extruder (multi-toolhead) printers using a Type 2 wipe tower. By default Orca skips the travel on multi-toolhead machines because the firmware handles the head swap, which can result in the Tx command being issued above the printed part. Enable this option if you want the tool change to always be issued above the wipe tower instead.": "Forza la testa di stampa a spostarsi sulla torre di spurgo prima di emettere il comando di cambio utensile (Tx).\n\nRilevante solo per le stampanti multi-estrusore (multi-testa) che utilizzano una torre di spurgo di Tipo 2. Per impostazione predefinita Orca salta lo spostamento sulle macchine multi-testa perché il firmware gestisce il cambio della testa, il che può far sì che il comando Tx venga emesso sopra la parte stampata. Abilita questa opzione se desideri che il cambio utensile venga sempre emesso sopra la torre di spurgo.",
+  "Frequent": "Frequente",
+  "Front View": "Vista frontale",
   "Front-left": "Anteriore sinistra",
   "Front-right": "Anteriore destra",
   "Full fan speed at layer": "Velocità massima ventola su strato",
@@ -7183,12 +7650,15 @@
   "Gap infill": "Riempimento spazi vuoti",
   "Generate interlocking beam structure at the locations where different filaments touch. This improves the adhesion between filaments, especially models printed in different materials.": "Genera una struttura di travi ad incastro nei punti in cui i diversi filamenti si toccano. Ciò migliora l'adesione tra i filamenti, in particolare nei modelli stampati in materiali diversi.",
   "Generate mouse ears only on the outer contour of the model, excluding holes and enclosed sections.": "Genera gli orecchi di topo solo sul contorno esterno del modello, escludendo fori e sezioni chiuse.",
+  "Global": "Globale",
   "Grades the Gyroid and TPMS infill inside the object: its cells grow from the surface of the object towards its center. The sparse infill density is used at the surface and the interior density at the center.\nDistance warp, Smooth blend and Stepped shells follow the distance to the nearest surface, including the top and bottom, with the interior density at the point farthest from it:\n - Distance warp: one continuous pattern, stretched and sheared where the distance changes across directions, as in plates and long parts.\n - Smooth blend: the patterns of neighbouring densities blended into each other, with small loops where they meet.\n - Stepped shells: shells of the regular pattern at densities about 1.5 times apart, their lines joined along the shell boundaries.\n - Lobes: follows the 3D shape of the object, including its top and bottom. Every lobe, a part joined to the rest by a narrower neck, is graded towards its own center.\n - Normal Z, Y or X: follows the sections of the object normal to that axis, so the density does not change along it.": "Gradua il riempimento Giroide e TPMS all'interno dell'oggetto: le sue celle crescono dalla superficie dell'oggetto verso il centro. La densità del riempimento sparso viene usata in superficie e la densità interna al centro.\nDeformazione per distanza, Fusione graduale e Gusci a gradini seguono la distanza dalla superficie più vicina, comprese quella superiore e quella inferiore, con la densità interna nel punto più lontano da essa:\n - Deformazione per distanza: un unico motivo continuo, stirato e deformato dove la distanza cambia tra le direzioni, come nelle lastre e nelle parti lunghe.\n - Fusione graduale: i motivi delle densità vicine si fondono l'uno nell'altro, con piccoli anelli dove si incontrano.\n - Gusci a gradini: gusci del motivo regolare a densità che differiscono di circa 1,5 volte, con le linee unite lungo i confini dei gusci.\n - Lobi: segue la forma 3D dell'oggetto, compresi la parte superiore e quella inferiore. Ogni lobo, una parte unita al resto da un collo più stretto, viene graduato verso il proprio centro.\n - Normale Z, Y o X: segue le sezioni dell'oggetto perpendicolari a quell'asse, quindi la densità non cambia lungo di esso.",
   "Grid": "Griglia",
+  "Gridlines": "Linee griglia",
   "Gyroid": "Giroide",
   "HRC": "HRC",
   "Hardened steel": "Acciaio temprato",
   "Hbot": "Hbot",
+  "Height Range Modifier": "Modifica intervallo di altezza",
   "Height of the first layer. Making the first layer height thicker can improve build plate adhesion.": "Altezza del primo strato. L'aumento dell'altezza del primo strato può migliorare l'adesione al piano di stampa.",
   "Height to lid": "Altezza coperchio",
   "Height to rod": "Altezza asta",
@@ -7236,6 +7706,7 @@
   "Infill shift step": "Passo di spostamento del riempimento",
   "Infill/wall overlap": "Sovrapposizione riempimento/parete",
   "Infinite Y axis": "Asse Y infinito",
+  "Info": "Informazioni",
   "Inner wall": "Parete interna",
   "Inner wall flow ratio": "Flusso di stampa pareti interne",
   "Inner walls": "Pareti interne",
@@ -7246,6 +7717,7 @@
   "Insert multiple preheat commands (e.g. M104.1). Only useful for Prusa XL. For other printers, please set it to 1.": "Inserisci più comandi di preriscaldamento (ad esempio M104.1). Utile solo per Prusa XL. Per altre stampanti, impostalo su 1.",
   "Insert solid infill at specific layers. Use N to insert every Nth layer, N#K to insert K consecutive solid layers every N layers (K is optional, e.g. '5#' equals '5#1'), or a comma-separated list (e.g. 1,7,9) to insert at explicit layers. Layers are 1-based.": "Inserisci riempimento solido a strati specifici. Usa N per inserire ogni N strati, N#K per inserire K strati solidi consecutivi ogni N strati (K è opzionale, ad es. '5#' equivale a '5#1'), o un elenco separato da virgole (ad es. 1,7,9) per inserire a strati espliciti. Gli strati partono da 1.",
   "Insert solid layers": "Inserisci strati solidi",
+  "Instances": "Istanze",
   "Interface layer pre-extrusion distance": "Distanza di pre-estrusione dello strato di interfaccia",
   "Interface layer pre-extrusion length": "Lunghezza di pre-estrusione dello strato di interfaccia",
   "Interface layer print temperature": "Temperatura di stampa dello strato di interfaccia",
@@ -7306,6 +7778,7 @@
   "Lateral Lattice": "Reticolo 2D",
   "Lateral lattice angle 1": "Angolo reticolo 1",
   "Lateral lattice angle 2": "Angolo reticolo 2",
+  "Lay on Face": "Posiziona su faccia",
   "Layer change G-code": "G-code cambio strato",
   "Layer height": "Altezza strato",
   "Layer height limits": "Limiti altezza strati",
@@ -7313,6 +7786,7 @@
   "Layers between ripple offset": "Strati deviazione increspature",
   "Leading brim length": "Lunghezza tesa d'attacco",
   "Left": "Da sinistra",
+  "Left View": "Vista da sinistra",
   "Length of the cooling tube to limit space for cooling moves inside it.": "Lunghezza del tubo di raffreddamento per limitare lo spazio per i movimenti di raffreddamento al suo interno.",
   "Length of the scarf. Setting this parameter to zero effectively disables the scarf.": "Lunghezza della cucitura obliqua. Impostando questo parametro su zero, la cucitura obliqua viene disabilitata.",
   "Lightning": "Fulmine",
@@ -7335,6 +7809,8 @@
   "Loading speed": "Velocità di caricamento",
   "Loading speed at the start": "Velocità iniziale di caricamento",
   "Lobes": "Lobi",
+  "Lock": "Blocca",
+  "Lock current plate": "Blocca il piatto corrente",
   "Locked Zag": "Locked Zag",
   "Long retraction when cut (beta)": "Retrazione lunga durante il taglio (beta)",
   "Long retraction when extruder change": "Retrazione lunga al cambio estrusore",
@@ -7382,6 +7858,8 @@
   "Maximum width of a segmented region": "Larghezza massima regione segmentata",
   "Maximum width of a segmented region. A value of 0 disables this feature.": "Larghezza massima di una regione segmentata. Il valore zero disabilita questa funzione.",
   "Maximum wipe tower print speed": "Velocità massima di stampa della torre di spurgo",
+  "Measure": "Misura",
+  "Mesh Boolean": "Maglia booleana",
   "Mesh margin": "Margine matrice",
   "Min": "Minimo",
   "Min print speed": "Velocità minima di stampa",
@@ -7404,7 +7882,10 @@
   "Modify the geometry to print overhangs without support material.": "Modifica la geometria per stampare sporgenze senza materiale di supporto.",
   "Monotonic": "Monotonico",
   "Monotonic line": "Linea monotonica",
+  "More": "Altro",
   "Motion ability": "Capacità di movimento",
+  "Move": "Sposta",
+  "Move plate to the front": "Sposta il piatto in avanti",
   "Multi Filament": "Multi filamento",
   "Multi-tool ramming flow": "Flusso modellazione filamento multitestina",
   "Multi-tool ramming volume": "Volume modellazione filamento multitestina",
@@ -7446,7 +7927,10 @@
   "Number of ripples per layer": "Numero increspature per strato",
   "Number of skirt layers: usually only one": "Numero di strati della gonna. Di solito solo uno.",
   "Number of slow layers": "Numero di strati lenti",
+  "Object": "Oggetto",
+  "Object name": "Nome oggetto",
   "Object will be raised by this number of support layers. Use this function to avoid warping when printing ABS.": "L'oggetto verrà sollevato per questo numero di strati di supporto. Utilizzare questa funzione per evitare deformazioni durante la stampa di ABS.",
+  "Objects": "Oggetti",
   "Octagram Spiral": "Spirale a ottogramma",
   "On build plate only": "Solo sul piatto",
   "On completion": "Al completamento",
@@ -7458,10 +7942,12 @@
   "Only overhangs": "Solo sporgenze",
   "Only trigger retraction when the travel distance is longer than this threshold.": "L'attivazione della retrazione avviene solo quando la distanza percorsa è superiore a questa soglia.",
   "Ooze prevention": "Prevenzione trasudo materiale",
+  "Order By": "Ordina per",
   "Order in which object instances are visited within a single layer, which controls how much travel is spent moving between them.\n\nDefault: nearest-neighbor chaining, refined with 2-opt and crossing removal. A good general choice.\nAs object list: instances are printed in the same order as the object list, without any path optimization. Use it when you need a predictable, manually controlled order.\nBest of all (shortest path): every strategy is evaluated and the shortest one is used. The object instance order is decided once for the whole print, while the ordering of individual islands is decided per layer, so different layers may end up using different strategies. Slightly slower to slice.\nSnake: serpentine row-by-row traversal, refined with 2-opt. Well suited to regular grids of many small parts.\n\nWith multiple filaments or tools in the same layer, minimizing tool changes takes priority: objects are grouped by filament first and this setting only orders the instances within each filament group, so the overall sequence may not look like the shortest path across the plate.": "Ordine in cui le istanze degli oggetti vengono percorse all'interno di un singolo strato; determina quanti spostamenti servono per passare dall'una all'altra.\n\nPredefinito: concatenamento con il vicino più prossimo, affinato con 2-opt e rimozione degli incroci. Una buona scelta generale.\nCome elenco di oggetti: le istanze vengono stampate nello stesso ordine dell'elenco degli oggetti, senza alcuna ottimizzazione del percorso. Da usare quando serve un ordine prevedibile e controllato manualmente.\nIl migliore di tutti (percorso più breve): tutte le strategie vengono valutate e viene usata la più breve. L'ordine delle istanze degli oggetti viene deciso una sola volta per l'intera stampa, mentre l'ordine delle singole isole viene deciso strato per strato, quindi strati diversi possono usare strategie diverse. Slicing leggermente più lento.\nSerpentina: percorso a serpentina, riga per riga, affinato con 2-opt. Adatto a griglie regolari di molti pezzi piccoli.\n\nCon più filamenti o strumenti nello stesso strato, ridurre i cambi strumento ha la priorità: gli oggetti vengono prima raggruppati per filamento e questa impostazione ordina solo le istanze all'interno di ciascun gruppo di filamento, quindi la sequenza complessiva potrebbe non sembrare il percorso più breve sul piatto.",
   "Order of wall/infill. When the tickbox is unchecked the walls are printed first, which works best in most cases.\n\nPrinting infill first may help with extreme overhangs as the walls have the neighbouring infill to adhere to. However, the infill will slightly push out the printed walls where it is attached to them, resulting in a worse external surface finish. It can also cause the infill to shine through the external surfaces of the part.": "Ordine di stampa della parete/riempimento. Quando la casella non è selezionata, le pareti vengono stampate per prime, il che funziona meglio nella maggior parte dei casi.\n\nStampare prima il riempimento può aiutare con sporgenze estreme, poiché le pareti hanno il riempimento adiacente a cui aderire. Tuttavia, il riempimento farà pressione sulle pareti stampate nel punto di unione, causando una finitura superficiale esterna peggiore. Può anche far trasparire il riempimento attraverso le superfici esterne del modello.",
   "Organic": "Organico",
   "Orientation of interlock beams.": "Orientamento travi ad incastro.",
+  "Other layers print sequence": "Sequenza di stampa degli altri strati",
   "Other layers speed": "Velocità altri strati",
   "Others": "Altro",
   "Outer wall": "Parete esterna",
@@ -7478,9 +7964,11 @@
   "Overhangs": "Sporgenze",
   "Overhangs and external bridges fan speed": "Velocità ventola per sporgenze e ponti esterni",
   "Override firmware input shaping settings.\nIf disabled, firmware settings are used.": "Sovrascrivi le impostazioni di compensazione della risonanza del firmware.\nSe disabilitato, verranno utilizzate le impostazioni del firmware.",
+  "Paint-on fuzzy skin": "Dipingi superficie ruvida",
   "Painted only": "Solo verniciato",
   "Parallel printheads count": "Numero di teste di stampa parallele",
   "Part cooling fan": "Ventola di raffreddamento",
+  "Paste Process Settings": "Incolla impostazioni di processo",
   "Pattern angle": "Angolo motivo",
   "Pause G-code": "G-code pausa",
   "Pellet Modded Printer": "Stampante modificata per granuli",
@@ -7492,6 +7980,9 @@
   "Physical position on the bed where tool T0 (index 0) is located. Determines how tool indices map to bed zones. For single-gantry setups (IDEX) only left/right matters; for dual-gantry setups (IQEX) all four corners are selectable (front = lower Y / near the operator, rear = higher Y / back of machine).": "Posizione fisica sul piatto in cui si trova la testina T0 (indice 0). Determina come gli indici delle testine corrispondono alle zone del piatto. Per le configurazioni a portale singolo (IDEX) conta solo sinistra/destra; per le configurazioni a doppio portale (IQEX) sono selezionabili tutti e quattro gli angoli (anteriore = Y minore / vicino all'operatore, posteriore = Y maggiore / retro della macchina).",
   "Pick up the new tool without waiting for it to reach printing temperature, travel to the wipe tower, and wait for the temperature there, right before purging. Ooze from the heat-up lands on the tower instead of the model, and the travel overlaps with the heating.\n\nOnly relevant for multi-extruder (multi-toolhead) printers using a Type 2 wipe tower. The firmware or tool change macro must not wait for the temperature itself. When disabled, the temperature wait is issued right after the tool change command.": "Preleva la nuova testina senza attendere che raggiunga la temperatura di stampa, si sposta sulla torre di spurgo e attende lì la temperatura, subito prima dello spurgo. Il trasudo dovuto al riscaldamento finisce sulla torre invece che sul modello, e lo spostamento si sovrappone al riscaldamento.\n\nRilevante solo per stampanti multi-estrusore (multi-testina) che usano una torre di spurgo di tipo 2. Il firmware o la macro di cambio testina non devono attendere la temperatura autonomamente. Quando è disattivato, l'attesa della temperatura viene emessa subito dopo il comando di cambio testina.",
   "Picture sizes to be stored into a .gcode and .sl1 / .sl1s files, in the following format: \"XxY, XxY, ...\"": "Dimensioni delle immagini da memorizzare in un file .gcode e .sl1 / .sl1s, nel seguente formato: \"XxY, XxY, ...\"",
+  "Plate": "Piatto",
+  "Plate Settings": "Impostazioni Piatto",
+  "Plate types supported by the printer": "Tipi di piatti supportati dalla stampante.",
   "Plugin Configuration": "Configurazione del plugin",
   "Polyhole detection margin": "Margine di rilevamento poliforo",
   "Polyhole twist": "Torsione poliforo",
@@ -7522,6 +8013,7 @@
   "Print temperature": "Temperatura stampa",
   "Print temperature for prime tower interface layer (where different materials meet). If set to -1, use max recommended nozzle temperature.": "Temperatura di stampa per lo strato di interfaccia della torre di spurgo (dove si incontrano materiali diversi). Se impostata a -1, usa la temperatura massima consigliata dell'ugello.",
   "Print unsupported walls last": "Stampa per ultime le pareti non supportate",
+  "Printable": "Stampabile",
   "Printable height": "Altezza di stampa",
   "Printable space": "Spazio di stampa",
   "Printer Agent": "Agente stampante",
@@ -7543,6 +8035,7 @@
   "Raft expansion": "Espansione della zattera",
   "Raft layers": "Strati zattera",
   "Random": "Casuale",
+  "Rear View": "Vista posteriore",
   "Rear-left": "Posteriore sinistra",
   "Rear-right": "Posteriore destra",
   "Rectilinear": "Rettilineo",
@@ -7553,6 +8046,10 @@
   "Regular": "Regolare",
   "Relative bridge angle": "Angolo del ponte relativo",
   "Relative extrusion is recommended when using \"label_objects\" option. Some extruders work better with this option unchecked (absolute extrusion mode). Wipe tower is only compatible with relative mode. It is recommended on most printers. Default is checked.": "L'estrusione relativa è consigliata quando si utilizza l'opzione \"label_objects\". Alcuni estrusori funzionano meglio con questa opzione disattivata (modalità di estrusione assoluta). La torre di spurgo è compatibile solo con la modalità relativa. È consigliato sulla maggior parte delle stampanti. Il valore predefinito è 'attivato'.",
+  "Reload All": "Ricarica tutto",
+  "Remove current plate (if not last one)": "Rimuovi il piatto corrente (se non è l'ultimo)",
+  "Remove instance": "Rimuovi istanza",
+  "Replace all with 3D files": "Sostituisci tutto con file 3D",
   "Required nozzle HRC": "HRC ugello richiesta",
   "Resolution": "Risoluzione",
   "Resonance Compensation": "Compensazione risonanza",
@@ -7574,14 +8071,17 @@
   "Rib width is always less than half the prime tower side length.": "La larghezza della nervatura è sempre inferiore alla metà della lunghezza del lato della torre di spurgo.",
   "Ridged Multifractal": "Multifrattale ruvido",
   "Right": "Da Destra",
+  "Right View": "Vista da destra",
   "Ripple": "Increspature",
   "Ripple offset": "Deviazione increspature",
   "Role based wipe speed": "Velocità di spurgo basata su ruolo",
+  "Rotate": "Ruota",
   "Rotate the polyhole every layer.": "Ruota il poliforo in ogni strato.",
   "Rotate the sparse infill direction per layer using a template of angles. Enter comma-separated degrees (e.g., '0,30,60,90'). Angles are applied in order by layer and repeat when the list ends.\n\nAdvanced syntax is supported: '+5' rotates +5° every layer; '+5#5' rotates +5° every 5 layers. See the Wiki for details.\n\nWhen a template is set, the standard infill direction setting is ignored.\n\nNote: some infill patterns (e.g., Gyroid) control rotation themselves; use with care.": "Ruota la direzione del riempimento sparso per strato utilizzando un modello di angoli. Inserire gradi separati da virgole (ad es. '0,30,60,90'). Gli angoli vengono applicati in ordine per strato e si ripetono quando la lista termina.\n\nÈ supportata la sintassi avanzata: '+5' ruota +5° ogni strato; '+5#5' ruota +5° ogni 5 strati. Consulta la Wiki per i dettagli.\n\nQuando un modello è impostato, l'impostazione standard della direzione del riempimento viene ignorata.\n\nNota: alcuni pattern di riempimento (ad es. Gyroid) controllano la rotazione autonomamente; usare con cautela.",
   "Safety Margin": "Margine di sicurezza",
   "Same as \"Small perimeters\", but for supports. This separate setting will affect the speed of support for areas <= `small_support_perimeter_threshold`. If expressed as a percentage (for example: 80%), it will be calculated on the support or support interface speed setting above.": "Come \"Perimetri piccoli\", ma per i supporti. Questa impostazione separata influirà sulla velocità del supporto per le aree <= `small_support_perimeter_threshold`. Se espressa come percentuale (ad esempio: 80%), verrà calcolata sull'impostazione di velocità del supporto o dell'interfaccia del supporto sopra riportata.",
   "Same as top": "Come quello superiore",
+  "Scale": "Ridimensiona",
   "Scan first layer": "Scansiona primo strato",
   "Scarf around entire wall": "Cucitura obliqua su intera parete",
   "Scarf joint flow ratio": "Flusso di stampa cucitura obliqua",
@@ -7593,8 +8093,14 @@
   "Scarf steps": "Incrementi cucitura obliqua",
   "Seam": "Cucitura",
   "Seam gap": "Spazio di cucitura",
+  "Seam painting": "Dipingi cucitura",
   "Seam position": "Posizione cucitura",
   "Search for almost-circular holes that span more than one layer and convert the geometry to polyholes. Use the nozzle size and the (biggest) diameter to compute the polyhole.\nSee http://hydraraptor.blogspot.com/2011/02/polyholes.html": "Cerca fori quasi circolari che si estendono su più di uno strato e converte la geometria in polifori. Utilizza la dimensione dell'ugello e il diametro (più grande) per calcolare il poliforo.\nVedi http://hydraraptor.blogspot.com/2011/02/polyholes.html",
+  "Search plate, object and part.": "Cerca piatto, oggetto e parte.",
+  "Section view": "Vista in sezione",
+  "Select": "Seleziona",
+  "Select All": "Seleziona tutto",
+  "Select All Plates": "Seleziona tutti i piatti",
   "Select the network agent implementation for printer communication.": "Selezionare l'implementazione dell'agente di rete per la comunicazione con la stampante.",
   "Separated infills": "Riempimenti separati",
   "Set other flow ratios": "Imposta altri rapporti di flusso",
@@ -7611,6 +8117,7 @@
   "Single extruder multi-material parameters": "Parametri estrusore singolo multimateriale",
   "Single extruder multi-material setup": "Configurazione estrusore singolo multimateriale",
   "Single loop after first layer": "Singolo giro dopo il primo strato",
+  "Size": "Dimensioni",
   "Skeleton infill density": "Densità riempimento scheletro",
   "Skeleton line width": "Larghezza linea scheletro",
   "Skin infill density": "Densità riempimento pelle",
@@ -7687,6 +8194,8 @@
   "Spiral finishing flow ratio": "Flusso finale spirale",
   "Spiral starting flow ratio": "Flusso iniziale spirale",
   "Spiral vase": "Vaso a spirale",
+  "Split to objects": "Dividi in oggetti",
+  "Split to parts": "Dividi in parti",
   "Stabilization cone apex angle": "Angolo apice cono di stabilizzazione",
   "Staggered inner seams": "Cuciture interne sfalsate",
   "Stainless steel": "Acciaio inox",
@@ -7709,6 +8218,7 @@
   "Support Ironing Pattern": "Motivo stiratura supporto",
   "Support Ironing flow": "Flusso stiratura supporto",
   "Support Ironing line spacing": "Spaziatura linee stiratura supporto",
+  "Support Painting": "Dipingi supporti",
   "Support air filtration": "Supporto filtrazione aria",
   "Support controlling chamber temperature": "Supporto controllo temperatura camera di stampa",
   "Support critical regions only": "Supporta solo aree critiche",
@@ -7733,6 +8243,7 @@
   "Temperature difference to be applied when an extruder is not active. The value is not used when 'idle_temperature' in filament settings is set to non-zero value.": "Differenza di temperatura da applicare quando un estrusore non è attivo. Il valore non viene utilizzato quando 'idle_temperature' nelle impostazioni del filamento è impostato su un valore diverso da zero.",
   "Temperature variation": "Variazione di temperatura",
   "Template Custom G-code": "G-code modello personalizzato",
+  "Texture displacement": "Trama in rilievo",
   "The G-code path is generated after simplifying the contour of models to avoid too many points and G-code lines. Smaller values mean higher resolution and more time required to slice.": "Il percorso del G-code viene generato dopo aver semplificato il contorno del modello, per evitare troppi punti e linee nel file G-code. Un valore più piccolo significa una risoluzione più elevata e un tempo maggiore per l'elaborazione.",
   "The amount of material to extrude during ironing. Relative to flow of normal support interface layer height. Too high value results in overextrusion on the surface.": "La quantità di materiale da estrudere durante la stiratura. Relativa al flusso dell'altezza normale dello strato dell'interfaccia di supporto. Un valore troppo alto causa sovraestrusione sulla superficie.",
   "The angle of ironing lines offset from the top surface.": "L'angolo delle linee di stiratura rispetto alla superficie superiore.",
@@ -7944,6 +8455,7 @@
   "Toolhead collision volumes": "Volumi di collisione della testa di stampa",
   "Tools per Gantry": "Testine per portale",
   "Top Only": "Solo superiore",
+  "Top View": "Vista dall'alto",
   "Top Z distance": "Distanza Z superiore",
   "Top and Bottom": "Superiore e inferiore",
   "Top and bottom surfaces": "Superfici superiori e inferiori",
@@ -7966,6 +8478,7 @@
   "Top/bottom shells": "Gusci superiori/inferiori",
   "Topmost surface only": "Superficie superiore più alta",
   "Tower ironing area": "Area di stiratura della torre",
+  "Transform": "Trasforma",
   "Travel": "Spostamento",
   "Travel acceleration of first layer.\nThe percentage value is relative to Travel Acceleration.": "Accelerazione dello spostamento nel primo strato.\nIl valore percentuale è relativo all'accelerazione dello spostamento.",
   "Travel distance threshold": "Soglia distanza di spostamento",
@@ -8013,10 +8526,12 @@
   "Users can decide project file names when exporting.": "Gli utenti possono decidere i nomi dei file progetto nell'esportazione.",
   "Using multiple lines for the infill pattern, if supported by infill pattern.": "Utilizzo di linee multiple per il pattern di riempimento, se supportato dal pattern di riempimento.",
   "Using “Top surface expansion” may cause a surface that did not previously touch the model's outer walls to now do so.\nThis can cause contraction marks (such as the hull line) on the outer walls.\nBy adding a small margin, this contraction will not occur directly on the walls, thereby preventing a visible mark.": "L'uso dell'\"Espansione della superficie superiore\" può far sì che una superficie che in precedenza non toccava le pareti esterne del modello ora lo faccia.\nCiò può causare segni di contrazione (come la linea dello scafo) sulle pareti esterne.\nAggiungendo un piccolo margine, questa contrazione non avverrà direttamente sulle pareti, evitando così un segno visibile.",
+  "Variable layer height": "Altezza strato adattiva",
   "Vendor": "Produttore",
   "Vendor of filament. For show only.": "Produttore del filamento. Solo per dettagli.",
   "Verbose G-code": "G-code verboso",
   "Visualization Theme": "Tema di visualizzazione",
+  "Volume": "Volume",
   "Volume of nozzle between the filament cutter and the end of the nozzle": "Volume dell'ugello tra l'area di taglio ed l'estremità dell'ugello.",
   "Volumetric speed limitation": "Limitazione velocità volumetrica",
   "Voronoi": "Voronoi",
@@ -8085,6 +8600,7 @@
   "Z-hop upper boundary": "Limite superiore sollevamento Z",
   "Z-hop will only come into effect when Z is above this value and is below the parameter: \"Z-hop upper boundary\".": "Il sollevamento Z avrà effetto solo quando Z è al di sopra di questo valore e si trova al di sotto del parametro: \"Limite superiore sollevamento Z\".",
   "Zig Zag": "Zig Zag",
+  "Zoom": "Zoom",
   "accel_to_decel": "accel_to_decel",
   "layer": "strato",
   "layers": "strati",

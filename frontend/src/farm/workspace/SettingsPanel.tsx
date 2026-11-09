@@ -2,17 +2,30 @@
 // its pages as underlined text tabs, its option groups (icon, bold title, thin rule) and order, one ~30 px row per
 // setting (label, compact input, reset arrow when changed), its labels, tooltips and Simple / Advanced mode
 // (orcaLayout.ts). Key, system-preset state, original value and read-only reason are in the row's tooltip.
-// What can change, and the checks, come from the backend (WorkspaceSetting.editable, draft.ts).
+// Settings whose parent switch is off are greyed (dependencies.ts). What can change, and the checks, come from
+// the backend (WorkspaceSetting.editable, draft.ts).
+// With ``object``, the same pages show what one object (or part) slices with, read only: its own values first,
+// with the global value under them, a "Frequent" tab first, and only the settings an object can have.
 import { useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Filter, RotateCcw } from 'lucide-react';
-import type { WorkspaceSetting } from './api';
+import type { SettingValue, WorkspaceSetting } from './api';
+import { greyedKeys } from './dependencies';
 import { type Draft, formatValue, valueErrors } from './draft';
 import { type OrcaLayout, type Section, orcaIcon, orcaText, placedKeys } from './orcaLayout';
 import { SettingControl } from './SettingControl';
 import '../i18n';
 
 const UNKNOWN_TAB = '__other__';
+const FREQUENT_TAB = 'Frequent';
+const OWN_GROUP = '__own__';
+// OrcaSlicer's frequent object settings (GUI_Factories.cpp FREQ_SETTINGS_BUNDLE_FFF, first of each group)
+const FREQUENT_KEYS = ['layer_height', 'sparse_infill_density', 'wall_loops', 'enable_support'];
+
+/** One object's (or part's) own settings: key -> the value it slices with. */
+export interface ObjectView {
+  own: Record<string, string>;
+}
 
 interface Props {
   layout: OrcaLayout;
@@ -29,6 +42,10 @@ interface Props {
   showUnknown?: boolean;
   /** Above the tabs, left of the search (the preset's name box). */
   header?: ReactNode;
+  /** Only this element of per-filament values (the filament window of one filament). */
+  index?: number;
+  /** Show one object's settings, read only. */
+  object?: ObjectView;
 }
 
 interface Row {
@@ -44,24 +61,44 @@ function matches(row: Row, query: string): boolean {
   return !q || row.setting.label.toLowerCase().includes(q) || row.setting.key.toLowerCase().includes(q);
 }
 
+/** The global value a key slices with: the unsaved change, else the saved one. */
+const globalValue = (draft: Draft, s: WorkspaceSetting): SettingValue => (s.key in draft ? draft[s.key] : s.value);
+
 export function SettingsPanel({
   layout,
   section,
   settings,
   draft,
-  editable,
+  editable: fileEditable,
   onChange,
   onReset,
   simple = false,
   showUnknown = true,
   header,
+  index,
+  object,
 }: Props) {
   const { t, i18n } = useTranslation();
-  const tr = (text: string) => orcaText(layout, text, i18n.language);
-  const pages = layout.pages[section];
-  const withUnknown = showUnknown && !simple;
+  const lang = i18n.language;
+  const tr = (text: string) => orcaText(layout, text, lang);
+  const editable = fileEditable && !object;
+  const pages = useMemo(() => {
+    const all = layout.pages[section];
+    if (!object) return all;
+    // an object: OrcaSlicer's object pages hold only what an object can have of its own
+    const allowed = new Set(layout.object_keys ?? []);
+    const own = all
+      .map((p) => ({
+        ...p,
+        groups: p.groups.map((g) => ({ ...g, keys: g.keys.filter((k) => allowed.has(k)) })).filter((g) => g.keys.length),
+      }))
+      .filter((p) => p.groups.length);
+    return [{ title: FREQUENT_TAB, icon: '', groups: [{ title: '', icon: null, keys: FREQUENT_KEYS }] }, ...own];
+  }, [layout, section, object]);
+  const withUnknown = showUnknown && !simple && !object;
   // opens on the first page with something to change (the printer's first pages are mostly read only)
   const [chosenTab, setTab] = useState(() => {
+    if (object) return FREQUENT_TAB;
     const editableKeys = new Set(settings.filter((s) => s.editable).map((s) => s.key));
     const first = pages.find((p) => p.groups.some((g) => g.keys.some((k) => editableKeys.has(k)))) ?? pages[0];
     return first?.title ?? UNKNOWN_TAB;
@@ -69,37 +106,48 @@ export function SettingsPanel({
   const [query, setQuery] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [onlyChanged, setOnlyChanged] = useState(false);
-  const [showReadOnly, setShowReadOnly] = useState(!editable);
+  const [showReadOnlyChoice, setShowReadOnly] = useState(!fileEditable);
+  const showReadOnly = showReadOnlyChoice || !!object;
   const tabs = [...pages.map((p) => p.title), ...(withUnknown ? [UNKNOWN_TAB] : [])];
   const tab = tabs.includes(chosenTab) ? chosenTab : tabs[0];
+  const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
 
-  // Every setting of this preset, in OrcaSlicer's order, shown with its label, tooltip and unit.
+  // what a key slices with now (the object's own value, else the global one): which settings are greyed
+  const greyed = greyedKeys((key) => object?.own[key] ?? (key in draft ? draft[key] : byKey.get(key)?.value));
+  const isOwn = (key: string) => !!object && key in object.own;
+
+  // Every setting of this preset, in OrcaSlicer's order, shown with its label, tooltip, unit and icons.
   const rows = useMemo(() => {
-    const byKey = new Map(settings.map((s) => [s.key, s]));
-    const lang = i18n.language;
     const show = (s: WorkspaceSetting): WorkspaceSetting => {
       const o = layout.options[s.key];
       if (!o) return s;
-      const enumLabel = new Map((o.enum ?? []).map((e) => [e.value, orcaText(layout, e.label, lang)]));
+      const enums = new Map((o.enum ?? []).map((e) => [e.value, e]));
       return {
         ...s,
         label: orcaText(layout, o.label, lang),
         description: o.tooltip ? orcaText(layout, o.tooltip, lang) : s.description,
         unit: s.unit ?? (o.unit ? orcaText(layout, o.unit, lang) : null),
-        options: s.options?.map((opt) => ({ ...opt, label: enumLabel.get(opt.value) ?? opt.label })) ?? null,
+        options:
+          s.options?.map((opt) => {
+            const e = enums.get(opt.value);
+            return { ...opt, label: e ? orcaText(layout, e.label, lang) : opt.label, icon: e?.icon };
+          }) ?? null,
       };
     };
     const out: Row[] = [];
     for (const page of pages) {
+      const own: Row[] = [];
+      const rest: Row[] = [];
       for (const group of page.groups) {
         for (const key of group.keys) {
           const s = byKey.get(key);
-          if (s) {
-            const mode = layout.options[key]?.mode;
-            out.push({ setting: show(s), tab: page.title, group: group.title, icon: group.icon, simple: mode === 'simple' });
-          }
+          if (!s) continue;
+          const simpleMode = layout.options[key]?.mode === 'simple';
+          if (object && key in object.own) own.push({ setting: show(s), tab: page.title, group: OWN_GROUP, icon: 'cog', simple: simpleMode });
+          else rest.push({ setting: show(s), tab: page.title, group: group.title, icon: group.icon, simple: simpleMode });
         }
       }
+      out.push(...own, ...rest); // an object's own values first on every page, under one heading
     }
     if (withUnknown) {
       const placed = placedKeys(layout);
@@ -111,34 +159,42 @@ export function SettingsPanel({
       }
     }
     return out;
-  }, [settings, layout, pages, section, withUnknown, i18n.language]);
+  }, [settings, byKey, layout, pages, section, withUnknown, lang, object]);
 
+  const searching = !!query.trim();
   const visible = rows
-    .filter((r) => (query.trim() ? true : r.tab === tab))
+    .filter((r) => (searching ? true : r.tab === tab))
     .filter((r) => matches(r, query))
     .filter((r) => !simple || r.simple || r.setting.key in draft)
-    .filter((r) => !onlyChanged || r.setting.key in draft)
-    .filter((r) => r.setting.editable || showReadOnly || r.tab === UNKNOWN_TAB);
+    .filter((r) => !onlyChanged || r.setting.key in draft || isOwn(r.setting.key))
+    .filter((r) => r.setting.editable || showReadOnly || r.tab === UNKNOWN_TAB)
+    // a search lists a key once (an object's Frequent tab repeats four of them)
+    .filter((r, i, all) => !searching || all.findIndex((o) => o.setting.key === r.setting.key) === i);
   const changedPerTab: Record<string, number> = {};
-  for (const r of rows) if (r.setting.key in draft) changedPerTab[r.tab] = (changedPerTab[r.tab] ?? 0) + 1;
+  for (const r of rows) {
+    if (r.setting.key in draft || isOwn(r.setting.key)) changedPerTab[r.tab] = (changedPerTab[r.tab] ?? 0) + 1;
+  }
   const tabLabel = (title: string) => (title === UNKNOWN_TAB ? t('farm.workspace.tabs.unknown') : tr(title));
   const inherit = t('farm.workspace.inherit');
+  const format = (s: WorkspaceSetting, v: SettingValue) => formatValue(s, v, inherit, lang, index);
 
   /** Everything about a row that isn't its label and value, for its tooltip (as OrcaSlicer's hover). */
-  const details = (s: WorkspaceSetting, changed: boolean) =>
+  const details = (s: WorkspaceSetting, changed: boolean, isGreyed: boolean) =>
     [
       s.description,
       s.key,
-      changed && t('farm.workspace.original', { value: formatValue(s, s.value, inherit) }),
-      s.differs_from_system !== null && s.section
+      changed && t('farm.workspace.original', { value: format(s, s.value) }),
+      s.differs_from_system !== null && s.section && !object
         ? s.differs_from_system
           ? t('farm.workspace.system.modified')
           : t('farm.workspace.system.same')
         : null,
-      s.overrides.length > 0 &&
+      !object &&
+        s.overrides.length > 0 &&
         t('farm.workspace.overrides', {
           list: s.overrides.map((o) => `${o.part && o.part !== o.object ? `${o.object} › ${o.part}` : o.object} = ${o.value}`).join(', '),
         }),
+      isGreyed && t('farm.workspace.dependsOff'),
       !s.editable && s.readonly_reason && editable && t(`farm.workspace.readonly.${s.readonly_reason}`),
     ]
       .filter(Boolean)
@@ -176,7 +232,7 @@ export function SettingsPanel({
             <div className="absolute right-0 top-8 z-20 space-y-1.5 rounded-md border border-bambu-dark-tertiary bg-bambu-dark-secondary p-2 text-xs text-bambu-gray-light shadow-lg">
               <label className="flex items-center gap-1.5 cursor-pointer">
                 <input type="checkbox" checked={onlyChanged} onChange={(e) => setOnlyChanged(e.target.checked)} />
-                {t('farm.workspace.onlyChanged')}
+                {t(object ? 'farm.workspace.onlyOwn' : 'farm.workspace.onlyChanged')}
               </label>
               {editable && (
                 <label className="flex items-center gap-1.5 cursor-pointer">
@@ -189,7 +245,7 @@ export function SettingsPanel({
         </div>
         <div className="flex flex-wrap gap-x-4 border-b border-bambu-dark-tertiary" role="tablist">
           {tabs.map((key) => {
-            const active = tab === key && !query.trim();
+            const active = tab === key && !searching;
             return (
               <button
                 key={key}
@@ -211,41 +267,53 @@ export function SettingsPanel({
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-3 pb-3">
-        {tab === UNKNOWN_TAB && !query.trim() && <p className="text-xs text-bambu-gray my-2">{t('farm.workspace.unknownIntro')}</p>}
+        {tab === UNKNOWN_TAB && !searching && <p className="text-xs text-bambu-gray my-2">{t('farm.workspace.unknownIntro')}</p>}
         {visible.length === 0 && <p className="text-sm text-bambu-gray mt-2">{t('farm.workspace.noResults')}</p>}
-        {visible.map(({ setting: s, group, icon }) => {
+        {visible.map(({ setting: s, group, icon, tab: rowTab }) => {
           const groupIcon = orcaIcon(icon);
           const header =
             group !== lastGroup && group ? (
               <h4 className="flex items-center gap-2 pt-2.5 pb-0.5 text-[13px] font-semibold text-white">
                 {groupIcon && <img src={groupIcon} alt="" className="w-4 h-4" aria-hidden />}
-                {tr(group)}
+                {group === OWN_GROUP ? t('farm.workspace.ownGroup') : tr(group)}
                 <span className="flex-1 h-px bg-bambu-dark-tertiary" aria-hidden />
               </h4>
             ) : null;
           lastGroup = group;
+          const own = object?.own[s.key];
           const changed = s.key in draft;
-          const value = changed ? draft[s.key] : s.value;
-          const settingEditable = editable && s.editable;
+          const value = own ?? globalValue(draft, s);
+          const isGreyed = greyed.has(s.key);
+          const settingEditable = editable && s.editable && !isGreyed;
           return (
-            <div key={s.key}>
+            <div key={`${rowTab}-${s.key}`}>
               {header}
               <div
-                className={`flex items-center gap-2 min-h-[30px] py-0.5 pl-4 ${settingEditable ? '' : 'opacity-60'}`}
-                title={details(s, changed)}
+                className={`flex items-center gap-2 min-h-[30px] py-0.5 pl-4 ${settingEditable || (object && !isGreyed) ? '' : 'opacity-50'}`}
+                title={details(s, changed, isGreyed)}
                 data-testid={`setting-${s.key}`}
+                data-greyed={isGreyed || undefined}
               >
-                <span className={`flex-1 min-w-0 text-[13px] leading-tight ${changed ? 'text-[#F1754E]' : 'text-bambu-gray-light'}`}>
+                <span
+                  className={`flex-1 min-w-0 text-[13px] leading-tight ${changed || own != null ? 'text-[#F1754E]' : 'text-bambu-gray-light'}`}
+                >
                   {s.label}
-                  {s.overrides.length > 0 && <span className="ml-1 text-amber-400" aria-hidden>●</span>}
+                  {!object && s.overrides.length > 0 && <span className="ml-1 text-amber-400" aria-hidden>●</span>}
+                  {own != null && (
+                    <span className="block text-[11px] text-bambu-gray">
+                      {t('farm.workspace.globalValue', { value: format(s, globalValue(draft, s)) })}
+                    </span>
+                  )}
                 </span>
                 <SettingControl
                   setting={settingEditable ? s : { ...s, editable: false }}
                   value={value}
                   errors={valueErrors(s, value)}
                   onChange={(v) => onChange(s, v)}
+                  index={index}
+                  disabled={isGreyed && editable && s.editable}
                 />
-                {changed ? (
+                {changed && !object ? (
                   <button
                     onClick={() => onReset(s.key)}
                     title={t('farm.workspace.reset')}

@@ -1,0 +1,62 @@
+// Fork (printfarm): OrcaSlicer's right-click menus of an object and of a plate (GUI_Factories.cpp, v2.5.0, in its
+// order), the same in the objects tree and in the 3D view. Items with an action work now (they only look);
+// the others are shown disabled until phase 2 can write them into the 3MF.
+import type { MenuItem } from './Viewport';
+
+type Tr = (text: string) => string;
+
+export function objectMenu(
+  tr: Tr,
+  deleteKey: string,
+  printable: boolean,
+  on: { select: () => void; zoom: () => void; info: () => void; settings: () => void },
+): MenuItem[] {
+  return [
+    { label: tr('Select'), onClick: on.select },
+    { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
+    { label: tr('Info'), onClick: on.info },
+    { label: tr('Clone'), shortcut: 'Ctrl+K', separator: true },
+    { label: tr('Instances'), submenu: true },
+    { label: tr('Center'), separator: true },
+    { label: tr('Drop') },
+    { label: tr('Transform'), submenu: true },
+    { label: tr('Align/Distribute'), submenu: true },
+    { label: tr('Edit'), submenu: true },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true },
+    { label: tr('Add Part'), icon: 'menu_add_part', submenu: true, separator: true },
+    { label: tr('Add Negative Part'), icon: 'menu_add_negative', submenu: true },
+    { label: tr('Add Modifier'), icon: 'menu_add_modifier', submenu: true },
+    { label: tr('Add Support Blocker'), icon: 'menu_support_blocker', submenu: true },
+    { label: tr('Add Support Enforcer'), icon: 'menu_support_enforcer', submenu: true },
+    { label: tr('Add Precise Seam'), submenu: true },
+    { label: tr('Height Range Modifier') },
+    { label: tr('Printable'), shortcut: 'V', checked: printable, separator: true },
+    { label: tr('Auto Drop'), checked: true },
+    { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
+    { label: tr('Copy Process Settings') },
+    { label: tr('Paste Process Settings') },
+    { label: tr('Edit in Parameter Table') },
+    { label: tr('More'), submenu: true, separator: true },
+  ];
+}
+
+export function plateMenu(tr: Tr, on: { selectAll: () => void; settings: () => void }): MenuItem[] {
+  return [
+    { label: tr('Select All'), onClick: on.selectAll },
+    { label: tr('Select All Plates') },
+    { label: tr('Plate Settings'), onClick: on.settings },
+    { label: tr('Delete All'), separator: true },
+    { label: tr('Arrange'), separator: true },
+    { label: tr('Auto Rotate') },
+    { label: tr('Order By'), submenu: true },
+    { label: tr('Edit'), submenu: true },
+    { label: tr('Edit Plate Name'), separator: true },
+    { label: tr('Lock') },
+    { label: tr('Delete Plate'), separator: true },
+    { label: tr('Add Primitive'), icon: 'menu_add_part', submenu: true, separator: true },
+    { label: tr('Add Handy models'), icon: 'menu_add_part', submenu: true },
+    { label: tr('Add Models'), icon: 'menu_add_part' },
+    { label: tr('Reload All'), separator: true },
+    { label: `${tr('Replace all with 3D files')}...`, separator: true },
+  ];
+}

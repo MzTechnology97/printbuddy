@@ -113,6 +113,7 @@ MODEL_SETTINGS = """<?xml version="1.0" encoding="UTF-8"?>
   </plate>
   <plate>
     <metadata key="plater_id" value="2"/><metadata key="plater_name" value=""/>
+    <metadata key="print_sequence" value="by object"/>
     <model_instance><metadata key="object_id" value="4"/><metadata key="instance_id" value="0"/></model_instance>
   </plate>
 </config>
@@ -219,6 +220,8 @@ class TestOpen:
         ]
         assert [(o["name"], o["extruder"]) for o in doc["objects"]] == [("Cube A", "1"), ("Cube B", "2")]
         assert doc["plates"][1]["instances"] == [{"object_id": "4", "instance_id": "0"}]
+        assert doc["plates"][1]["metadata"]["print_sequence"] == "by object"  # the plate's own setting
+        assert "print_sequence" not in doc["plates"][0]["metadata"]
 
     async def test_settings_carry_schema_state_and_overrides(self, async_client, db_session):
         f = await add_file(db_session, make_project())
