@@ -588,7 +588,12 @@ async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJo
         if output is None:
             return FAIL_NO_OUTPUT
     state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == project_id))
-    if state is None or await db.scalar(LibraryFile.active().where(LibraryFile.id == project_id)) is None:
+    if state is None:
+        source = await db.get(LibraryFile, project_id)  # trashed too: it still tells where the 3MF lived
+        if source is not None and not source.is_external:
+            return None  # an internal 3MF (upload, workspace copy): no farm version to follow, prints as sliced
+        return FAIL_NO_PROJECT
+    if await db.scalar(LibraryFile.active().where(LibraryFile.id == project_id)) is None:
         return FAIL_NO_PROJECT
     if state.status != "ok":
         return WAIT_NO_SOURCE  # missing or corrupt on the NAS: saved again, it is read again

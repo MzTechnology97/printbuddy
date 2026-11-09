@@ -619,10 +619,13 @@ function buildModelGroup(
   return group;
 }
 
+// One object for every render: the load effect depends on it (a literal default reloaded the file forever).
+const DEFAULT_BUILD_VOLUME: BuildVolume = { x: 256, y: 256, z: 256 };
+
 export function ModelViewer({
   url,
   fileType,
-  buildVolume = { x: 256, y: 256, z: 256 },
+  buildVolume = DEFAULT_BUILD_VOLUME,
   filamentColors,
   selectedPlateId = null,
   className = '',
