@@ -2,19 +2,29 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { WebGLPreview } from 'gcode-preview';
 import { Loader2, Layers, ChevronLeft, ChevronRight, FileWarning } from 'lucide-react';
 import { getAuthToken } from '../api/client';
+import { FEATURE_COLORS, FEATURE_GROUPS, colorByFeature } from '../utils/gcodeFeatures';
 
 interface GcodeViewerProps {
   gcodeUrl: string;
   buildVolume?: { x: number; y: number; z: number };
   filamentColors?: string[];
   className?: string;
+  /** Fork: colour by filament (default) or by feature type, as a slicer's preview. */
+  colorBy?: 'tool' | 'feature';
+  /** Fork: a layer bar below (default), or the slicer layout: vertical layer slider, move slider, legend. */
+  controls?: 'bar' | 'slicer';
+  /** Fork: the legend's names of the feature groups (``FEATURE_GROUPS`` order), translated by the caller. */
+  featureLabels?: string[];
 }
 
 export function GcodeViewer({
   gcodeUrl,
   buildVolume = { x: 256, y: 256, z: 256 },
   filamentColors,
-  className = ''
+  className = '',
+  colorBy = 'tool',
+  controls = 'bar',
+  featureLabels,
 }: GcodeViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const previewRef = useRef<WebGLPreview | null>(null);
@@ -25,6 +35,11 @@ export function GcodeViewer({
   const [notSliced, setNotSliced] = useState(false);
   const [currentLayer, setCurrentLayer] = useState(0);
   const [totalLayers, setTotalLayers] = useState(0);
+  // Fork: slicer layout. Feature groups in the file, and the move slider over the top layer's commands.
+  const [groups, setGroups] = useState<number[]>([]);
+  const [moveMax, setMoveMax] = useState(0);
+  const [move, setMove] = useState(0);
+  const truncatedRef = useRef<{ index: number; commands: unknown[] } | null>(null); // the top layer, cut at the move
 
   // Memoize colors to prevent re-renders
   const colorsKey = useMemo(() => JSON.stringify(filamentColors), [filamentColors]);
@@ -85,6 +100,12 @@ export function GcodeViewer({
         return response.text();
       })
       .then(gcode => {
+        if (colorBy === 'feature') {
+          const byFeature = colorByFeature(gcode);
+          setGroups(byFeature.groups);
+          (preview as unknown as { extrusionColor: string[] }).extrusionColor = FEATURE_COLORS;
+          return byFeature.gcode;
+        }
         // The gcode-preview library only supports T0-T7
         // We need to remap higher tool numbers to fit within this range
         // First, find all unique tool numbers used
@@ -135,12 +156,17 @@ export function GcodeViewer({
         if (remappedColors.length > 0) {
           (preview as unknown as { extrusionColor: string[] }).extrusionColor = remappedColors;
         }
-
-        preview.processGCode(cleanedGcode);
+        return cleanedGcode;
+      })
+      .then(processed => {
+        preview.processGCode(processed);
 
         const layers = preview.layers?.length || 0;
         setTotalLayers(layers);
         setCurrentLayer(layers);
+        const topMoves = layers ? preview.layers[layers - 1].commands.length : 0;
+        setMoveMax(topMoves);
+        setMove(topMoves);
 
         preview.render();
         setLoading(false);
@@ -163,9 +189,13 @@ export function GcodeViewer({
     };
 
     window.addEventListener('resize', handleResize);
+    // Fork: also when the container itself changes size (shown after being hidden, a panel resized)
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(handleResize) : null;
+    if (canvas.parentElement) observer?.observe(canvas.parentElement);
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      observer?.disconnect();
       if (renderTimeoutRef.current) {
         cancelAnimationFrame(renderTimeoutRef.current);
       }
@@ -176,12 +206,20 @@ export function GcodeViewer({
       initRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gcodeUrl, colorsKey]); // Intentionally use colorsKey instead of filamentColors, buildVolume rarely changes
+  }, [gcodeUrl, colorsKey, colorBy]); // Intentionally use colorsKey instead of filamentColors, buildVolume rarely changes
 
   const handleLayerChange = useCallback((layer: number) => {
     if (!previewRef.current) return;
     const newLayer = Math.max(1, Math.min(layer, totalLayers));
     setCurrentLayer(newLayer);
+    const cut = truncatedRef.current; // a new top layer: the previous one is shown whole again
+    if (cut) {
+      (previewRef.current.layers[cut.index] as unknown as { commands: unknown[] }).commands = cut.commands;
+      truncatedRef.current = null;
+    }
+    const moves = previewRef.current.layers[newLayer - 1]?.commands.length ?? 0;
+    setMoveMax(moves);
+    setMove(moves);
 
     if (renderTimeoutRef.current) {
       cancelAnimationFrame(renderTimeoutRef.current);
@@ -194,6 +232,18 @@ export function GcodeViewer({
       }
     });
   }, [totalLayers]);
+
+  /** Fork: draw the top layer only up to its ``count``-th command (the slicer's move slider). */
+  const handleMoveChange = useCallback((count: number) => {
+    const preview = previewRef.current;
+    const layer = preview?.layers[currentLayer - 1] as unknown as { commands: unknown[] } | undefined;
+    if (!preview || !layer) return;
+    if (!truncatedRef.current) truncatedRef.current = { index: currentLayer - 1, commands: layer.commands };
+    layer.commands = truncatedRef.current.commands.slice(0, count);
+    setMove(count);
+    if (renderTimeoutRef.current) cancelAnimationFrame(renderTimeoutRef.current);
+    renderTimeoutRef.current = requestAnimationFrame(() => previewRef.current?.render());
+  }, [currentLayer]);
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     handleLayerChange(parseInt(e.target.value, 10));
@@ -233,9 +283,52 @@ export function GcodeViewer({
             </div>
           </div>
         )}
+
+        {controls === 'slicer' && !loading && !error && !notSliced && totalLayers > 0 && (
+          <>
+            {colorBy === 'feature' && groups.length > 0 && (
+              <ul className="absolute top-2 left-2 space-y-1 rounded-md bg-bambu-dark-secondary/90 p-2 text-xs text-white" aria-label="legend">
+                {groups.map((g) => (
+                  <li key={g} className="flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: FEATURE_COLORS[g] }} aria-hidden />
+                    {featureLabels?.[g] ?? FEATURE_GROUPS[g]}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="absolute right-2 top-2 bottom-12 flex flex-col items-center gap-1 text-xs text-bambu-gray-light">
+              <span>{totalLayers}</span>
+              <input
+                type="range"
+                min={1}
+                max={totalLayers}
+                value={currentLayer}
+                onChange={handleSliderChange}
+                aria-label="layer"
+                className="flex-1 w-5 accent-bambu-green cursor-pointer"
+                style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
+              />
+              <span className="rounded bg-bambu-dark-secondary px-1.5 py-0.5 text-white">{currentLayer}</span>
+            </div>
+            <div className="absolute left-2 right-12 bottom-2 flex items-center gap-2 text-xs text-bambu-gray-light">
+              <input
+                type="range"
+                min={0}
+                max={moveMax}
+                value={move}
+                onChange={(e) => handleMoveChange(parseInt(e.target.value, 10))}
+                aria-label="move"
+                className="flex-1 accent-bambu-green cursor-pointer"
+              />
+              <span className="min-w-[72px] text-right">
+                {move} / {moveMax}
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
-      {!loading && !error && !notSliced && totalLayers > 0 && (
+      {controls === 'bar' && !loading && !error && !notSliced && totalLayers > 0 && (
         <div className="mt-4 px-2">
           <div className="flex items-center gap-3">
             <Layers className="w-4 h-4 text-bambu-gray flex-shrink-0" />

@@ -16,12 +16,14 @@ stays a percentage, ``1``/``0`` booleans stay so, ``nil`` (inherit) is never wri
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from functools import cache
 
 SECTIONS = ("process", "filament", "printer")
-TABS = ("quality", "strength", "speed", "support", "others", "filament", "printer")
+# The process tabs of OrcaSlicer / Bambu Studio, then the filament and printer presets.
+TABS = ("quality", "strength", "speed", "support", "multimaterial", "others", "filament", "printer")
 
 # Schema category -> slicer tab (process settings); filament and printer settings have their own tab.
 _PROCESS_TABS = {
@@ -32,7 +34,7 @@ _PROCESS_TABS = {
     "acceleration": "speed",
     "support": "support",
     "adhesion": "others",
-    "multimaterial": "others",
+    "multimaterial": "multimaterial",
     "advanced": "others",
     "special": "others",
 }
@@ -56,10 +58,20 @@ _FLOAT_RE = re.compile(r"^-?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$")
 
 
 @cache
+def _simple_keys() -> frozenset[str]:
+    """The keys OrcaSlicer shows in its Simple mode (``backend/app/data/slicer_simple_fields.json``)."""
+    from backend.app.api.routes.cloud import FIELDS_DATA_DIR
+
+    with open(FIELDS_DATA_DIR / "slicer_simple_fields.json", encoding="utf-8") as fh:
+        return frozenset(json.load(fh)["simple"])
+
+
+@cache
 def catalogue() -> dict[str, dict]:
-    """Every schema field by key, with its section, tab and value type."""
+    """Every schema field by key, with its section, tab, value type and slicer mode (simple / advanced)."""
     from backend.app.api.routes.cloud import _load_fields
 
+    simple = _simple_keys()
     fields: dict[str, dict] = {}
     for section in SECTIONS:
         for raw in _load_fields(section)["fields"]:
@@ -85,6 +97,7 @@ def catalogue() -> dict[str, dict]:
                 "max": field.get("max"),
                 "step": field.get("step"),
                 "options": field.get("options"),
+                "mode": "simple" if field["key"] in simple else "advanced",
             }
     return fields
 

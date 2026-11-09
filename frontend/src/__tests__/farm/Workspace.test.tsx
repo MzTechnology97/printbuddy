@@ -10,6 +10,7 @@ import { render } from '../utils';
 import type { WorkspaceSetting } from '../../farm/workspace/api';
 import { elementError, valueErrors, withValue, withoutKey, type Draft } from '../../farm/workspace/draft';
 import { SettingsPanel } from '../../farm/workspace/SettingsPanel';
+import { GizmoToolbar } from '../../farm/workspace/Viewport';
 
 const base = {
   description: null,
@@ -246,5 +247,40 @@ describe('SettingsPanel', () => {
     render(<Harness editable={false} />);
     expect(screen.queryByRole('textbox', { name: 'Layer Height' })).not.toBeInTheDocument();
     expect(screen.getByTestId('setting-layer_height')).toHaveTextContent('0.2');
+  });
+});
+
+describe('client layout', () => {
+  it("Simple shows the slicer's Simple settings only, a changed one stays, and no Other values tab", async () => {
+    const user = userEvent.setup();
+    const settings = [{ ...LAYER, mode: 'simple' as const }, { ...DENSITY, tab: 'quality', mode: 'advanced' as const }, PRINTER_ID];
+    function Simple() {
+      const [draft, setDraft] = useState<Draft>({});
+      return (
+        <SettingsPanel
+          settings={settings}
+          tabs={['quality']}
+          draft={draft}
+          editable
+          simple
+          onChange={(s, v) => setDraft((d) => withValue(d, s, v))}
+          onReset={(key) => setDraft((d) => withoutKey(d, key))}
+        />
+      );
+    }
+    render(<Simple />);
+    expect(screen.getByTestId('setting-layer_height')).toBeInTheDocument();
+    expect(screen.queryByTestId('setting-sparse_infill_density')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /Other values/ })).not.toBeInTheDocument();
+    await user.type(screen.getByRole('searchbox'), 'density');
+    expect(screen.queryByTestId('setting-sparse_infill_density')).not.toBeInTheDocument(); // search keeps the mode
+  });
+
+  it('shows the object tools disabled, saying they come in phase 2', () => {
+    render(<GizmoToolbar />);
+    const tools = within(screen.getByRole('toolbar')).getAllByRole('button');
+    expect(tools).toHaveLength(5);
+    tools.forEach((b) => expect(b).toBeDisabled());
+    expect(tools[0]).toHaveAccessibleName(/Move: coming in phase 2/);
   });
 });

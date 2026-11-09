@@ -4492,9 +4492,10 @@ async def get_gcode(
     if not abs_path or not abs_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
 
-    if file.file_type == "gcode":
+    # Fork: a .gcode.3mf saved with file_type "gcode" (farm slices) is still an archive: its plate G-code is sent.
+    if file.file_type == "gcode" and not zipfile.is_zipfile(abs_path):
         return FastAPIFileResponse(str(abs_path), media_type="text/plain")
-    elif file.file_type == "3mf":
+    elif file.file_type in ("3mf", "gcode"):
         # Extract gcode from 3mf
         try:
             with zipfile.ZipFile(str(abs_path), "r") as zf:

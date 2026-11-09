@@ -26,6 +26,8 @@ export interface WorkspaceSetting {
   max?: number | null;
   step?: number | null;
   options?: { value: string; label: string }[] | null;
+  /** OrcaSlicer's mode for the key (Simple shows fewer settings); absent for keys no schema knows. */
+  mode?: 'simple' | 'advanced';
   value: SettingValue;
   editable: boolean;
   /** unknown (no schema), text, category (could break printer compatibility), format (value doesn't read as its type) */
@@ -66,6 +68,17 @@ export interface WorkspaceDocument {
   settings: WorkspaceSetting[];
   tabs: string[];
   copy_of: { copy_of_library_file_id: number; copy_of_filename: string; saved_at: string } | null;
+  /** The latest slice of each plate with the project's settings; ``current``: of the version open now. */
+  outputs: WorkspaceOutput[];
+}
+
+export interface WorkspaceOutput {
+  plate: number;
+  library_file_id: number;
+  filename: string;
+  print_time_seconds: number | null;
+  filament_used_g: number | null;
+  current: boolean;
 }
 
 export interface SavedCopy {

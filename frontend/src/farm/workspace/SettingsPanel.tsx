@@ -18,6 +18,10 @@ interface Props {
   editable: boolean;
   onChange: (setting: WorkspaceSetting, value: WorkspaceSetting['value']) => void;
   onReset: (key: string) => void;
+  /** The slicer's Simple mode: only the settings it shows there (and no "Other values" tab). */
+  simple?: boolean;
+  /** Offer the "Other values" tab (keys no schema knows). */
+  showUnknown?: boolean;
 }
 
 const tabOf = (s: WorkspaceSetting) => s.tab ?? UNKNOWN_TAB;
@@ -27,23 +31,35 @@ function matches(setting: WorkspaceSetting, query: string): boolean {
   return !q || setting.label.toLowerCase().includes(q) || setting.key.toLowerCase().includes(q);
 }
 
-export function SettingsPanel({ settings, tabs, draft, editable, onChange, onReset }: Props) {
+export function SettingsPanel({
+  settings,
+  tabs,
+  draft,
+  editable,
+  onChange,
+  onReset,
+  simple = false,
+  showUnknown = true,
+}: Props) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState(tabs[0] ?? UNKNOWN_TAB);
+  const [chosenTab, setTab] = useState(tabs[0] ?? UNKNOWN_TAB);
   const [query, setQuery] = useState('');
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [showReadOnly, setShowReadOnly] = useState(!editable);
-  const allTabs = [...tabs, UNKNOWN_TAB];
+  const allTabs = useMemo(() => (showUnknown && !simple ? [...tabs, UNKNOWN_TAB] : tabs), [tabs, showUnknown, simple]);
+  const tab = allTabs.includes(chosenTab) ? chosenTab : allTabs[0];
 
   const visible = useMemo(
     () =>
       settings
+        .filter((s) => allTabs.includes(tabOf(s)))
         .filter((s) => (query.trim() ? true : tabOf(s) === tab))
         .filter((s) => matches(s, query))
+        .filter((s) => !simple || s.mode === 'simple' || s.key in draft)
         .filter((s) => !onlyChanged || s.key in draft)
         .filter((s) => s.editable || showReadOnly || tabOf(s) === UNKNOWN_TAB)
         .sort((a, b) => (a.group ?? '').localeCompare(b.group ?? '') || a.label.localeCompare(b.label)),
-    [settings, tab, query, onlyChanged, showReadOnly, draft],
+    [settings, allTabs, tab, query, simple, onlyChanged, showReadOnly, draft],
   );
   const changedPerTab = useMemo(() => {
     const counts: Record<string, number> = {};

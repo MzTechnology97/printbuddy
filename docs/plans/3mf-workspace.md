@@ -73,6 +73,31 @@ POST /api/v1/farm/library/files/{id}/slice   slicing con le impostazioni del 3MF
   (con la provenienza) nascono insieme; se qualcosa fallisce non resta niente. Una voce danneggiata o
   cifrata dà 422.
 
+## Layout come i client (OrcaSlicer / Bambu Studio)
+
+Stessa disposizione e stesso modo di lavorare dei client per Windows, con icone, colori e caratteri di
+Printbuddy (nessun logo o icona dei client).
+
+- **Barra in alto:** Prepara / Anteprima, Salva copia, Slice del piatto, Stampa, Esporta (in Prepara il 3MF,
+  in Anteprima il `.gcode.3mf` del piatto).
+- **Barra laterale:** stampante (preset, ugello, piatto di stampa) e filamenti con colore; ognuno ha il
+  pulsante che apre le sue impostazioni. Poi gli oggetti (del piatto scelto) con le impostazioni proprie in
+  sola lettura, e il processo con le schede dei client (Qualità, Resistenza, Velocità, Supporti,
+  Multimateriale, Altro) e l'interruttore Semplice / Avanzate.
+- **Semplice / Avanzate:** le chiavi in modalità Semplice sono quelle di OrcaSlicer (`ConfigOptionDef::mode`
+  `comSimple`, il default quando un'opzione non ne dichiara un altro), ricavate da
+  `src/libslic3r/PrintConfig.cpp` e salvate in `backend/app/data/slicer_simple_fields.json` con il commit
+  di origine: 64 delle 243 chiavi dello schema. Una chiave modificata resta visibile anche in Semplice.
+- **Centro (Prepara):** vista 3D, barra dei piatti numerati in basso, strumenti oggetto (sposta, ruota,
+  scala, taglia, pittura) visibili ma disattivati fino alla fase 2.
+- **Anteprima:** il G-code del piatto nel `GcodeViewer` esistente, in modalità "slicer": cursore verticale
+  dei layer, cursore orizzontale delle mosse del layer in cima (le mosse oltre il cursore non si
+  disegnano), legenda per tipo di elemento, tempo e filamento per colore (da `slice_info.config`).
+  `gcode-preview` colora per estrusore e legge solo T0-T7, quindi i tipi di elemento dei client sono
+  raggruppati in 8 gruppi (`utils/gcodeFeatures.ts`). Si apre l'ultimo slice del piatto già salvato
+  (`outputs` del documento), anche da una sessione precedente; uno slice di una versione vecchia del 3MF
+  è segnalato e non si stampa da qui.
+
 ## Roadmap: editor 3D (fase successiva, non in questa PR)
 
 Preparato in questa PR: la struttura del progetto arriva dal backend con l'identità delle istanze

@@ -224,6 +224,13 @@ class TestOpen:
         f = await add_file(db_session, make_project())
         s = settings_by_key(await open_ws(async_client, f.id))
         assert has(s["layer_height"], tab="quality", type="float", unit="mm", value="0.2", editable=True)
+        # OrcaSlicer's Simple / Advanced mode (backend/app/data/slicer_simple_fields.json)
+        assert (s["layer_height"]["mode"], s["wall_loops"]["mode"], s["outer_wall_speed"]["mode"]) == (
+            "simple",
+            "simple",
+            "advanced",
+        )
+        assert ws.catalogue()["prime_tower_enable"]["tab"] == "multimaterial"
         assert has(s["wall_loops"], tab="strength", type="int", differs_from_system=True)
         assert s["layer_height"]["differs_from_system"] is False  # same as the system preset
         assert s["sparse_infill_density"]["tab"] == "strength"  # infill: the slicer's Strength tab
@@ -546,6 +553,12 @@ class TestFarm:
         assert has(info.json(), slicer="bambu_studio", sliceable=True, printer_preset="Test Printer 0.4 nozzle")
         assert sidecar[0]["url"] == library.app_settings.bambu_studio_api_url.rstrip("/")
         assert sidecar[0]["plate"] == 2
+        # The G-code preview gets the plate's G-code, not the archive (outputs are file_type "gcode").
+        gcode = await async_client.get(f"/api/v1/library/files/{out.id}/gcode")
+        assert gcode.status_code == 200 and gcode.text == "G28\n"
+        # Reopened, the workspace offers that slice to the Preview tab, for the version it was sliced from.
+        outputs = (await open_ws(async_client, copy_id))["outputs"]
+        assert [(o["plate"], o["library_file_id"], o["current"]) for o in outputs] == [(2, out.id, True)]
         sent = json.loads(entries(sidecar[0]["model_bytes"])[project.PROJECT_SETTINGS_ENTRY])
         assert sent["layer_height"] == "0.1"  # the copy's settings went to the slicer
         assert out.file_metadata["sliced_from_library_file_id"] == copy_id
