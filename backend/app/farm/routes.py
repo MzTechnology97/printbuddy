@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,7 @@ from backend.app.farm.library_sync import sync_external_folder
 from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
 from backend.app.farm.nas.routes import router as nas_router
 from backend.app.farm.plates.routes import router as plates_router
+from backend.app.farm.workspace.routes import router as workspace_router
 from backend.app.models.library import LibraryFile, LibraryFolder
 
 router = APIRouter(prefix="/farm", tags=["farm"])
@@ -78,6 +80,37 @@ async def _file_state(db: AsyncSession, library_file_id: int) -> FarmLibraryFile
     st = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == library_file_id))
     if st is None:
         raise HTTPException(status_code=404, detail="File is not on a watched folder (or not scanned yet)")
+    return st
+
+
+async def _project_state(db: AsyncSession, lib_file: LibraryFile) -> FarmLibraryFile:
+    """The farm state of a 3MF to slice with its own settings.
+
+    A file on a watched folder has its stored state (kept by library sync). One outside them (an
+    internal upload, a workspace copy) has no sync to keep a state current, so it is read from the
+    file now and never stored: it lives as long as the request.
+    """
+    st = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == lib_file.id))
+    if st is not None or lib_file.is_external:
+        return st or await _file_state(db, lib_file.id)
+    if lib_file.filename.lower().endswith(".gcode.3mf"):
+        raise HTTPException(status_code=400, detail="Already sliced: only 3MF projects carry project settings")
+    from backend.app.farm.detect import CorruptFileError, inspect_3mf
+    from backend.app.farm.nas.access import library_path
+
+    path = library_path(lib_file.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    st = FarmLibraryFile(
+        library_file_id=lib_file.id, path=str(path), size=lib_file.file_size, sha256=lib_file.file_hash
+    )
+    try:
+        info = await asyncio.to_thread(inspect_3mf, path)
+    except CorruptFileError as exc:
+        st.status, st.status_detail = "corrupt", str(exc)[:255]
+        return st
+    st.status, st.application, st.slicer_detected = "ok", info.application, info.slicer
+    st.printer_model_raw, st.printer_model = info.printer_model_raw, info.printer_model
     return st
 
 
@@ -178,7 +211,7 @@ async def get_project_settings(library_file_id: int, db: AsyncSession = Depends(
         raise HTTPException(status_code=404, detail="File not found")
     if lib_file.file_type != "3mf":
         raise HTTPException(status_code=400, detail="Only unsliced 3MF projects carry project settings")
-    st = await _file_state(db, library_file_id)
+    st = await _project_state(db, lib_file)
     try:
         cfg = await access_run(read_file, lib_file.file_path, read_project_settings)
     except (OSError, zipfile.BadZipFile) as exc:
@@ -219,13 +252,13 @@ async def slice_farm_file(library_file_id: int, body: FarmSliceRequest, db: Asyn
         raise HTTPException(status_code=404, detail="File not found")
     if lib_file.file_type != "3mf":
         raise HTTPException(status_code=400, detail="Only unsliced 3MF projects can be sliced")
-    resolve_slicer(await _file_state(db, library_file_id))  # fail fast, before queuing
+    resolve_slicer(await _project_state(db, lib_file))  # fail fast, before queuing
 
     async def _run(job_id: int):
         async with database.async_session() as task_db:
             task_file = await task_db.get(LibraryFile, library_file_id)
             try:
-                task_state = await _file_state(task_db, library_file_id)
+                task_state = await _project_state(task_db, task_file)
                 response = await slice_embedded(
                     task_db, lib_file=task_file, state=task_state, plate=body.plate, job_id=job_id
                 )
@@ -314,3 +347,4 @@ async def put_auto_spools(body: AutoSpoolsIn, db: AsyncSession = Depends(get_db)
 
 router.include_router(plates_router)
 router.include_router(nas_router)
+router.include_router(workspace_router)
