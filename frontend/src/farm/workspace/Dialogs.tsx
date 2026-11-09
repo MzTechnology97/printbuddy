@@ -104,18 +104,47 @@ interface PresetProps {
 
 export function PresetDialog({ layout, kind, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
   const { t } = useTranslation();
-  const title = t(`farm.workspace.tabs.${kind}`) + (name ? ` · ${name}` : '');
+  const first = (key: string) => {
+    const v = settings.find((s) => s.key === key)?.value;
+    return (Array.isArray(v) ? v[0] : v) ?? null;
+  };
+  const preset = kind === 'filament' ? first('filament_settings_id') : (name ?? first('printer_settings_id'));
+  const colour = kind === 'filament' ? first('filament_colour') : null;
+  // multi-extruder printers (Direct Drive / Bowden, SF / HF...): shown only when the project has variants
+  const raw = settings.find((s) => s.key === `${kind}_extruder_variant`)?.value;
+  const variants = [...new Set((Array.isArray(raw) ? raw : raw ? [raw] : []).filter(Boolean))];
   return (
-    <Dialog title={title} intro={t('farm.workspace.presetIntro')} onClose={onClose}>
+    <Dialog
+      title={t(kind === 'filament' ? 'farm.workspace.materialSettings' : 'farm.workspace.printerSettings')}
+      intro={t('farm.workspace.presetIntro')}
+      onClose={onClose}
+    >
       <div className="h-[60vh] min-h-0">
         <SettingsPanel
-          settings={settings}
           layout={layout}
           section={kind}
+          settings={settings}
           draft={draft}
           editable={editable}
           onChange={onChange}
           onReset={onReset}
+          header={
+            <>
+              <div className="flex items-center gap-2 rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary px-2 h-7 text-[13px] text-white">
+                {colour && <span className="w-3 h-3 rounded-sm border border-white/30" style={{ backgroundColor: colour }} />}
+                <span className="truncate">{preset ?? '—'}</span>
+              </div>
+              {variants.length > 1 && (
+                <div className="flex flex-wrap gap-1 text-[11px]" aria-label={t('farm.workspace.variant')}>
+                  {variants.map((v, i) => (
+                    <span key={v} className={`px-2 py-0.5 rounded-full ${i === 0 ? 'bg-bambu-green text-white' : 'text-bambu-gray'}`}>
+                      {v}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          }
         />
       </div>
     </Dialog>

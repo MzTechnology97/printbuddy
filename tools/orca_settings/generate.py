@@ -310,11 +310,14 @@ def main() -> None:
     (OUT / "settings-layout.json").write_text(text, encoding="utf-8", newline="\n")
     icons = OUT / "icons"
     icons.mkdir(exist_ok=True)
-    for name in ICONS:
+    # the listed icons, and the option groups' own ones ("param_layer_height"...)
+    group_icons = {g["icon"] for s in pages.values() for p in s for g in p["groups"] if g["icon"]}
+    names = list(ICONS) + sorted(n for n in group_icons if (src / "resources" / "images" / f"{n}.svg").is_file())
+    for name in names:
         shutil.copyfile(src / "resources" / "images" / f"{name}.svg", icons / f"{name}.svg")
     print(
         f"{tag}: {sum(len(s) for s in pages.values())} pages, {len(keys)} keys, {len(opts)} definitions, "
-        f"{len(italian)} Italian strings, {len(ICONS)} icons -> {OUT.relative_to(REPO)}"
+        f"{len(italian)} Italian strings, {len(names)} icons -> {OUT.relative_to(REPO)}"
     )
 
 

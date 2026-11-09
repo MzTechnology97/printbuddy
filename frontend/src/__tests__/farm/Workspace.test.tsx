@@ -257,7 +257,7 @@ describe('SettingsPanel', () => {
     await user.clear(input);
     await user.type(input, '0.12');
     expect(draftOf()).toEqual({ layer_height: '0.12' });
-    expect(row).toHaveTextContent('Original: 0.2');
+    expect(row.getAttribute('title')).toContain('Original: 0.2'); // in the tooltip, as OrcaSlicer's hover
     await user.click(within(row).getByRole('button', { name: /Restore the original value/ }));
     expect(draftOf()).toEqual({});
     expect(within(row).getByRole('textbox', { name: 'Layer height' })).toHaveValue('0.2');
@@ -279,7 +279,7 @@ describe('SettingsPanel', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Enable support' }));
     await user.selectOptions(screen.getByRole('combobox', { name: 'Type' }), 'tree(auto)');
     expect(draftOf()).toEqual({ enable_support: '1', support_type: 'tree(auto)' });
-    expect(screen.getByRole('tab', { name: /Support · 2/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Support\s*2/ })).toBeInTheDocument();
   });
 
   it('edits one value per filament in the filament preset', async () => {
@@ -296,8 +296,8 @@ describe('SettingsPanel', () => {
     render(<Harness />);
     await user.click(screen.getByRole('tab', { name: /Strength/ }));
     const row = screen.getByTestId('setting-wall_loops');
-    expect(row).toHaveTextContent('differs from the system preset');
-    expect(row).toHaveTextContent('Cube B = 5');
+    expect(row.getAttribute('title')).toContain('differs from the system preset');
+    expect(row.getAttribute('title')).toContain('Cube B = 5');
   });
 
   it('searches the pages by name or key', async () => {
@@ -319,8 +319,9 @@ describe('SettingsPanel', () => {
     const user = userEvent.setup();
     render(<Harness section="printer" />);
     expect(screen.queryByTestId('setting-machine_start_gcode')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Filters' }));
     await user.click(screen.getByRole('checkbox', { name: 'Show read only' }));
-    expect(screen.getByTestId('setting-machine_start_gcode')).toHaveTextContent('Text or G-code: read only.');
+    expect(screen.getByTestId('setting-machine_start_gcode').getAttribute('title')).toContain('Text or G-code: read only.');
   });
 
   it('a file that cannot be edited shows every value as text', () => {
