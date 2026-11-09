@@ -47,10 +47,29 @@ describe('SlotGrid', () => {
     expect(a3[0]).toBeEnabled(); // PETG, left nozzle
     expect(a3[1]).toBeDisabled(); // PLA, right nozzle: the AMS feeds the left one
     expect(screen.getAllByTitle(/^HT-A · PLA Matte/)[1]).toBeEnabled();
-    expect(screen.getAllByRole('button', { name: /^A1/ })[0]).toBeDisabled(); // empty
+    expect(screen.getAllByTitle(/^A1 · /)[0]).toBeDisabled(); // empty
 
     await userEvent.click(a3[0]);
     expect(onMappings).toHaveBeenCalledWith({ 1: 2 });
+  });
+
+  it('lets a single external spool on a dual-nozzle printer feed the left nozzle, as upstream maps it', async () => {
+    status({
+      connected: true,
+      ams_extruder_map: { '0': 0 },
+      ams: [{ id: 0, is_ams_ht: false, module_type: 'n3f', tray: [tray(0, 'PLA', 'FFFFFFFF'), tray(1, '', ''),
+        tray(2, '', ''), tray(3, '', '')] }],
+      vt_tray: [tray(254, 'PETG', '000000FF')],
+    });
+    render(
+      <SlotGrid printerId={3} mappings={{}} onMappings={vi.fn()} filamentReqs={{ filaments: [
+        { slot_id: 1, type: 'PETG', color: '#000000', used_grams: 10, used_meters: 0, nozzle_id: 1 },
+      ] }} />,
+    );
+    const ext = await screen.findByTitle(/^Ext · /);
+    expect(ext).toBeEnabled();
+    expect(ext).toHaveAttribute('aria-pressed', 'true'); // what upstream proposes, and sends
+    expect(screen.getByTitle(/^A1 · /)).toBeDisabled(); // the AMS feeds the right nozzle
   });
 
   it('names the K2 CFS units and keeps every slot reachable on one nozzle', async () => {
