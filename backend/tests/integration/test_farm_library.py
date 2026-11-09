@@ -535,6 +535,42 @@ class TestColourVariantFile:
             variant_filament(src, 1, "Verde", "2e9e44", 80)
         assert variant_filament(src, 2, "Nero", "111111", 80) == 0  # two filaments on the plate: left alone
 
+    def test_plate_slots_before_the_slice(self, tmp_path):
+        """The print dialog's slot rows from the unsliced project: the plate's filaments, or the variant's."""
+        from backend.app.farm.variants import plate_slots
+
+        src = make_variant_3mf(tmp_path / "ami.3mf")
+        assert plate_slots(src, 1, 0) == [
+            {"slot_id": 2, "type": "", "color": "#FCE300", "tray_info_idx": "", "used_grams": 0}
+        ]
+        assert [s["slot_id"] for s in plate_slots(src, 1, 3)] == [3]  # moved to the black filament
+        assert [(s["slot_id"], s["color"]) for s in plate_slots(src, 2, 0)] == [(1, "#F75403"), (3, "#000000")]
+
+        # X2D/H2D: each row says its nozzle (0 right, 1 left), so it is mapped on that nozzle's AMS.
+        dual = tmp_path / "dual.3mf"
+        settings = {
+            **VARIANT_SETTINGS,
+            "filament_type": ["PETG", "PETG", "PET-CF"],
+            "physical_extruder_map": ["1", "0"],
+            "filament_nozzle_map": ["0", "1", "1"],
+            "extruder_nozzle_stats": ["Standard#1", "Standard#1"],
+        }
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dual, "w") as zout:
+            for name in zin.namelist():
+                data = json.dumps(settings) if name == "Metadata/project_settings.config" else zin.read(name)
+                zout.writestr(name, data)
+        assert [(s["slot_id"], s["type"], s["nozzle_id"]) for s in plate_slots(dual, 2, 0)] == [
+            (1, "PETG", 1),
+            (3, "PET-CF", 0),
+        ]
+
+        typed = tmp_path / "typed.3mf"
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(typed, "w") as zout:
+            for name in zin.namelist():
+                zout.writestr(name, zin.read(name))
+            zout.writestr("3D/Objects/o.model", b"<mesh paint_color='4'/>")
+        assert plate_slots(typed, 1, 0) is None  # painted: its colours aren't in the extruders
+
     def test_copy_moves_only_that_plate(self, tmp_path):
         from backend.app.farm.variants import move_plate_to
 

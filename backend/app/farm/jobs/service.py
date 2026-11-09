@@ -261,6 +261,32 @@ async def plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None)
     return await asyncio.to_thread(extract_filament_requirements, path, _plate_in_file(path, plate.plate_index))
 
 
+async def unsliced_plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None) -> list[dict] | None:
+    """Before the slice: the plate's filaments in the component's colour, read from the project, so the slots
+    are chosen now as in the slicers' print dialog (the 3MF is not touched). None when they can't be told."""
+    from backend.app.farm import slicing, variants
+    from backend.app.farm.nas.access import library_path
+    from backend.app.farm.nas.cache import ensure_local
+
+    lib_file = await db.get(LibraryFile, plate.library_file_id)
+    state = await db.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == plate.library_file_id))
+    if lib_file is None or state is None:
+        return None
+    await ensure_local(db, lib_file)
+    filament = 0
+    if slicing.colour_key(color):
+        try:
+            filament = await slicing._variant_filament(db, lib_file, state, plate.plate_index, color)
+        except HTTPException:
+            return None  # no filament of that colour: the job will say so
+    try:
+        return await asyncio.to_thread(
+            variants.plate_slots, library_path(lib_file.file_path), slicing.plate_key(plate.plate_index), filament
+        )
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
 async def queued_pieces(db: AsyncSession) -> dict[str, int]:
     """Pieces per component waiting for a printer, in the queue or printing (not to be proposed again)."""
     out: dict[str, int] = {}

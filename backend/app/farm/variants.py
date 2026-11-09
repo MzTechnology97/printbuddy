@@ -84,6 +84,38 @@ def plate_filaments(source: bytes | Path, plate: int) -> set[int]:
     return used
 
 
+def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] | None:
+    """The filaments the plate will be sliced with, read from the unsliced project, as the print dialog's
+    slot rows (``extract_filament_requirements`` without grams): ``filament`` when the colour variant moves
+    the plate there, else its own. None for a painted plate (its colours aren't in the extruders)."""
+    from backend.app.utils.threemf_tools import extract_nozzle_mapping_from_3mf
+
+    with _zip(source) as zf:
+        try:
+            cfg = json.loads(zf.read(PROJECT_SETTINGS_ENTRY))
+        except (KeyError, ValueError):
+            return None
+        if _painted(zf):
+            return None
+        nozzles = extract_nozzle_mapping_from_3mf(zf) or {}
+    used = {filament} if filament else plate_filaments(source, plate)
+    types, colours = cfg.get("filament_type") or [], cfg.get("filament_colour") or []
+    slots = []
+    for slot in sorted(used):
+        colour = str(colours[slot - 1]).strip().lstrip("#")[:6] if slot <= len(colours) else ""
+        row = {
+            "slot_id": slot,
+            "type": str(types[slot - 1]) if slot <= len(types) else "",
+            "color": f"#{colour}" if colour else "",
+            "tray_info_idx": "",
+            "used_grams": 0,  # known after the slice
+        }
+        if nozzles:
+            row["nozzle_id"] = nozzles.get(slot)
+        slots.append(row)
+    return slots or None
+
+
 def filament_colours(source: bytes | Path) -> list[str]:
     """``filament_colour`` of the project, as lowercase hex without ``#`` (index 0 = filament 1)."""
     with _zip(source) as zf:

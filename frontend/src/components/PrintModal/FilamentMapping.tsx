@@ -204,7 +204,7 @@ export function FilamentMapping({
                     {item.nozzle_id === 1 ? t('printModal.leftNozzle') : t('printModal.rightNozzle')}
                   </span>
                 )}
-                {item.type} <span className="text-bambu-gray">({item.used_grams}g)</span>
+                {item.type} {item.used_grams > 0 && <span className="text-bambu-gray">({item.used_grams}g)</span>}{/* fork: 0 = not sliced yet */}
               </span>
               {/* Arrow */}
               <span className="text-bambu-gray">→</span>
