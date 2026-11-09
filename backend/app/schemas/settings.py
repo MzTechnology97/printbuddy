@@ -296,6 +296,22 @@ class AppSettings(BaseModel):
         description="Shortest Job First — scheduler prioritizes shorter print jobs over longer ones",
     )
 
+    # Chamber preheat before queued prints (upstream #1468, ``services/queue_preheat``)
+    preheat_enabled: bool = Field(
+        default=False,
+        description="Preheat the chamber of enclosed Bambu printers before a queued print of a material in preheat_targets",
+    )
+    preheat_targets: str = Field(
+        default="ABS=45, ASA=45",
+        description="Chamber °C per material, e.g. 'ABS=45, ASA=45'; materials not listed print without preheat",
+    )
+    preheat_max_wait_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=120,
+        description="Longest wait for the chamber: then the print starts anyway (a P1S, without sensor, waits all of it)",
+    )
+
     # LDAP authentication (#794)
     ldap_enabled: bool = Field(default=False, description="Enable LDAP authentication")
     ldap_server_url: str = Field(default="", description="LDAP server URL (e.g., ldap://ldap.example.com:389)")
@@ -448,6 +464,9 @@ class AppSettingsUpdate(BaseModel):
     require_plate_clear: bool | None = None
     print_farm_monitor_refresh_interval: int | None = Field(default=None, ge=5, le=300)
     queue_shortest_first: bool | None = None
+    preheat_enabled: bool | None = None
+    preheat_targets: str | None = Field(default=None, max_length=500)
+    preheat_max_wait_minutes: int | None = Field(default=None, ge=1, le=120)
     gcode_snippets: str | None = None
     local_backup_enabled: bool | None = None
     local_backup_schedule: str | None = None

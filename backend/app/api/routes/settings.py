@@ -168,6 +168,7 @@ async def _build_settings_response(db: AsyncSession, is_api_key: bool = False) -
             "ambient_drying_enabled",
             "require_plate_clear",
             "queue_shortest_first",
+            "preheat_enabled",
             "default_bed_levelling",
             "default_flow_cali",
             "default_vibration_cali",
@@ -198,6 +199,7 @@ async def _build_settings_response(db: AsyncSession, is_api_key: bool = False) -
             "mqtt_port",
             "stagger_group_size",
             "stagger_interval_minutes",
+            "preheat_max_wait_minutes",
             "print_farm_monitor_refresh_interval",
             "forecast_global_lead_time_days",
         ]:
