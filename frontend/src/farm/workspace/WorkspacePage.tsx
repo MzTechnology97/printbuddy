@@ -17,10 +17,10 @@ import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
-import { PresetDialog, SaveCopyDialog } from './Dialogs';
+import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
-import { emptyMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import type { Selection } from './objects';
+import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
+import { type Selection, instancesOf } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -39,17 +39,23 @@ import {
   CANVAS_DEFAULTS,
   type CanvasOptions,
   type ObjectStats,
+  type Target,
   VIEW_KEYS,
   applyDisplay,
+  drawCollisionVolumes,
   drawMeasure,
+  drawPlates,
   fitTo,
   highlight,
   hover,
   inRectangle,
   objectStats,
+  orbit,
+  parseVolumes,
   pick,
   setSection,
   setView,
+  targetStats,
   toScreen,
   onBed,
   unmirror,
@@ -72,6 +78,38 @@ function bedOf(doc: WorkspaceDocument): { x: number; y: number; z: number } | un
   return { x: Math.max(...corners.map((c) => c[0])), y: Math.max(...corners.map((c) => c[1])), z };
 }
 const SLICER_NAMES: Record<string, string> = { orcaslicer: 'OrcaSlicer', bambu_studio: 'Bambu Studio' };
+// the shortcuts list's rows the workspace does (Shortcuts.cpp ids; the dialog's fixed rows by their wording)
+const WORKING_SHORTCUTS = new Set([
+  'SelectAll',
+  'SelectAllPlates',
+  'GizmoMeasure',
+  'ViewDefault',
+  'ViewTop',
+  'ViewBottom',
+  'ViewFront',
+  'ViewRear',
+  'ViewLeft',
+  'ViewRight',
+  'ViewPlate',
+  'ZoomIn',
+  'ZoomOut',
+  'ShowLabels',
+  'ShowCollisionVolumes',
+  'ShowWireframe',
+  'SwitchView',
+  'CollapseSidebar',
+  'KeyboardShortcuts',
+]);
+const WORKING_MOUSE = new Set([
+  'Select a part',
+  'Select multiple objects',
+  'Select objects by rectangle',
+  'Deselect All',
+  'Rotate View',
+  'Pan View',
+  'Zoom View',
+  'Move section plane',
+]);
 // OrcaSlicer's dark theme (src/slic3r/GUI/Widgets/StateColor.cpp, v2.5.0), on Printbuddy's colour tokens
 const SLICER_DARK = {
   '--color-bambu-dark': '#242428',
@@ -140,7 +178,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const { draft, set, reset, resetAll, invalid, count } = useSettingsDraft(doc.settings);
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
-  const [selectedPlate, setSelectedPlate] = useState<number | null>(null);
+  // focus mode (on at first, as OrcaSlicer) shows one plate, the first to begin with; off: null, every plate
+  const [selectedPlate, setSelectedPlate] = useState<number | null>(doc.plates[0]?.index ?? null);
   const [saveOpen, setSaveOpen] = useState(false);
   const [preset, setPreset] = useState<{ kind: 'printer' | 'filament'; filament: number } | null>(null);
   const [perObject, setPerObject] = useState(false);
@@ -149,8 +188,14 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const [view, setViewScene] = useState<ViewerScene | null>(null);
   const [stats, setStats] = useState<Map<string, ObjectStats>>(new Map());
   const [canvas, setCanvas] = useState<CanvasOptions>(CANVAS_DEFAULTS);
-  const [section, setSectionRatio] = useState<number | null>(null);
-  const sectionNormal = useRef(new THREE.Vector3(0, 1, 0)); // a horizontal cut until "Set viewing angle"
+  // the section view (GLCanvas3D's): 0 none, up to 1; its plane faces the camera from the first cut until
+  // "Set viewing angle" turns it again; a toggle goes back to the last cut (half way the first time)
+  const [section, setSectionState] = useState(0);
+  const sectionNormal = useRef<THREE.Vector3 | null>(null);
+  const lastSection = useRef(0);
+  const [sectionAngle, setSectionAngle] = useState(0);
+  const [collision, setCollision] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   // several objects selected (Ctrl+click, Shift+drag); ``selection`` is the one the panels show
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [rubber, setRubber] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -183,8 +228,13 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
 
   // --- 3D view: selection, menus, tools (they only look; see Viewport.tsx) ---
   const tr = useCallback((text: string) => orcaText(layout, text, i18n.language), [layout, i18n.language]);
+  const focusRef = useRef(true);
+  focusRef.current = canvas.focus;
   const onScene = useCallback((scene: ViewerScene) => {
     unmirror(scene);
+    scene.controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN; // OrcaSlicer's middle drag pans (its default)
+    // focus mode off: every plate beside the first, as OrcaSlicer lays them out
+    drawPlates(scene, focusRef.current ? 0 : doc.plates.length);
     // the whole bed, as the slicer opens a plate (or the object a menu asked to zoom to)
     if (zoomAfterBuild.current) fitTo(scene, zoomAfterBuild.current);
     else setView(scene, 'iso');
@@ -192,20 +242,56 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     setViewScene(scene);
     setStats(objectStats(scene));
     setMeasure([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the plates of this document; focus is read when built
   }, []);
   const selectedId = selection?.kind === 'object' ? selection.id : null;
   const shownIds = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
-  const shownKey = shownIds.join(',');
+  const instances = useMemo(() => instancesOf(doc.plates), [doc.plates]);
+  // what the 3D view lights: the objects selected together, else the object (its instance, its part) selected
+  const targets: Target[] = selectedIds.length
+    ? selectedIds.map((objectId) => ({ objectId }))
+    : selection?.kind === 'object'
+      ? [{ objectId: selection.id, instance: selection.instance ?? null, partId: selection.partId ?? null }]
+      : [];
+  const targetsKey = JSON.stringify(targets);
   useEffect(() => {
-    if (view) highlight(view, shownKey ? shownKey.split(',') : [], canvas.outline);
-  }, [view, shownKey, canvas.outline]);
+    if (view) highlight(view, JSON.parse(targetsKey) as Target[], canvas.outline);
+  }, [view, targetsKey, canvas.outline]);
+  useEffect(() => {
+    if (view) drawPlates(view, canvas.focus ? 0 : doc.plates.length);
+  }, [view, canvas.focus, doc.plates.length]);
   useEffect(() => {
     if (view?.grid) view.grid.visible = canvas.grid;
     if (view) applyDisplay(view, canvas, stats);
   }, [view, canvas, stats]);
   useEffect(() => {
-    if (view) setSection(view, section == null ? null : { normal: sectionNormal.current, ratio: section });
-  }, [view, section]);
+    if (view) setSection(view, section > 0 && sectionNormal.current ? { normal: sectionNormal.current, ratio: section } : null);
+  }, [view, section, sectionAngle]);
+  const sectionTo = (ratio: number) => {
+    const r = Math.min(1, Math.max(0, ratio));
+    if (r > 0 && !sectionNormal.current && view) sectionNormal.current = viewDirection(view);
+    setSectionState((now) => {
+      if (r === 0 && now > 0) lastSection.current = now;
+      return r;
+    });
+  };
+  const alignSection = () => {
+    if (!view) return;
+    sectionNormal.current = viewDirection(view);
+    setSectionAngle((n) => n + 1);
+  };
+  // "Show all collision volumes" (Ctrl+Shift+K): the printer's own, at full height
+  const volumes = useMemo(() => {
+    const text = (key: string) => {
+      const v = byKey.get(key)?.value;
+      return (Array.isArray(v) ? v : v ? [v] : []).join('|');
+    };
+    const perExtruder = (byKey.get('bed_exclude_volume_mode')?.value as string | undefined) === 'per_extruder';
+    return parseVolumes(perExtruder ? text('extruder_bed_exclude_volumes') : text('bed_exclude_volumes'), bed?.z ?? 256);
+  }, [byKey, bed]);
+  useEffect(() => {
+    if (view) drawCollisionVolumes(view, collision ? volumes : []);
+  }, [view, collision, volumes]);
   useEffect(() => {
     if (view) drawMeasure(view, measure[0] ?? null, measure[1] ?? null);
   }, [view, measure]);
@@ -234,6 +320,11 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const openEmptyMenu = (at: { x: number; y: number }) =>
     setMenu({ at, items: emptyMenu(tr, canvas.labels, { labels: () => setCanvas((c) => ({ ...c, labels: !c.labels })) }) });
   const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>) => {
+    if (sel.kind === 'object' && sel.instance != null && !sel.part) {
+      // an instance node of the list (the 3D view's right click opens the object's menu)
+      setMenu({ at, items: instanceMenu(tr, 1) });
+      return;
+    }
     if (sel.kind === 'object' && selectedIds.length > 1 && selectedIds.includes(sel.id)) {
       setMenu({
         at,
@@ -297,14 +388,20 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         if (hit) setMeasure((m) => (m.length === 1 ? [m[0], hit.point] : [hit.point]));
         return;
       }
-      if (hit && (e.ctrlKey || e.metaKey)) {
+      if (hit && e.altKey && hit.partId) {
+        // Alt+click selects the part under the pointer
+        const part = doc.objects.find((o) => o.id === hit.objectId)?.parts.find((p) => p.id === hit.partId);
+        setSelectedIds([]);
+        select({ kind: 'object', id: hit.objectId, plate: selectedPlate, instance: hit.instance, partId: hit.partId, part: part?.name ?? null });
+      } else if (hit && (e.ctrlKey || e.metaKey)) {
         // Ctrl+click adds to (or takes out of) the selection
         const base = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
         setSelectedIds(base.includes(hit.objectId) ? base.filter((id) => id !== hit.objectId) : [...base, hit.objectId]);
         select({ kind: 'object', id: hit.objectId, plate: selectedPlate });
       } else if (hit) {
+        // a click selects the instance under the pointer
         setSelectedIds([]);
-        select({ kind: 'object', id: hit.objectId, plate: selectedPlate });
+        select({ kind: 'object', id: hit.objectId, plate: selectedPlate, instance: hit.instance });
       } else deselect();
     },
     (e) => {
@@ -314,7 +411,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         const sel = { kind: 'object' as const, id: hit.objectId, plate: selectedPlate };
         if (!selectedIds.includes(hit.objectId)) {
           setSelectedIds([]);
-          select(sel);
+          select({ ...sel, instance: hit.instance });
         }
         openMenu(at, sel);
       } else if (view && currentPlate != null && onBed(view, e.clientX, e.clientY)) openMenu(at, { kind: 'plate', plate: currentPlate });
@@ -322,8 +419,10 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     },
   );
   // the 3D view's pointer: hover light, Shift+drag rectangle selection, double click (OrcaSlicer's canvas)
-  const live = useRef({ selectedIds, hovered: null as string | null });
+  const live = useRef({ selectedIds, hovered: null as string | null, section, sectionTo });
   live.current.selectedIds = selectedIds;
+  live.current.section = section;
+  live.current.sectionTo = sectionTo;
   useEffect(() => {
     const canvasEl = view?.renderer.domElement;
     const host = canvasEl?.parentElement;
@@ -358,6 +457,14 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     };
     const leave = () => hover(view, (live.current.hovered = null));
     const dbl = (e: MouseEvent) => setPerObject(!!pick(view, e.clientX, e.clientY)); // Objects / Global panel
+    // Alt+wheel moves the section plane (GLCanvas3D::on_mouse_wheel), before the camera's own zoom sees it
+    const wheel = (e: WheelEvent) => {
+      if (!e.altKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      live.current.sectionTo(live.current.section + (e.deltaY > 0 ? -0.01 : 0.01));
+    };
+    host.addEventListener('wheel', wheel, { capture: true, passive: false });
     host.addEventListener('pointerdown', down, true);
     canvasEl.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -365,6 +472,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     canvasEl.addEventListener('dblclick', dbl);
     return () => {
       cancelAnimationFrame(frame);
+      host.removeEventListener('wheel', wheel, { capture: true });
       host.removeEventListener('pointerdown', down, true);
       canvasEl.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -377,9 +485,11 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
-  // OrcaSlicer's keys (Shortcuts.cpp): Ctrl+0..7 views, Z zoom to the selection, U measure, Ctrl+A select all,
-  // Ctrl+E labels, Ctrl+Shift+Enter wireframe, Tab Prepare / Preview, Shift+Tab sidebar, Esc leaves a tool / selection
-  const dialogOpen = saveOpen || !!preset || !!menu || printOpen;
+  // OrcaSlicer's keys (Shortcuts.cpp): Ctrl+0..7 views, Z zoom to the selection, I / O zoom in / out, U measure,
+  // Ctrl+A select all (Ctrl+Shift+A on all plates), Ctrl+E labels, Ctrl+Shift+K collision volumes,
+  // Ctrl+Shift+Enter wireframe, Tab Prepare / Preview, Shift+Tab sidebar, ? the shortcuts list, Esc leaves a tool
+  // or the selection
+  const dialogOpen = saveOpen || !!preset || !!menu || printOpen || shortcutsOpen;
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement | null;
@@ -390,6 +500,11 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       e.preventDefault();
       if (e.shiftKey) setSidebarHidden((h) => !h);
       else setMode((m) => (m === 'prepare' ? 'preview' : 'prepare'));
+      return;
+    }
+    if (e.key === '?' && !ctrl) {
+      e.preventDefault();
+      setShortcutsOpen(true);
       return;
     }
     if (mode !== 'prepare' || !view) return;
@@ -404,13 +519,23 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     } else if (ctrl && (e.key === 'e' || e.key === 'E')) {
       handled();
       setCanvas((c) => ({ ...c, labels: !c.labels }));
+    } else if (ctrl && e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+      handled();
+      setCollision((c) => !c);
     } else if (ctrl && (e.key === 'a' || e.key === 'A')) {
       handled();
-      const ids = [...stats.keys()];
+      // Ctrl+Shift+A: the objects of every plate (those of other plates light up when their plate shows)
+      const ids = e.shiftKey ? doc.objects.map((o) => o.id ?? '').filter(Boolean) : [...stats.keys()];
       setSelectedIds(ids);
       if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
     } else if (ctrl) return;
     else if (e.key === 'z' || e.key === 'Z') fitTo(view, selectedId);
+    else if (e.key === 'i' || e.key === 'I' || e.key === 'o' || e.key === 'O') {
+      // zoom in / out towards the camera's target
+      const d = view.camera.position.clone().sub(view.controls.target);
+      view.camera.position.copy(view.controls.target).addScaledVector(d, e.key.toLowerCase() === 'i' ? 0.8 : 1.25);
+      view.controls.update();
+    }
     else if (e.key === 'u' || e.key === 'U') toggleTool('measure');
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
@@ -423,7 +548,17 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   const selectedObject = selectedId != null ? doc.objects.find((o) => o.id === selectedId) : undefined;
-  const selectedStats = selectedId != null ? stats.get(selectedId) : undefined;
+  // the info box (Plater.cpp): one instance or one part; a whole object only when it has one instance
+  const info = (() => {
+    if (selection?.kind !== 'object' || !view) return null;
+    if (selectedIds.length > 1) return { count: selectedIds.length };
+    const partId =
+      selection.partId ?? (selection.part ? selectedObject?.parts.find((p) => p.name === selection.part)?.id ?? null : null);
+    const whole = selection.instance == null && !partId;
+    if (whole && (instances.get(selection.id)?.length ?? 1) > 1) return null;
+    const s = whole ? stats.get(selection.id) : targetStats(view, { objectId: selection.id, instance: selection.instance ?? 0, partId });
+    return s ? { count: 1, stats: s, part: partId ? selection.part : null } : null;
+  })();
   const distance = measure.length === 2 ? measure[0].distanceTo(measure[1]) : null;
 
   useEffect(() => {
@@ -637,11 +772,9 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                     }}
                     onFit={() => fitTo(view, selectedId)}
                     section={section}
-                    onSection={setSectionRatio}
-                    onSectionAngle={() => {
-                      sectionNormal.current = viewDirection(view);
-                      setSectionRatio((r) => (r == null ? 1 : r - 1e-9)); // re-apply with the new plane
-                    }}
+                    onSection={sectionTo}
+                    onToggleSection={() => sectionTo(section > 0 ? 0 : lastSection.current > 0 ? lastSection.current : 0.5)}
+                    onSectionAngle={alignSection}
                   />
                   {canvas.navigator && (
                     <Navigator
@@ -649,7 +782,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                         const d = viewDirection(view);
                         return { x: d.x, y: d.y, z: d.z };
                       }}
-                      onView={(p) => setView(view, p)}
+                      onView={(p) => setView(view, Array.isArray(p) ? new THREE.Vector3(...p).normalize() : p)}
+                      onOrbit={(dx, dy) => orbit(view, dx, dy)}
                     />
                   )}
                   {canvas.labels && (
@@ -685,17 +819,20 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                   )}
                 </>
               )}
-              {selectedObject && selectedStats && !infoClosed && (
+              {selectedObject && info && !infoClosed && (
                 <ObjectInfo
                   layout={layout}
                   name={selectedObject.name ?? `#${selectedId}`}
-                  part={selection?.kind === 'object' ? selection.part : null}
-                  count={Math.max(selectedIds.length, 1)}
-                  stats={selectedStats}
+                  part={info.part}
+                  count={info.count}
+                  stats={info.stats}
                   onClose={() => setInfoClosed(true)}
                 />
               )}
-              <PlateBar fileId={fileId} plates={doc.plates} selected={selectedPlate} onSelect={setSelectedPlate} />
+              {/* the plate switcher shows in focus mode (GLCanvas3D); off, every plate is in the 3D view */}
+              {canvas.focus && (
+                <PlateBar fileId={fileId} plates={doc.plates} selected={selectedPlate} onSelect={(p) => p != null && setSelectedPlate(p)} />
+              )}
             </div>
           ) : (
             <div className="relative flex-1 min-h-0">
@@ -728,6 +865,14 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         />
       )}
       {menu && <ContextMenu items={menu.items} at={menu.at} onClose={() => setMenu(null)} />}
+      {shortcutsOpen && (
+        <ShortcutsDialog
+          layout={layout}
+          context={mode === 'prepare' ? 'Plater' : 'Preview'}
+          works={(row) => (row.id ? WORKING_SHORTCUTS.has(row.id) : WORKING_MOUSE.has(row.label))}
+          onClose={() => setShortcutsOpen(false)}
+        />
+      )}
       {preset && (
         <PresetDialog
           layout={layout}

@@ -35,6 +35,22 @@ export interface OrcaPage {
   groups: OrcaGroup[];
 }
 
+/** A row of OrcaSlicer's "Keyboard Shortcuts" dialog: ``id`` is the Shortcut of a key table row (null: a fixed
+ * row); a key part with "Keyboard Shortcut\u0004" before it is translated in that context (see keyText). */
+export interface ShortcutRow {
+  id: string | null;
+  section: string;
+  keys: string[];
+  label: string;
+}
+
+export interface ShortcutPage {
+  title: string;
+  caption: string;
+  context: string;
+  rows: ShortcutRow[];
+}
+
 export interface OrcaLayout {
   tag: string;
   source: string;
@@ -45,7 +61,9 @@ export interface OrcaLayout {
   object_keys: string[];
   /** A plate's own settings: key in model_settings.config -> the option it sets */
   plate_keys: Record<string, string>;
-  /** English (as in OrcaSlicer) -> Italian (its it.po) */
+  /** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp, Shortcuts.cpp) */
+  shortcuts?: ShortcutPage[];
+  /** English (as in OrcaSlicer) -> Italian (its it.po); a contextual string under "context\u0004text" */
   it: Record<string, string>;
 }
 
@@ -58,7 +76,8 @@ export async function loadOrcaLayout(slicer?: string | null): Promise<OrcaLayout
   const orca = await layoutModules['./orca-assets/settings-layout.json']();
   if (slicer !== 'bambu_studio') return orca;
   const bambu = await layoutModules['./orca-assets/settings-layout-bambu.json']();
-  return { ...bambu, it: { ...orca.it, ...bambu.it } };
+  // the 3D view, its keys and their dialog are OrcaSlicer's for every project
+  return { ...bambu, shortcuts: orca.shortcuts, it: { ...orca.it, ...bambu.it } };
 }
 
 /** Orca's modes, each showing the ones before it; develop only with the DEV switch. */
@@ -81,6 +100,28 @@ export function orcaIcon(name: string | null | undefined): string | undefined {
 /** An OrcaSlicer string in the UI language: its Italian translation, else as OrcaSlicer writes it. */
 export function orcaText(layout: OrcaLayout, text: string, language: string | undefined): string {
   return language?.startsWith('it') ? (layout.it[text] ?? text) : text;
+}
+
+/** An OrcaSlicer format string in the UI language with its values put in (``%1%``, ``%1$d``, ``%d``), without
+ * the line break it ends with. */
+export function orcaFormat(layout: OrcaLayout, text: string, language: string | undefined, ...values: (string | number)[]): string {
+  let next = 0;
+  return orcaText(layout, text, language)
+    .replace(/%(\d+)(?:\$[a-z]|%)|%[ds]/g, (m, n?: string) => String(values[n ? Number(n) - 1 : next++] ?? m))
+    .replace(/\n$/, '');
+}
+
+/** One of OrcaSlicer's plural strings (``one`` for 1, else ``many``) with its number. */
+export function orcaPlural(layout: OrcaLayout, one: string, many: string, n: number, language: string | undefined): string {
+  return orcaFormat(layout, n === 1 ? one : many, language, n);
+}
+
+const KEY_CONTEXT = 'Keyboard Shortcut\u0004';
+
+/** A key in the shortcuts dialog: a named key ("Esc", "Arrow Left"), a modifier ("Shift") or a mouse button. */
+export function keyText(layout: OrcaLayout, part: string, language: string | undefined): string {
+  const bare = part.startsWith(KEY_CONTEXT) ? part.slice(KEY_CONTEXT.length) : part;
+  return language?.startsWith('it') ? (layout.it[KEY_CONTEXT + bare] ?? layout.it[bare] ?? bare) : bare;
 }
 
 /** Every key the layout places on a page (keys it doesn't place are "other values"). */

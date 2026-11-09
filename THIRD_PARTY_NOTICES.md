@@ -8,12 +8,14 @@
 - Used in: `frontend/src/farm/workspace/orca-assets/` (3MF Workspace)
   - `settings-layout.json` and `backend/app/data/slicer_options/orcaslicer.json`: data generated from OrcaSlicer's
     `src/slic3r/GUI/Tab.cpp`, `src/libslic3r/PrintConfig.cpp`, `src/libslic3r/PublishSettings.cpp`,
-    `src/libslic3r/PrintConfig.hpp`, `src/libslic3r/Preset.cpp` and `localization/i18n/it/OrcaSlicer_it.po` (every option
+    `src/libslic3r/PrintConfig.hpp`, `src/libslic3r/Preset.cpp`, `src/slic3r/GUI/Shortcuts.cpp`, `Shortcuts.hpp`,
+    `KeyChord.cpp`, `KBShortcutsDialog.cpp` (the keyboard shortcuts list) and `localization/i18n/it/OrcaSlicer_it.po` (every option
     with its type, range, enum values and preset; settings pages, groups and order, option labels, tooltips, units, ranges, enum labels, modes, the settings an
     object can have of its own, the Italian of those and of the 3D view's toolbar, plate buttons and right-click
     menus) by `tools/orca_settings/generate.py`;
   - `icons/*.svg`: icons copied unchanged from OrcaSlicer's `resources/images/` (settings pages, pattern values,
-    3D toolbar and canvas buttons, plate buttons, object parts, printer, filament, search, edit, plate settings).
+    3D toolbar and canvas buttons, plate buttons, object parts and the object list's columns, printer, filament,
+    search, edit, help, plate settings).
     No OrcaSlicer or Bambu Lab logos, splash screens or brand marks.
   - `frontend/src/farm/workspace/dependencies.ts` and `warnings.ts`: the rules of `src/slic3r/GUI/ConfigManipulation.cpp`
     and `src/slic3r/GUI/Tab.cpp` (which settings are greyed or hidden, and the consistency warnings), rewritten in

@@ -12,7 +12,7 @@ import { render } from '../utils';
 import type { WorkspaceDocument, WorkspaceSetting } from '../../farm/workspace/api';
 import { dependencies } from '../../farm/workspace/dependencies';
 import { consistencyWarnings } from '../../farm/workspace/warnings';
-import { PresetDialog } from '../../farm/workspace/Dialogs';
+import { PresetDialog, ShortcutsDialog } from '../../farm/workspace/Dialogs';
 import {
   elementError,
   fromLocaleDecimal,
@@ -22,14 +22,24 @@ import {
   withoutKey,
   type Draft,
 } from '../../farm/workspace/draft';
-import { emptyMenu, multiMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
+import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
 import { ObjectsPanel } from '../../farm/workspace/ObjectsPanel';
 import { SettingsPanel } from '../../farm/workspace/SettingsPanel';
-import { ContextMenu, MainToolbar } from '../../farm/workspace/Viewport';
-import { CANVAS_DEFAULTS, VIEW_KEYS, meshVolume, objectStats, openEdges } from '../../farm/workspace/viewTools';
+import { ContextMenu, MainToolbar, ObjectInfo } from '../../farm/workspace/Viewport';
+import {
+  CANVAS_DEFAULTS,
+  type ObjectStats,
+  VIEW_KEYS,
+  meshVolume,
+  navigatorView,
+  objectStats,
+  openEdges,
+  parseVolumes,
+  plateOrigin,
+} from '../../farm/workspace/viewTools';
 import { CanvasButtons } from '../../farm/workspace/Viewport';
 import type { ViewerScene } from '../../components/ModelViewer';
-import type { OrcaLayout, Section } from '../../farm/workspace/orcaLayout';
+import { type OrcaLayout, type Section, keyText, orcaFormat, orcaPlural } from '../../farm/workspace/orcaLayout';
 
 const base = {
   description: null,
@@ -677,7 +687,16 @@ describe('batch B: selection, menus, canvas', () => {
     const user = userEvent.setup();
     const onOption = vi.fn();
     render(
-      <CanvasButtons layout={LAYOUT} options={CANVAS_DEFAULTS} onOption={onOption} onFit={() => {}} section={null} onSection={() => {}} onSectionAngle={() => {}} />,
+      <CanvasButtons
+        layout={LAYOUT}
+        options={CANVAS_DEFAULTS}
+        onOption={onOption}
+        onFit={() => {}}
+        section={0}
+        onSection={() => {}}
+        onToggleSection={() => {}}
+        onSectionAngle={() => {}}
+      />,
     );
     await user.click(screen.getByRole('button', { name: 'Gridlines' }));
     const items = within(screen.getByRole('menu')).getAllByRole('menuitemcheckbox');
@@ -687,5 +706,170 @@ describe('batch B: selection, menus, canvas', () => {
     ]);
     await user.click(items[4]);
     expect(onOption).toHaveBeenCalledWith('wireframe', true);
+  });
+});
+
+const STATS = (over: Partial<ObjectStats> = {}): ObjectStats => ({
+  size: [20, 20, 10],
+  volume: 4000,
+  triangles: 12,
+  printable: true,
+  openEdges: 0,
+  centroid: new THREE.Vector3(),
+  sinking: false,
+  paint: { supports: false, color: false },
+  variableLayers: false,
+  ...over,
+});
+
+describe('batch B: tree columns, instances, info box, shortcuts, section and navigator', () => {
+  it("formats OrcaSlicer's strings, plurals and key names in Italian", () => {
+    const layout = {
+      ...LAYOUT,
+      it: {
+        'Part name: %1%\n': 'Nome parte: %1%\n',
+        '%1$d non-manifold edges': '%1$d geometrie con spessore zero',
+        'Keyboard Shortcut\u0004Shift': 'Maiusc',
+        'Left mouse': 'Tasto sinistro',
+      },
+    };
+    expect(orcaFormat(layout, 'Part name: %1%\n', 'it', 'Base')).toBe('Nome parte: Base');
+    expect(orcaFormat(layout, '[P%d]Instance %d', 'en', 1, 2)).toBe('[P1]Instance 2');
+    expect(orcaPlural(layout, '%1$d non-manifold edge', '%1$d non-manifold edges', 3, 'it')).toBe('3 geometrie con spessore zero');
+    expect(orcaPlural(layout, '%1$d non-manifold edge', '%1$d non-manifold edges', 1, 'en')).toBe('1 non-manifold edge');
+    expect(keyText(layout, 'Shift', 'it')).toBe('Maiusc');
+    expect(keyText(layout, 'Keyboard Shortcut\u0004Esc', 'en')).toBe('Esc');
+    expect(keyText(layout, 'Left mouse', 'it')).toBe('Tasto sinistro');
+  });
+
+  it('shows instances, the mesh warning and only the columns some object needs', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMenu = vi.fn();
+    const doc = {
+      ...DOC,
+      plates: [
+        { ...DOC.plates[0], object_ids: ['2', '2'], instances: [{ object_id: '2', instance_id: '0' }, { object_id: '2', instance_id: '1' }] },
+        { ...DOC.plates[1], object_ids: ['4', '2'], instances: [{ object_id: '4', instance_id: '0' }, { object_id: '2', instance_id: '2' }] },
+      ],
+    } as WorkspaceDocument;
+    const stats = new Map([
+      ['2', STATS({ sinking: true, openEdges: 3 })],
+      ['4', STATS()],
+    ]);
+    render(<ObjectsPanel layout={LAYOUT} doc={doc} draft={{}} colours={[]} stats={stats} selection={null} onSelect={onSelect} onMenu={onMenu} />);
+    const tree = screen.getByRole('tree');
+    // the sinking column shows (Cube A sinks), the painting and height columns don't (nobody needs them)
+    expect(within(tree).getAllByTitle('Click the icon to shift this object to the bed').length).toBeGreaterThan(0);
+    expect(within(tree).queryByTitle('Click the icon to edit support painting of the object')).toBeNull();
+    expect(within(tree).queryByTitle('Variable layer height')).toBeNull();
+    const warning = within(tree).getAllByAltText('Errors')[0];
+    expect(warning.getAttribute('title')).toContain('3 non-manifold edges');
+    // three instances across two plates: OrcaSlicer marks those on another plate with its index from 0
+    const plate1 = within(tree).getByText('Plate 1 · First').closest('li')!;
+    expect(within(plate1).getByText('Instances')).toBeInTheDocument();
+    expect(within(plate1).getByText('Instance 1')).toBeInTheDocument();
+    expect(within(plate1).getByText('[P1]Instance 3')).toBeInTheDocument();
+    await user.click(within(plate1).getByText('Instance 2'));
+    expect(onSelect).toHaveBeenLastCalledWith({ kind: 'object', id: '2', plate: 1, instance: 1 });
+    fireEvent.contextMenu(within(plate1).getByText('Instance 2'), { clientX: 1, clientY: 2 });
+    expect(onMenu).toHaveBeenLastCalledWith({ x: 1, y: 2 }, { kind: 'object', id: '2', plate: 1, instance: 1 });
+    expect(instanceMenu((t) => t, 1).map((i) => i.label)).toEqual(['Set as An Individual Object']);
+  });
+
+  it("writes the info box as OrcaSlicer: a part's name, or only how many are selected", () => {
+    const { rerender } = render(<ObjectInfo layout={LAYOUT} name="Cube" part="Base" stats={STATS({ openEdges: 2 })} onClose={() => {}} />);
+    expect(screen.getByText('Part name: Base')).toBeInTheDocument();
+    expect(screen.queryByText(/Object name/)).toBeNull();
+    expect(screen.getByText('Size: 20 x 20 x 10 mm')).toBeInTheDocument();
+    expect(screen.getByText('Error: 2 non-manifold edges.')).toBeInTheDocument();
+    rerender(<ObjectInfo layout={LAYOUT} name="Cube" count={2} stats={STATS()} onClose={() => {}} />);
+    expect(screen.getByText('Number of currently selected objects: 2')).toBeInTheDocument();
+    expect(screen.queryByText(/Size/)).toBeNull();
+  });
+
+  it("lists OrcaSlicer's shortcuts by page and section, those not here yet muted", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const layout: OrcaLayout = {
+      ...LAYOUT,
+      shortcuts: [
+        { title: 'Global', caption: 'Available anywhere in the window.', context: 'Global', rows: [{ id: 'NewProject', section: 'Project', keys: ['Ctrl', 'N'], label: 'New Project' }] },
+        {
+          title: 'Prepare',
+          caption: 'Available while the 3D view on the Prepare tab has focus.',
+          context: 'Plater',
+          rows: [
+            { id: 'SelectAll', section: 'Selection', keys: ['Ctrl', 'A'], label: 'Select all objects' },
+            { id: null, section: 'Display', keys: ['Alt', 'Mouse wheel'], label: 'Move section plane' },
+            { id: 'GizmoMove', section: 'Gizmos', keys: ['M'], label: 'Gizmo move' },
+          ],
+        },
+      ],
+    };
+    render(<ShortcutsDialog layout={layout} context="Plater" works={(r) => r.id === 'SelectAll' || r.id === null} onClose={onClose} />);
+    expect(screen.getByRole('tab', { name: 'Prepare' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('heading', { name: 'Selection' })).toBeInTheDocument();
+    expect(screen.getByText('Gizmo move').parentElement).toHaveAttribute('title', expect.stringContaining('phase 2'));
+    expect(screen.getByText('Select all objects').parentElement).not.toHaveAttribute('title');
+    await user.click(screen.getByRole('tab', { name: 'Global' }));
+    expect(screen.getByText('New Project')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('moves the section plane from the icon: wheel, right click toggles, middle click sets the angle', () => {
+    const on = { section: vi.fn(), toggle: vi.fn(), angle: vi.fn() };
+    render(
+      <CanvasButtons
+        layout={LAYOUT}
+        options={CANVAS_DEFAULTS}
+        onOption={() => {}}
+        onFit={() => {}}
+        section={0.5}
+        onSection={on.section}
+        onToggleSection={on.toggle}
+        onSectionAngle={on.angle}
+      />,
+    );
+    const icon = screen.getByRole('button', { name: 'Section view' });
+    fireEvent.wheel(icon, { deltaY: -100 });
+    expect(on.section).toHaveBeenLastCalledWith(0.51);
+    fireEvent.contextMenu(icon);
+    expect(on.toggle).toHaveBeenCalled();
+    fireEvent.mouseDown(icon, { button: 1 });
+    expect(on.angle).toHaveBeenCalled();
+    fireEvent.click(icon); // opens the panel: slider, Set viewing angle, Reset
+    expect(screen.getByRole('slider', { name: 'Section view' })).toHaveValue('0.5');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(on.section).toHaveBeenLastCalledWith(0);
+  });
+
+  it("looks from a navigator face, edge or corner, lays plates out as OrcaSlicer and reads collision volumes", () => {
+    expect(navigatorView('front', 0.5, 0.5)).toBe('front');
+    expect(navigatorView('front', 0.95, 0.5)).toEqual([1, 0, 1]); // its right edge: between front and right
+    expect(navigatorView('top', 0.05, 0.05)).toEqual([-1, 1, -1]); // the top's far left corner
+    // 4 plates: 2 columns; 5 plates: 3 (sqrt 2.24 rounds to 2, below it: one more)
+    expect(plateOrigin(1, 4, { x: 100, y: 50 })).toEqual({ x: 120, z: 0 });
+    expect(plateOrigin(2, 4, { x: 100, y: 50 })).toEqual({ x: 0, z: 60 });
+    expect(plateOrigin(2, 5, { x: 100, y: 50 })).toEqual({ x: 240, z: 0 });
+    expect(parseVolumes('0x0, 10x0, 10x10 | 5..20;0x0,1x0,1x1 | bad', 250)).toEqual([
+      { points: [[0, 0], [10, 0], [10, 10]], zmin: 0, zmax: 250 },
+      { points: [[0, 0], [1, 0], [1, 1]], zmin: 5, zmax: 20 },
+    ]);
+  });
+
+  it('marks a sinking, painted or variable layer height object from the scene', () => {
+    const model = new THREE.Group();
+    const item = new THREE.Group();
+    item.userData = { objectId: '7', printable: true, instance: 0, paint: { supports: true, color: false }, variableLayers: true };
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10));
+    mesh.position.y = 2; // 3 mm below the bed
+    item.add(mesh);
+    model.add(item);
+    const s = objectStats({ model } as unknown as ViewerScene).get('7')!;
+    expect(s.sinking).toBe(true);
+    expect(s.paint).toEqual({ supports: true, color: false });
+    expect(s.variableLayers).toBe(true);
   });
 });

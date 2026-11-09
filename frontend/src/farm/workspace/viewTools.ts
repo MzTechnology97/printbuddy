@@ -7,6 +7,29 @@ import * as THREE from 'three';
 import type { ViewerScene } from '../../components/ModelViewer';
 
 export type ViewPreset = 'iso' | 'top' | 'bottom' | 'front' | 'rear' | 'left' | 'right';
+export type Vec3 = [number, number, number];
+
+// the navigator cube's faces: in the scene their normal and the directions of their own right (u) and up (v)
+const NAV_FACES: Record<string, { n: Vec3; u: Vec3; v: Vec3 }> = {
+  front: { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] },
+  rear: { n: [0, 0, -1], u: [-1, 0, 0], v: [0, 1, 0] },
+  right: { n: [1, 0, 0], u: [0, 0, -1], v: [0, 1, 0] },
+  left: { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },
+  top: { n: [0, 1, 0], u: [1, 0, 0], v: [0, 0, -1] },
+  bottom: { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
+};
+
+/** Where a click on a navigator face looks from: the face, or near its border the edge (two faces) or the corner
+ * (three) there. ``x`` and ``y`` from 0 to 1 across the face, from its top left. */
+export function navigatorView(face: ViewPreset, x: number, y: number): ViewPreset | Vec3 {
+  const f = NAV_FACES[face];
+  const [cu, cv] = [x * 2 - 1, 1 - y * 2];
+  const edge = 0.6; // the outer fifth of each side
+  if (!f || (Math.abs(cu) < edge && Math.abs(cv) < edge)) return face;
+  const su = Math.abs(cu) < edge ? 0 : Math.sign(cu);
+  const sv = Math.abs(cv) < edge ? 0 : Math.sign(cv);
+  return f.n.map((n, i) => n + su * f.u[i] + sv * f.v[i]) as Vec3;
+}
 
 export interface ObjectStats {
   /** X × Y × Z in mm, as the slicer's axes */
@@ -19,9 +42,31 @@ export interface ObjectStats {
   openEdges: number;
   /** the centre of mass, in the scene */
   centroid: THREE.Vector3;
+  /** some of it below the bed (the object list's sinking column) */
+  sinking: boolean;
+  /** painted supports / colours (the object list's paint columns) */
+  paint: { supports: boolean; color: boolean };
+  /** a variable layer height profile (the object list's height column) */
+  variableLayers: boolean;
+}
+
+/** What the 3D view selects: a whole object (every instance), one instance of it, or one part of an instance. */
+export interface Target {
+  objectId: string;
+  /** the instance's number among the object's build items (from 0); none: all of them */
+  instance?: number | null;
+  /** the part's id (model_settings.config); none: the whole instance */
+  partId?: string | null;
 }
 
 const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
+
+/** The scene nodes a target covers: instances, or the part's group in each. */
+function nodesOf(view: ViewerScene, t: Target): THREE.Object3D[] {
+  return items(view)
+    .filter((i) => String(i.userData.objectId) === t.objectId && (t.instance == null || i.userData.instance === t.instance))
+    .flatMap((i) => (t.partId ? i.children.filter((c) => c.userData.partId === t.partId) : [i]));
+}
 
 /** ModelViewer swaps the 3MF's Y and Z, which mirrors the scene front to back; flipping the model back about
  * the bed's centre line gives the slicer's own view (front of the bed towards the default camera). */
@@ -52,40 +97,57 @@ export function meshVolume(geometry: THREE.BufferGeometry): number {
   return sum / 6;
 }
 
-/** Each object's info (its first instance on the plate shown). */
+/** The info of one scene node (an instance, or a part's group in it). */
+function statsOf(node: THREE.Object3D): ObjectStats {
+  let volume = 0;
+  let triangles = 0;
+  let open = 0;
+  const weighted = new THREE.Vector3();
+  node.updateMatrixWorld(true);
+  node.traverse((o) => {
+    if (o instanceof THREE.Mesh) {
+      const v = meshVolume(o.geometry);
+      volume += v;
+      triangles += (o.geometry.getIndex()?.count ?? o.geometry.getAttribute('position').count) / 3;
+      open += openEdges(o.geometry);
+      o.geometry.computeBoundingBox();
+      weighted.addScaledVector(o.geometry.boundingBox!.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld), Math.abs(v));
+    }
+  });
+  const box = new THREE.Box3().setFromObject(node);
+  const size = box.getSize(new THREE.Vector3());
+  let item: THREE.Object3D | null = node;
+  while (item && item.userData.objectId == null) item = item.parent;
+  return {
+    size: [size.x, size.z, size.y],
+    volume: Math.abs(volume),
+    triangles,
+    printable: item?.userData.printable !== false,
+    openEdges: open,
+    // shortcut: the volume-weighted centre of each mesh's bounding box, not the true centre of mass
+    centroid: volume ? weighted.divideScalar(Math.abs(volume)) : box.getCenter(new THREE.Vector3()),
+    sinking: box.min.y < -0.001, // OrcaSlicer's SINKING_Z_THRESHOLD
+    paint: { supports: !!item?.userData.paint?.supports, color: !!item?.userData.paint?.color },
+    variableLayers: !!item?.userData.variableLayers,
+  };
+}
+
+/** Each object's info (its first instance shown), sinking when any of its instances is. */
 export function objectStats(view: ViewerScene): Map<string, ObjectStats> {
   const out = new Map<string, ObjectStats>();
   for (const item of items(view)) {
     const id = String(item.userData.objectId);
-    if (out.has(id)) continue;
-    let volume = 0;
-    let triangles = 0;
-    let open = 0;
-    const weighted = new THREE.Vector3();
-    item.updateMatrixWorld(true);
-    item.traverse((o) => {
-      if (o instanceof THREE.Mesh) {
-        const v = meshVolume(o.geometry);
-        volume += v;
-        triangles += (o.geometry.getIndex()?.count ?? o.geometry.getAttribute('position').count) / 3;
-        open += openEdges(o.geometry);
-        o.geometry.computeBoundingBox();
-        weighted.addScaledVector(o.geometry.boundingBox!.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld), Math.abs(v));
-      }
-    });
-    const box = new THREE.Box3().setFromObject(item);
-    const size = box.getSize(new THREE.Vector3());
-    out.set(id, {
-      size: [size.x, size.z, size.y],
-      volume: Math.abs(volume),
-      triangles,
-      printable: item.userData.printable !== false,
-      openEdges: open,
-      // shortcut: the volume-weighted centre of each mesh's bounding box, not the true centre of mass
-      centroid: volume ? weighted.divideScalar(Math.abs(volume)) : box.getCenter(new THREE.Vector3()),
-    });
+    const s = out.get(id);
+    if (!s) out.set(id, statsOf(item));
+    else if (!s.sinking && new THREE.Box3().setFromObject(item).min.y < -0.001) s.sinking = true;
   }
   return out;
+}
+
+/** The info of one instance or part (the info box with a part selected); undefined when not shown. */
+export function targetStats(view: ViewerScene, target: Target): ObjectStats | undefined {
+  const node = nodesOf(view, target)[0];
+  return node && statsOf(node);
 }
 
 /** Edges of an indexed mesh not shared by exactly two triangles (0: a closed, manifold mesh). */
@@ -106,8 +168,13 @@ export function openEdges(geometry: THREE.BufferGeometry): number {
   return open;
 }
 
-/** The object and the point under the pointer (client coordinates), or null on the empty plate. */
-export function pick(view: ViewerScene, clientX: number, clientY: number): { objectId: string; point: THREE.Vector3 } | null {
+/** The object (its instance and part) and the point under the pointer (client coordinates), or null on the
+ * empty plate. */
+export function pick(
+  view: ViewerScene,
+  clientX: number,
+  clientY: number,
+): { objectId: string; instance: number; partId: string | null; point: THREE.Vector3 } | null {
   const rect = view.renderer.domElement.getBoundingClientRect();
   if (!rect.width || !rect.height) return null;
   const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
@@ -116,8 +183,12 @@ export function pick(view: ViewerScene, clientX: number, clientY: number): { obj
   const hit = ray.intersectObjects(items(view), true)[0];
   if (!hit) return null;
   let o: THREE.Object3D | null = hit.object;
-  while (o && o.userData.objectId == null) o = o.parent;
-  return o ? { objectId: String(o.userData.objectId), point: hit.point.clone() } : null;
+  let partId: string | null = null;
+  while (o && o.userData.objectId == null) {
+    partId ??= o.userData.partId ?? null;
+    o = o.parent;
+  }
+  return o ? { objectId: String(o.userData.objectId), instance: Number(o.userData.instance ?? 0), partId, point: hit.point.clone() } : null;
 }
 
 function itemOf(view: ViewerScene, objectId: string | null): THREE.Object3D | undefined {
@@ -157,10 +228,27 @@ export function fitTo(view: ViewerScene, objectId: string | null) {
   look(view, boxOf(view, objectId), direction.lengthSq() ? direction : new THREE.Vector3(...DIRECTIONS.iso));
 }
 
-/** One of the slicer's view presets, on the whole bed. */
-export function setView(view: ViewerScene, preset: ViewPreset) {
+/** One of the slicer's view presets (or a direction to look from), on the whole bed (every plate shown). */
+export function setView(view: ViewerScene, preset: ViewPreset | THREE.Vector3) {
   const bed = new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(view.bed.x, Math.min(view.bed.z, 40), view.bed.y));
-  look(view, bed.union(boxOf(view, null)), new THREE.Vector3(...DIRECTIONS[preset]));
+  const plates = view.scene.getObjectByName(PLATES);
+  if (plates) bed.union(new THREE.Box3().setFromObject(plates));
+  look(view, bed.union(boxOf(view, null)), preset instanceof THREE.Vector3 ? preset.clone() : new THREE.Vector3(...DIRECTIONS[preset]));
+}
+
+/** The view preset's direction (the navigator's faces, edges and corners add them up). */
+export function presetDirection(preset: ViewPreset): THREE.Vector3 {
+  return new THREE.Vector3(...DIRECTIONS[preset]).normalize();
+}
+
+/** Turn the camera round its target (the navigator's drag): ``azimuth`` about the vertical, ``polar`` up/down. */
+export function orbit(view: ViewerScene, azimuth: number, polar: number) {
+  const offset = view.camera.position.clone().sub(view.controls.target);
+  const s = new THREE.Spherical().setFromVector3(offset);
+  s.theta -= azimuth;
+  s.phi = THREE.MathUtils.clamp(s.phi - polar, 0.001, Math.PI - 0.001);
+  view.camera.position.copy(view.controls.target).add(new THREE.Vector3().setFromSpherical(s));
+  view.controls.update();
 }
 
 /** Remove a helper group added by name, freeing its geometry. */
@@ -175,14 +263,14 @@ function clear(view: ViewerScene, name: string) {
 
 const HIGHLIGHT = 'workspace-selection';
 
-/** The selected objects: a white box round each (the slicer's selection corners) and, with ``outline``, their
- * orange outline (the canvas menu's "Outline"). */
-export function highlight(view: ViewerScene, objectIds: string[], outline = true) {
+/** The selection (objects, instances or parts): a white box round each (the slicer's selection corners) and,
+ * with ``outline``, their orange outline (the canvas menu's "Outline"). */
+export function highlight(view: ViewerScene, targets: Target[], outline = true) {
   clear(view, HIGHLIGHT);
   const group = new THREE.Group();
   group.name = HIGHLIGHT;
   view.model.updateMatrixWorld(true);
-  for (const item of items(view).filter((c) => objectIds.includes(String(c.userData.objectId)))) {
+  for (const item of targets.flatMap((t) => nodesOf(view, t))) {
     group.add(new THREE.BoxHelper(item, 0xffffff));
     if (!outline) continue;
     item.traverse((o) => {
@@ -324,18 +412,19 @@ export function setPerspective(view: ViewerScene, on: boolean) {
   view.controls.update();
 }
 
-/** The section view: the model cut by a plane facing ``normal`` at ``ratio`` (0 to 1) of its extent; null: none. */
+/** The section view, as GLCanvas3D::_get_section_view_plane: a plane facing ``normal`` (towards the camera when
+ * it was set) sweeping the models' bounding sphere from the camera side (ratio 0: nothing cut) to the far side
+ * (1: all cut); what lies on the camera side of it is cut away. null or ratio 0: no section. */
 export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; ratio: number } | null) {
-  view.renderer.localClippingEnabled = !!section;
+  const on = !!section && section.ratio > 0;
+  view.renderer.localClippingEnabled = on;
   let plane: THREE.Plane | null = null;
-  if (section) {
+  const box = new THREE.Box3().setFromObject(view.model);
+  if (section && on && !box.isEmpty()) {
     const n = section.normal.clone().normalize();
-    const box = new THREE.Box3().setFromObject(view.model);
-    const corners = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
-      new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).dot(n),
-    );
-    const [lo, hi] = [Math.min(...corners), Math.max(...corners)];
-    plane = new THREE.Plane(n.clone().negate(), lo + (hi - lo) * section.ratio); // keeps the side behind the plane
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const r = sphere.radius;
+    plane = new THREE.Plane(n.clone().negate(), n.dot(sphere.center) + r - 2 * r * section.ratio); // keeps n·p <= that
   }
   for (const item of items(view)) {
     item.traverse((o) => {
@@ -360,6 +449,80 @@ export function onBed(view: ViewerScene, clientX: number, clientY: number): bool
 /** The direction the camera looks from (the section's "Set viewing angle"). */
 export function viewDirection(view: ViewerScene): THREE.Vector3 {
   return view.camera.position.clone().sub(view.controls.target).normalize();
+}
+
+const PLATES = 'workspace-plates';
+
+/** OrcaSlicer's place of plate ``i`` (from 0) among ``count`` (PartPlateList::compute_shape_position): columns
+ * of round(sqrt(count)) (one more when sqrt is above it), each plate 1.2 beds from the last, rows going to the
+ * front; in the scene's x / z (the bed's front edge at z = bed depth). */
+export function plateOrigin(i: number, count: number, bed: { x: number; y: number }): { x: number; z: number } {
+  const root = Math.sqrt(count);
+  const cols = root > Math.round(root) ? Math.round(root) + 1 : Math.round(root);
+  return { x: (i % cols) * bed.x * 1.2, z: Math.floor(i / cols) * bed.y * 1.2 };
+}
+
+/** The other plates' beds beside the first, as OrcaSlicer shows every plate when focus mode is off (none: 0 or 1). */
+export function drawPlates(view: ViewerScene, count: number) {
+  clear(view, PLATES);
+  if (count < 2) return;
+  const group = new THREE.Group();
+  group.name = PLATES;
+  const { x: w, y: d } = view.bed;
+  const fill = new THREE.MeshBasicMaterial({ color: 0x00ae42, transparent: true, opacity: 0.08, side: THREE.DoubleSide });
+  const edge = new THREE.LineBasicMaterial({ color: 0x5a5a60 });
+  for (let i = 1; i < count; i++) {
+    const o = plateOrigin(i, count, view.bed);
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(w, d), fill);
+    plate.rotation.x = -Math.PI / 2;
+    plate.position.set(o.x + w / 2, -0.5, o.z + d / 2);
+    const grid = new THREE.GridHelper(Math.max(w, d), Math.round(Math.max(w, d) / 10), 0x3e3e45, 0x34343a);
+    grid.scale.set(w / Math.max(w, d), 1, d / Math.max(w, d));
+    grid.position.set(o.x + w / 2, -0.45, o.z + d / 2);
+    const corners = [0, 0, w, 0, w, d, 0, d, 0, 0].map((v, k) => v + (k % 2 ? o.z : o.x));
+    const outlinePoints = [0, 1, 2, 3, 4].map((k) => new THREE.Vector3(corners[2 * k], -0.4, corners[2 * k + 1]));
+    group.add(plate, grid, new THREE.Line(new THREE.BufferGeometry().setFromPoints(outlinePoints), edge));
+  }
+  view.scene.add(group);
+}
+
+/** A printer's collision volumes (``bed_exclude_volumes``: "XxY, XxY, ..." full height, "ZMIN..ZMAX;XxY, ..."
+ * limited, several split by "|"), in the slicer's mm; unreadable ones left out. */
+export function parseVolumes(text: string, height: number): { points: [number, number][]; zmin: number; zmax: number }[] {
+  return text
+    .split('|')
+    .map((v) => {
+      const [range, polygon] = v.includes(';') ? v.split(';', 2) : [null, v];
+      const [zmin, zmax] = range ? range.split('..').map(Number) : [0, height];
+      const points = polygon
+        .split(',')
+        .map((p) => p.trim().split('x').map(Number))
+        .filter((p): p is [number, number] => p.length === 2 && p.every(Number.isFinite));
+      return { points, zmin, zmax };
+    })
+    .filter((v) => v.points.length >= 3 && Number.isFinite(v.zmin) && Number.isFinite(v.zmax) && v.zmax > v.zmin);
+}
+
+const COLLISION = 'workspace-collision';
+
+/** "Show all collision volumes" (Ctrl+Shift+K): the printer's collision volumes at their full height. */
+export function drawCollisionVolumes(view: ViewerScene, volumes: { points: [number, number][]; zmin: number; zmax: number }[]) {
+  clear(view, COLLISION);
+  if (!volumes.length) return;
+  const group = new THREE.Group();
+  group.name = COLLISION;
+  const material = new THREE.MeshBasicMaterial({ color: 0xe53935, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide });
+  for (const v of volumes) {
+    // the slicer's (x, y) is the scene's (x, bed depth - y); the shape is drawn in x / -z and stood up
+    const shape = new THREE.Shape(v.points.map(([x, y]) => new THREE.Vector2(x, y - view.bed.y)));
+    const solid = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: v.zmax - v.zmin, bevelEnabled: false }), material);
+    const prism = new THREE.Group();
+    prism.add(solid, new THREE.LineSegments(new THREE.EdgesGeometry(solid.geometry), new THREE.LineBasicMaterial({ color: 0xe53935 })));
+    prism.rotation.x = -Math.PI / 2;
+    prism.position.y = v.zmin;
+    group.add(prism);
+  }
+  view.scene.add(group);
 }
 
 const MEASURE = 'workspace-measure';

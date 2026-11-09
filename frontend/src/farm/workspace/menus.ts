@@ -105,6 +105,11 @@ export function multiMenu(tr: Tr, deleteKey: string, printable: boolean, on: { z
   ];
 }
 
+/** One instance, or several of the same object, in the list (GUI_Factories.cpp instance menu): its only item. */
+export function instanceMenu(tr: Tr, count: number): MenuItem[] {
+  return [{ label: tr(count > 1 ? 'Set as Individual Objects' : 'Set as An Individual Object') }];
+}
+
 /** The empty 3D view or list (GUI_Factories.cpp default menu). */
 export function emptyMenu(tr: Tr, labels: boolean, on: { labels: () => void }): MenuItem[] {
   return [
