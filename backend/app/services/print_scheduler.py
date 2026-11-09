@@ -15,6 +15,7 @@ from backend.app.core.config import settings
 from backend.app.core.database import async_session, run_with_retry
 from backend.app.farm import (
     job_events as farm_job_events,  # fork: the queue page's timeline
+    klipper_gcode as farm_klipper_gcode,  # fork: plain G-code for non-Bambu printers
     printer_files as farm_printer_files,  # fork: printfarm
 )
 from backend.app.models.archive import PrintArchive
@@ -2226,6 +2227,41 @@ class PrintScheduler:
             file_path = lib_path if lib_path.is_absolute() else settings.base_dir / library_file.file_path
             filename = library_file.filename
 
+        else:
+            # Neither archive nor library file specified
+            queue_failure.mark_failed(item, "No source file specified", "dispatch")
+            await db.commit()
+            logger.error("Queue item %s: No archive_id or library_file_id specified", item.id)
+            await self._power_off_if_needed(db, item)
+            return
+
+        # Check file exists on disk
+        if not file_path.exists():
+            on_nas = library_file is not None and library_file.is_external
+            queue_failure.mark_failed(
+                item,
+                "Source file not found on the NAS" if on_nas else "Source file not found on disk",
+                "dispatch",
+                technical=[str(file_path), *(nas_log if on_nas else [])],
+            )
+            await db.commit()
+            logger.error("Queue item %s: File not found: %s", item.id, file_path)
+            await self._power_off_if_needed(db, item)
+            return
+
+        provider = normalize_provider(getattr(printer, "provider", None))
+        # fork: a G-code printer can't start a .gcode.3mf: it gets the plate's G-code (Bambu the 3MF).
+        # Checked before a library item's archive is created, so a file without G-code leaves none behind.
+        try:
+            plan = farm_klipper_gcode.plain_gcode_name(file_path, filename, provider, item.plate_id)
+        except farm_klipper_gcode.NoPlateGcode as exc:
+            queue_failure.mark_failed(item, str(exc), "dispatch")
+            await db.commit()
+            logger.error("Queue item %s: %s", item.id, exc)
+            await self._power_off_if_needed(db, item)
+            return
+
+        if library_file is not None:
             # Create archive from library file so usage tracking has access to the 3MF
             try:
                 from backend.app.services.archive import ArchiveService
@@ -2249,28 +2285,6 @@ class PrintScheduler:
                     )
             except Exception as e:
                 logger.warning("Queue item %s: Failed to create archive from library file: %s", item.id, e)
-
-        else:
-            # Neither archive nor library file specified
-            queue_failure.mark_failed(item, "No source file specified", "dispatch")
-            await db.commit()
-            logger.error("Queue item %s: No archive_id or library_file_id specified", item.id)
-            await self._power_off_if_needed(db, item)
-            return
-
-        # Check file exists on disk
-        if not file_path.exists():
-            on_nas = library_file is not None and library_file.is_external
-            queue_failure.mark_failed(
-                item,
-                "Source file not found on the NAS" if on_nas else "Source file not found on disk",
-                "dispatch",
-                technical=[str(file_path), *(nas_log if on_nas else [])],
-            )
-            await db.commit()
-            logger.error("Queue item %s: File not found: %s", item.id, file_path)
-            await self._power_off_if_needed(db, item)
-            return
 
         # G-code injection for auto-print systems (#422)
         injected_path = None
@@ -2298,10 +2312,9 @@ class PrintScheduler:
             except Exception as e:
                 logger.warning("Queue item %s: G-code injection failed, using original: %s", item.id, e)
 
-        provider = normalize_provider(getattr(printer, "provider", None))
         # Use a provider-correct printer-side name. Bambu keeps the historical
         # 3MF rewrite, while Moonraker/K-series must keep .gcode/.3mf intact.
-        remote_filename = self._remote_filename_for_provider(filename, provider)
+        remote_filename = self._remote_filename_for_provider(plan[0] if plan else filename, provider)
         remote_filename = await farm_printer_files.fingerprint(remote_filename, file_path)  # fork: reuse on printer
         # Upload to root directory (not /cache/) - the start_print command references
         # files by name only (ftp://{filename}), so they must be in the root
@@ -2352,21 +2365,22 @@ class PrintScheduler:
         )
         try:
             with queue_failure.capture_logged_errors() as upload_log:  # the FTP/HTTP errors, for the history
-                uploaded = await self._upload_file_for_provider(
-                    printer_id=item.printer_id,
-                    provider=provider,
-                    printer_name=printer.name,
-                    printer_ip=printer.ip_address,
-                    printer_access_code=printer.access_code,
-                    file_path=file_path,
-                    remote_path=remote_path,
-                    printer_model=printer.model,
-                    ftp_retry_enabled=ftp_retry_enabled,
-                    ftp_retry_count=ftp_retry_count,
-                    ftp_retry_delay=ftp_retry_delay,
-                    ftp_timeout=ftp_timeout,
-                    operation_name=f"Upload print to {printer.name}",
-                )
+                async with farm_klipper_gcode.plain_gcode(file_path, plan, provider) as upload_path:
+                    uploaded = await self._upload_file_for_provider(
+                        printer_id=item.printer_id,
+                        provider=provider,
+                        printer_name=printer.name,
+                        printer_ip=printer.ip_address,
+                        printer_access_code=printer.access_code,
+                        file_path=upload_path,
+                        remote_path=remote_path,
+                        printer_model=printer.model,
+                        ftp_retry_enabled=ftp_retry_enabled,
+                        ftp_retry_count=ftp_retry_count,
+                        ftp_retry_delay=ftp_retry_delay,
+                        ftp_timeout=ftp_timeout,
+                        operation_name=f"Upload print to {printer.name}",
+                    )
         except Exception as e:
             uploaded = False
             upload_error = e

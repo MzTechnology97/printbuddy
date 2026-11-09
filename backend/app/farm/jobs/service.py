@@ -312,7 +312,7 @@ async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, p
     """
     from backend.app.api.routes import library as lib
     from backend.app.api.routes.print_queue import _extract_print_time_from_3mf
-    from backend.app.farm.klipper_gcode import for_klipper
+    from backend.app.farm.klipper_gcode import for_klipper, read_plate
     from backend.app.utils.threemf_tools import extract_filament_usage_from_3mf
 
     name = klipper_gcode_name(sliced.filename, plate)
@@ -330,9 +330,7 @@ async def gcode_for_klipper(db: AsyncSession, sliced: LibraryFile, path: Path, p
     if sliced.file_hash and await asyncio.to_thread(_sha256_of, path) != sliced.file_hash:
         raise SliceNotLocal(f"{sliced.filename}: the local copy is not the current slice")
     try:
-        with zipfile.ZipFile(path) as zf:
-            data = zf.read(f"Metadata/plate_{plate}.gcode")
-            png = zf.read(f"Metadata/plate_{plate}.png") if f"Metadata/plate_{plate}.png" in zf.namelist() else None
+        data, png = read_plate(path, plate)
     except (KeyError, OSError, zipfile.BadZipFile):
         return None
     data = await asyncio.to_thread(for_klipper, data, png)
