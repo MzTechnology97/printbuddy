@@ -3,11 +3,13 @@
 No printer is contacted: the printer manager, its clients, uploads and notifications are stubbed. Data is made up.
 """
 
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.models.library import LibraryFile
@@ -43,6 +45,7 @@ class Rig:
         self.status: dict[int, SimpleNamespace] = {}
         self.clients: dict[int, FakeClient] = {}
         self.not_idle: set[int] = set()
+        self.offline: set[int] = set()
         self.material = "ABS"
         self.tried: list[int] = []
 
@@ -70,7 +73,7 @@ async def tick(test_engine, scheduler, rig: Rig):
         return name
 
     pm = MagicMock()
-    pm.is_connected.return_value = True
+    pm.is_connected.side_effect = lambda pid: pid not in rig.offline
     pm.get_status.side_effect = lambda pid: rig.status.get(pid)
     pm.get_client.side_effect = lambda pid: rig.clients.get(pid)
     pm.start_print.return_value = True
@@ -494,6 +497,96 @@ async def test_settings_default_off_and_round_trip(async_client):
     got = (await async_client.get("/api/v1/settings/")).json()
     assert (got["preheat_enabled"], got["preheat_targets"], got["preheat_max_wait_minutes"]) == (True, "ABS=50", 20)
     assert (await async_client.put("/api/v1/settings/", json={"preheat_max_wait_minutes": 0})).status_code == 422
+
+
+# ---------------------------------------------------------------- kept across a restart
+
+
+async def stored(db_session) -> dict:
+    raw = await db_session.scalar(select(Settings.value).where(Settings.key == qp.STORE_KEY))
+    return json.loads(raw) if raw else {}
+
+
+@pytest.mark.asyncio
+async def test_a_preheat_is_stored_and_its_normal_end_removes_it(db_session, test_engine, x1c):
+    await enable(db_session)
+    scheduler = PrintScheduler()
+    await tick(test_engine, scheduler, x1c.rig)
+    entry = (await stored(db_session))[str(x1c.printer.id)]
+    assert (entry["item_id"], entry["target"], entry["bed"], entry["chamber_on"]) == (x1c.item.id, 45, 90, False)
+    assert entry["started_at"] > 0
+
+    x1c.rig.status[x1c.printer.id].temperatures["chamber"] = 45
+    await tick(test_engine, scheduler, x1c.rig)
+    assert (await refreshed(db_session, x1c.item)).status == "printing"
+    assert await stored(db_session) == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_feature_off_remove_the_stored_preheat(db_session, test_engine, x1c, tmp_path):
+    await enable(db_session)
+    scheduler = PrintScheduler()
+    await tick(test_engine, scheduler, x1c.rig)
+    x1c.item.status = "cancelled"
+    await db_session.commit()
+    await tick(test_engine, scheduler, x1c.rig)
+    assert await stored(db_session) == {}
+
+    # Turned off while preheating: the wait ends, the print starts, nothing stays stored.
+    item = await queue_item(db_session, tmp_path, x1c.printer, position=2)
+    await tick(test_engine, scheduler, x1c.rig)
+    assert str(x1c.printer.id) in await stored(db_session)
+    (await db_session.scalar(select(Settings).where(Settings.key == "preheat_enabled"))).value = "false"
+    await db_session.commit()
+    await tick(test_engine, scheduler, x1c.rig)
+    assert (await refreshed(db_session, item)).status == "printing"
+    assert await stored(db_session) == {} and not scheduler.preheat.active
+
+
+async def left_by_a_restart(db_session, printer):
+    """What the process before a restart stored for an H2D preheat (chamber heater on, flap was cooling)."""
+    entry = qp.Preheat(77, 45, 0.0, True, True, "cooling")
+    db_session.add(Settings(key=qp.STORE_KEY, value=json.dumps({str(printer.id): qp.asdict(entry)})))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_an_idle_printer_gets_the_heaters_off(db_session, test_engine, printer_factory):
+    h2d = await printer_factory(name="H2D", model="H2D")
+    await left_by_a_restart(db_session, h2d)
+    rig = Rig()
+    rig.add(h2d)
+    rig.offline.add(h2d.id)
+    scheduler = PrintScheduler()  # a new process
+
+    await tick(test_engine, scheduler, rig)  # not connected yet: kept, nothing sent
+    await tick(test_engine, scheduler, rig)
+    assert rig.sent(h2d) == []
+    assert str(h2d.id) in await stored(db_session)
+
+    rig.offline.clear()
+    rig.status[h2d.id].state = "unknown"  # connected, no state reported yet: still waits
+    await tick(test_engine, scheduler, rig)
+    assert rig.sent(h2d) == []
+
+    rig.status[h2d.id].state = "FINISH"
+    await tick(test_engine, scheduler, rig)
+    assert rig.sent(h2d) == ["M140 S0", "M141 S0", "airduct cooling"]  # as a cancel
+    assert await stored(db_session) == {}
+    await tick(test_engine, scheduler, rig)
+    assert len(rig.sent(h2d)) == 3  # once
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_a_printing_printer_gets_nothing(db_session, test_engine, printer_factory):
+    h2d = await printer_factory(name="H2D", model="H2D")
+    await left_by_a_restart(db_session, h2d)
+    rig = Rig()
+    rig.add(h2d)
+    rig.status[h2d.id].state = "RUNNING"
+    await tick(test_engine, PrintScheduler(), rig)
+    assert rig.sent(h2d) == []
+    assert await stored(db_session) == {}
 
 
 from backend.tests.integration.test_farm_jobs import farm  # noqa: E402, F401  the farm fixture

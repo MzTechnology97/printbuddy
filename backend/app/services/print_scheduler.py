@@ -181,6 +181,8 @@ class PrintScheduler:
     async def check_queue(self):
         """Check for prints ready to start."""
         async with async_session() as db:
+            await self.preheat.restore_after_restart(db)  # heaters a restart left on (upstream #1468)
+
             # Check if shortest-job-first scheduling is enabled
             sjf_enabled = await self._get_bool_setting(db, "queue_shortest_first")
 

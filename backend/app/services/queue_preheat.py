@@ -12,14 +12,22 @@ starts only where the scheduler would start the print now: printer connected and
 other job on it. While it heats, the printer takes no other job (``blocks``, ``printers``) and the item shows why
 it waits. If the item stops reaching the start (cancelled, deleted, printer offline or busy, plate check reset,
 scheduled later) the wait ends and the heaters it turned on go off, unless the printer is printing.
+
+The preheats are kept in the settings table (``preheat_active``) too: after a restart, each printer that had one
+gets the same heaters-off as a cancel once it is connected and reports its state, or nothing if it is printing.
 """
 
+import json
 import logging
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 
+from sqlalchemy import select
+
+from backend.app.core.db_dialect import upsert_setting
+from backend.app.models.settings import Settings
 from backend.app.services.printer_manager import CHAMBER_TEMP_SUPPORTED_MODELS, printer_manager
 from backend.app.services.printer_providers.factory import normalize_provider
 
@@ -31,6 +39,7 @@ DEFAULT_MAX_WAIT_MINUTES = 15
 BED_C = 90  # the bed is the heat source of the passive chambers; the print's own G-code sets its bed after
 TOLERANCE_C = 2
 _ACTIVE_PRINT_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})  # as print_scheduler's
+STORE_KEY = "preheat_active"  # settings row: {printer_id: Preheat}, what a restart must turn off
 
 # Active chamber heater (M141), as upstream's list after its #3335 fix (X1E included). X1C and P2S only read the
 # chamber: the bed warms it.
@@ -71,6 +80,8 @@ class Preheat:
     has_sensor: bool
     chamber_on: bool  # M141 sent: turned off again if the print does not start
     airduct_before: str | None  # the flap mode it had, when switched to heating
+    bed: int = BED_C  # bed target sent (M140); turned off to 0, as the chamber
+    started_at: float = field(default_factory=time.time)  # wall clock, for the log after a restart
 
 
 class QueuePreheat:
@@ -78,6 +89,8 @@ class QueuePreheat:
         self.active: dict[int, Preheat] = {}  # printer_id -> its preheat
         self._seen: set[tuple[int, int]] = set()  # (item, printer) that reached the start this tick
         self._airduct_back: dict[int, str] = {}  # printer -> flap mode to put back for its next unheated job
+        self._leftover: dict[int, Preheat] | None = None  # preheats of the process before a restart; None: unread
+        self._stored: str | None = None  # what the settings row holds now
 
     def blocks(self, printer_id: int, item_id: int) -> bool:
         """The printer is preheating for another item: this one waits."""
@@ -102,7 +115,9 @@ class QueuePreheat:
         if entry.item_id != item.id:
             return False
         chamber = self._chamber(pid)
-        if entry.has_sensor and chamber is not None and chamber >= entry.target - TOLERANCE_C:
+        if not await scheduler._get_bool_setting(db, "preheat_enabled", default=False):
+            logger.info("Queue item %s: preheat turned off in the settings, starting", item.id)
+        elif entry.has_sensor and chamber is not None and chamber >= entry.target - TOLERANCE_C:
             logger.info("Queue item %s: chamber at %.0f/%d °C, starting", item.id, chamber, entry.target)
         elif time.monotonic() >= entry.deadline:
             logger.info(
@@ -142,6 +157,46 @@ class QueuePreheat:
         self._seen.clear()
         if dirty:
             await db.commit()
+        await self._store(db)
+
+    async def restore_after_restart(self, db) -> None:
+        """Start of a tick: preheats left by the process before a restart end, each once its printer reports.
+
+        Connected with a known state: idle gets the heaters-off of a cancel, printing gets nothing (its print owns
+        the heaters). Not connected yet: kept, looked at again next tick, nothing sent.
+        """
+        if self._leftover is None:
+            self._stored = await db.scalar(select(Settings.value).where(Settings.key == STORE_KEY))
+            try:
+                self._leftover = {int(p): Preheat(**e) for p, e in json.loads(self._stored or "{}").items()}
+            except (TypeError, ValueError) as e:
+                logger.warning("Unreadable %s setting, ignored: %s", STORE_KEY, e)
+                self._leftover = {}
+        for pid, entry in list(self._leftover.items()):
+            state = getattr(printer_manager.get_status(pid), "state", None)
+            if not printer_manager.is_connected(pid) or state in (None, "", "unknown"):
+                continue
+            del self._leftover[pid]
+            printing = state in _ACTIVE_PRINT_STATES
+            logger.info(
+                "Printer %s: preheat for queue item %s left by a restart (started %s), %s",
+                pid,
+                entry.item_id,
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.started_at)),
+                "printing: nothing sent" if printing else "idle: heaters off",
+            )
+            self._heaters_off(pid, entry)
+        await self._store(db)
+
+    async def _store(self, db) -> None:
+        """The settings row follows the preheats (and the leftovers not ended yet); written only when it changes."""
+        data = {**(self._leftover or {}), **self.active}
+        raw = json.dumps({str(p): asdict(e) for p, e in sorted(data.items())})
+        if raw == (self._stored or "{}"):
+            return
+        await upsert_setting(db, Settings, STORE_KEY, raw)
+        await db.commit()
+        self._stored = raw
 
     # ---------------------------------------------------------------- internals
 
@@ -174,6 +229,7 @@ class QueuePreheat:
         entry = Preheat(item.id, target, time.monotonic() + minutes * 60, has_sensor, chamber_on, airduct_before)
         self.active[pid] = entry
         self._airduct_back.pop(pid, None)
+        await self._store(db)  # now: a restart from here on must find it
         logger.info(
             "Queue item %s: preheating %s for a %d °C chamber (bed %d °C, heater=%s, sensor=%s, up to %d min)",
             item.id,
