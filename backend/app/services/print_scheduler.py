@@ -38,6 +38,7 @@ from backend.app.services.filament_deficit import compute_deficit_for_queue_item
 from backend.app.services.notification_service import notification_service
 from backend.app.services.printer_manager import printer_manager, supports_drying
 from backend.app.services.printer_providers.factory import normalize_provider
+from backend.app.services.queue_preheat import QueuePreheat
 from backend.app.services.smart_plug_manager import smart_plug_manager
 from backend.app.utils.printer_models import normalize_printer_model
 
@@ -134,6 +135,8 @@ class PrintScheduler:
         # printer; an "any <model>" job goes back to the pool instead). The backoff ends with that item.
         self._item_refusals: dict[int, int] = {}
         self._backoff_item: dict[int, int] = {}
+        # Chamber preheat before warm-chamber prints (upstream #1468), across ticks: see queue_preheat.
+        self.preheat = QueuePreheat()
 
     async def run(self):
         """Main loop - check queue every interval."""
@@ -178,6 +181,8 @@ class PrintScheduler:
     async def check_queue(self):
         """Check for prints ready to start."""
         async with async_session() as db:
+            await self.preheat.restore_after_restart(db)  # heaters a restart left on (upstream #1468)
+
             # Check if shortest-job-first scheduling is enabled
             sjf_enabled = await self._get_bool_setting(db, "queue_shortest_first")
 
@@ -213,6 +218,7 @@ class PrintScheduler:
             require_plate_clear = True
 
             if not items:
+                await self.preheat.sweep(db, [])  # a preheating item cancelled or deleted: heaters off
                 # No pending items — still check auto-drying on idle printers
                 await self._check_auto_drying(db, [], set(), require_plate_clear=require_plate_clear)
                 return
@@ -272,7 +278,7 @@ class PrintScheduler:
 
                 if item.printer_id:
                     # Specific printer assignment (existing behavior)
-                    if item.printer_id in busy_printers:
+                    if item.printer_id in busy_printers or self.preheat.blocks(item.printer_id, item.id):
                         continue
 
                     # Check if printer is idle
@@ -374,8 +380,15 @@ class PrintScheduler:
                     if await self._block_on_filament_deficit(db, item):
                         continue
 
+                    # Chamber preheat (upstream #1468): plate clear and printer idle by now; while it heats the
+                    # printer stays busy and the item waits with the reason shown.
+                    if not await self.preheat.ready(self, db, item):
+                        busy_printers.add(item.printer_id)
+                        continue
+
                     # Start the print
                     await self._start_print(db, item)
+                    self.preheat.finished(item.printer_id, sent=item.status == "printing")
                     busy_printers.add(item.printer_id)
 
                     # SJF starvation guard: mark items that were jumped
@@ -421,15 +434,24 @@ class PrintScheduler:
                             # Merge: keep original types for non-overridden slots, add override types
                             effective_types = sorted(set(required_types or []) | set(override_types))
 
-                    printer_id, waiting_reason = await self._find_idle_printer_for_model(
-                        db,
-                        item.target_model,
-                        busy_printers,
-                        effective_types,
-                        item.target_location,
-                        filament_overrides=filament_overrides,
-                        require_plate_clear=require_plate_clear,
-                    )
+                    # A job preheating a printer stays on it while it is still free (upstream #1468)
+                    preheating_on = self.preheat.printer_of(item.id)
+                    if (
+                        preheating_on is not None
+                        and preheating_on not in busy_printers
+                        and self._is_printer_idle(preheating_on, require_plate_clear)
+                    ):
+                        printer_id, waiting_reason = preheating_on, item.waiting_reason
+                    else:
+                        printer_id, waiting_reason = await self._find_idle_printer_for_model(
+                            db,
+                            item.target_model,
+                            busy_printers | self.preheat.printers(except_item=item.id),
+                            effective_types,
+                            item.target_location,
+                            filament_overrides=filament_overrides,
+                            require_plate_clear=require_plate_clear,
+                        )
 
                     # The last refused upload stays the reason shown until the item is sent (or fails).
                     refused_reason = (
@@ -489,7 +511,8 @@ class PrintScheduler:
                         logger.info("Model-based assignment: queue item %s assigned to printer %s", item.id, printer_id)
 
                         # Send assignment notification, once: not again for each try after a refused upload
-                        if item.id not in self._item_refusals:
+                        # or each tick of a preheat
+                        if item.id not in self._item_refusals and preheating_on != printer_id:
                             job_name = await self._get_job_name(db, item)
                             printer = await self._get_printer(db, printer_id)
                             await notification_service.on_queue_job_assigned(
@@ -516,10 +539,13 @@ class PrintScheduler:
                         if await self._block_on_filament_deficit(db, item):
                             continue
 
-                        await self._start_print(db, item)
+                        if await self.preheat.ready(self, db, item):
+                            await self._start_print(db, item)
+                            self.preheat.finished(printer_id, sent=item.status == "printing")
                         busy_printers.add(printer_id)
                         if item.status == "pending":
-                            # Not sent: the printer turned busy or refused the file. Back to the pool, so another
+                            # Not sent (or preheating): the printer turned busy or refused the file. Back to the
+                            # pool (a preheating job keeps its printer, ``preheat.printer_of``), so another
                             # printer of the model can take it; a mapping worked out for this printer goes too.
                             item.printer_id = None
                             if mapping_computed_here:
@@ -544,6 +570,8 @@ class PrintScheduler:
                                 ):
                                     other.been_jumped = True
                             await db.commit()
+
+            await self.preheat.sweep(db, items)
 
             # Log summary of skip reasons (helps diagnose why queue items aren't starting)
             if skip_reasons:

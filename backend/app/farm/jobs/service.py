@@ -944,6 +944,7 @@ async def dispatch_once(db: AsyncSession) -> int:
         ).scalars()
     )
     busy |= scheduler.printers_refusing_uploads()  # it refused its last file: a job placed there would only wait
+    busy |= scheduler.preheat.printers()  # heating for an "any model" job (upstream #1468)
     created = 0
     for job in jobs:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == job.component_code))

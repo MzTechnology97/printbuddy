@@ -1185,6 +1185,10 @@ export interface AppSettings {
   print_farm_monitor_refresh_interval: number;
   // Shortest job first scheduling
   queue_shortest_first: boolean;
+  // Chamber preheat before queued prints (upstream #1468)
+  preheat_enabled: boolean;
+  preheat_targets: string;  // 'ABS=45, ASA=45'
+  preheat_max_wait_minutes: number;
   // Default sidebar order (admin-set for all users)
   default_sidebar_order: string;
   // LDAP authentication

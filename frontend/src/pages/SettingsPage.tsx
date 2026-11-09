@@ -92,6 +92,7 @@ registerSettingsSearch({ labelKey: 'settings.messageTemplates', tab: 'notificati
 registerSettingsSearch({ labelKey: 'settings.defaultPrintOptions', labelFallback: 'Default Print Options', tab: 'queue', keywords: 'print bed leveling flow calibration vibration first layer timelapse', anchor: 'card-print-options' });
 registerSettingsSearch({ labelKey: 'settings.staggeredStart', labelFallback: 'Staggered Start', tab: 'queue', keywords: 'staggered batch delay start queue group', anchor: 'card-staggered' });
 registerSettingsSearch({ labelKey: 'settings.plateClear', labelFallback: 'Plate-Clear Confirmation', tab: 'queue', keywords: 'plate clear confirm auto queue', anchor: 'card-plate' });
+registerSettingsSearch({ labelKey: 'settings.chamberPreheat', labelFallback: 'Chamber preheat', tab: 'queue', keywords: 'preheat heat soak chamber abs asa warm enclosure temperature queue', anchor: 'card-preheat' });
 registerSettingsSearch({ labelKey: 'settings.gcodeInjection', labelFallback: 'G-code Injection', tab: 'queue', keywords: 'gcode injection start end autoprint farmloop swapmod autoclear printflow', anchor: 'card-gcode' });
 registerSettingsSearch({ labelKey: 'settings.slicerCard', labelFallback: 'Slicer', tab: 'queue', keywords: 'slicer orcaslicer bambustudio orca bambu api sidecar url docker preferred', anchor: 'card-slicer' });
 registerSettingsSearch({ labelKey: 'settings.queueDrying', tab: 'queue', keywords: 'drying presets temperature time humidity ams', anchor: 'card-drying' });
@@ -1124,6 +1125,9 @@ export function SettingsPage() {
       (settings.default_timelapse ?? false) !== (localSettings.default_timelapse ?? false) ||
       (settings.stagger_group_size ?? 2) !== (localSettings.stagger_group_size ?? 2) ||
       (settings.stagger_interval_minutes ?? 5) !== (localSettings.stagger_interval_minutes ?? 5) ||
+      (settings.preheat_enabled ?? false) !== (localSettings.preheat_enabled ?? false) ||
+      (settings.preheat_targets ?? '') !== (localSettings.preheat_targets ?? '') ||
+      (settings.preheat_max_wait_minutes ?? 15) !== (localSettings.preheat_max_wait_minutes ?? 15) ||
       (settings.print_farm_monitor_refresh_interval ?? 15) !== (localSettings.print_farm_monitor_refresh_interval ?? 15);
 
     if (!hasChanges) {
@@ -1212,6 +1216,9 @@ export function SettingsPage() {
         default_timelapse: localSettings.default_timelapse,
         stagger_group_size: localSettings.stagger_group_size,
         stagger_interval_minutes: localSettings.stagger_interval_minutes,
+        preheat_enabled: localSettings.preheat_enabled,
+        preheat_targets: localSettings.preheat_targets,
+        preheat_max_wait_minutes: localSettings.preheat_max_wait_minutes,
         // fork (printfarm): require_plate_clear is not sent: always on, and saving another setting must never
         // write the schema default back over it (it turned the plate-clear gate off in production).
         print_farm_monitor_refresh_interval: localSettings.print_farm_monitor_refresh_interval,
@@ -4516,6 +4523,68 @@ export function SettingsPage() {
                   <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
                 </label>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Chamber preheat before queued prints (upstream #1468) */}
+          <Card id="card-preheat">
+            <CardHeader>
+              <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                <Thermometer className="w-4 h-4 text-amber-400" />
+                {t('settings.chamberPreheat')}
+              </h3>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-bambu-gray">{t('settings.chamberPreheatDescription')}</p>
+              <div className="flex items-center justify-between">
+                <label htmlFor="preheat-enabled" className="block text-sm text-white">
+                  {t('settings.chamberPreheatEnabled')}
+                </label>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    id="preheat-enabled"
+                    type="checkbox"
+                    checked={localSettings.preheat_enabled ?? false}
+                    onChange={(e) => updateSetting('preheat_enabled', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                </label>
+              </div>
+              {localSettings.preheat_enabled && (
+                <div className="flex flex-col sm:flex-row gap-4">
+                  <div className="flex-1">
+                    <label htmlFor="preheat-targets" className="block text-xs text-bambu-gray mb-1">
+                      {t('settings.chamberPreheatTargets')}
+                    </label>
+                    <input
+                      id="preheat-targets"
+                      type="text"
+                      maxLength={500}
+                      value={localSettings.preheat_targets ?? ''}
+                      onChange={(e) => updateSetting('preheat_targets', e.target.value)}
+                      placeholder="ABS=45, ASA=45"
+                      className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm focus:outline-none focus:border-bambu-green"
+                    />
+                    <p className="text-xs text-bambu-gray mt-1">{t('settings.chamberPreheatTargetsHelp')}</p>
+                  </div>
+                  <div className="sm:w-48">
+                    <label htmlFor="preheat-max-wait" className="block text-xs text-bambu-gray mb-1">
+                      {t('settings.chamberPreheatMaxWait')}
+                    </label>
+                    <input
+                      id="preheat-max-wait"
+                      type="number"
+                      min={1}
+                      max={120}
+                      value={localSettings.preheat_max_wait_minutes ?? 15}
+                      onChange={(e) => updateSetting('preheat_max_wait_minutes', Math.max(1, Math.min(120, parseInt(e.target.value) || 1)))}
+                      className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm focus:outline-none focus:border-bambu-green"
+                    />
+                    <p className="text-xs text-bambu-gray mt-1">{t('settings.chamberPreheatMaxWaitHelp')}</p>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
