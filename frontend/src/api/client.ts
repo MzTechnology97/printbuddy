@@ -1134,6 +1134,7 @@ export interface AppSettings {
   mqtt_password: string;
   mqtt_topic_prefix: string;
   mqtt_use_tls: boolean;
+  mqtt_printer_events?: boolean;
   panda_breath_enabled: boolean;
   panda_breath_topic_prefix: string;
   panda_breath_printer_assignments: string;

@@ -2255,6 +2255,8 @@ export default {
     passwordOptional: 'Password (optional)',
     topicPrefix: 'Topic prefix',
     topicPrefixHint: 'Topics will be: {{prefix}}/printers/<serial>/status, etc.',
+    mqttPrinterEvents: 'Printer offline/online and low filament events',
+    mqttPrinterEventsHint: 'Publishes {{prefix}}/printers/<serial>/offline, /online, /filament/low. Offline after a minute, not when Printbuddy powered the printer off.',
     // Prometheus
     prometheusMetrics: 'Prometheus Metrics',
     prometheusEndpointDescription: 'Expose printer metrics at <code>/api/v1/metrics</code> for Prometheus/Grafana monitoring.',

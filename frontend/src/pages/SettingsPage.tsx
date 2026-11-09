@@ -1101,6 +1101,7 @@ export function SettingsPage() {
       settings.mqtt_password !== localSettings.mqtt_password ||
       settings.mqtt_topic_prefix !== localSettings.mqtt_topic_prefix ||
       settings.mqtt_use_tls !== localSettings.mqtt_use_tls ||
+      (settings.mqtt_printer_events ?? false) !== (localSettings.mqtt_printer_events ?? false) ||
       (settings.panda_breath_enabled ?? false) !== (localSettings.panda_breath_enabled ?? false) ||
       (settings.panda_breath_topic_prefix ?? 'panda_breath') !== (localSettings.panda_breath_topic_prefix ?? 'panda_breath') ||
       (settings.panda_breath_printer_assignments ?? '{}') !== (localSettings.panda_breath_printer_assignments ?? '{}') ||
@@ -1192,6 +1193,7 @@ export function SettingsPage() {
         mqtt_password: localSettings.mqtt_password,
         mqtt_topic_prefix: localSettings.mqtt_topic_prefix,
         mqtt_use_tls: localSettings.mqtt_use_tls,
+        mqtt_printer_events: localSettings.mqtt_printer_events,
         panda_breath_enabled: localSettings.panda_breath_enabled,
         panda_breath_topic_prefix: localSettings.panda_breath_topic_prefix,
         panda_breath_printer_assignments: localSettings.panda_breath_printer_assignments,
@@ -3208,6 +3210,25 @@ export function SettingsPage() {
                     <p className="text-xs text-bambu-gray mt-1">
                       {t('settings.topicPrefixHint', { prefix: localSettings.mqtt_topic_prefix || 'printbuddy' })}
                     </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-white text-sm">{t('settings.mqttPrinterEvents')}</p>
+                      <p className="text-xs text-bambu-gray">
+                        {t('settings.mqttPrinterEventsHint', { prefix: localSettings.mqtt_topic_prefix || 'printbuddy' })}
+                      </p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        aria-label={t('settings.mqttPrinterEvents')}
+                        checked={localSettings.mqtt_printer_events ?? false}
+                        onChange={(e) => updateSetting('mqtt_printer_events', e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
+                    </label>
                   </div>
 
                   {/* Connection Info */}

@@ -157,6 +157,9 @@ class AppSettings(BaseModel):
     mqtt_password: str = Field(default="", description="MQTT password for authentication (optional)")
     mqtt_topic_prefix: str = Field(default="printbuddy", description="Topic prefix for all published messages")
     mqtt_use_tls: bool = Field(default=False, description="Use TLS/SSL encryption for MQTT connection")
+    mqtt_printer_events: bool = Field(
+        default=False, description="Publish printer offline/online and low filament events on the MQTT relay"
+    )
 
     # BIQU Panda Breath Mod integration (uses the shared MQTT broker settings)
     panda_breath_enabled: bool = Field(default=False, description="Enable BIQU Panda Breath Mod MQTT control")
@@ -434,6 +437,7 @@ class AppSettingsUpdate(BaseModel):
     mqtt_password: str | None = None
     mqtt_topic_prefix: str | None = None
     mqtt_use_tls: bool | None = None
+    mqtt_printer_events: bool | None = None
     panda_breath_enabled: bool | None = None
     panda_breath_topic_prefix: str | None = None
     panda_breath_printer_assignments: str | None = None

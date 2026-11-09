@@ -19,6 +19,12 @@ from backend.app.utils.paho_teardown import retire_paho_client
 
 logger = logging.getLogger(__name__)
 
+# How often assigned spools are checked for low filament while the printer events are on.
+FILAMENT_LOW_CHECK_SECONDS = 60.0
+# A slot that sent filament/low is re-armed only this many points above its threshold, so a spool whose
+# remaining weight wobbles around the threshold (AMS remain sync, rounding) publishes once, not on every wobble.
+FILAMENT_LOW_REARM_MARGIN = 5.0
+
 
 class MQTTRelayService:
     """Publishes Printbuddy events to an external MQTT broker."""
@@ -39,6 +45,10 @@ class MQTTRelayService:
         self._smart_plug_service = None  # Lazy import to avoid circular dependency
         self._settings: dict = {}  # Store settings for smart plug service
         self._disconnection_event: threading.Event | None = None
+        # Printer offline/online and low filament events (upstream 1.3.0): off unless switched on.
+        self.printer_events = False
+        # (printer_id, ams_id, tray_id, spool_id) of the slots whose filament/low went out, until re-armed.
+        self._relayed_filament_low: set[tuple[int, int, int, int]] = set()
 
     async def configure(self, settings: dict) -> bool:
         """Configure MQTT connection from settings.
@@ -46,6 +56,7 @@ class MQTTRelayService:
         Returns True if connection was successful or MQTT is disabled.
         """
         self.enabled = settings.get("mqtt_enabled", False)
+        self.printer_events = bool(settings.get("mqtt_printer_events", False))
         self._settings = settings  # Store for smart plug service
 
         if not self.enabled:
@@ -228,6 +239,11 @@ class MQTTRelayService:
         except Exception as e:
             logger.debug("MQTT publish error: %s", e)
 
+    @property
+    def printer_events_ready(self) -> bool:
+        """The printer offline/online and low filament events are switched on and can be sent now."""
+        return bool(self.enabled and self.connected and self.printer_events)
+
     def get_status(self) -> dict:
         """Get current MQTT relay status for API."""
         return {
@@ -286,8 +302,8 @@ class MQTTRelayService:
         )
 
     async def on_printer_online(self, printer_id: int, printer_name: str, printer_serial: str):
-        """Publish printer came online event."""
-        if not self.enabled or not self.connected:
+        """Publish that a printer reported offline is back (only after a published offline, see main.py)."""
+        if not self.printer_events_ready:
             return
 
         self._publish(
@@ -301,8 +317,8 @@ class MQTTRelayService:
         )
 
     async def on_printer_offline(self, printer_id: int, printer_name: str, printer_serial: str):
-        """Publish printer went offline event."""
-        if not self.enabled or not self.connected:
+        """Publish that a printer has been offline past the grace; never for our own power-off (see main.py)."""
+        if not self.printer_events_ready:
             return
 
         self._publish(
@@ -615,25 +631,83 @@ class MQTTRelayService:
 
     async def on_filament_low(
         self,
+        printer_id: int,
+        printer_name: str,
+        printer_serial: str,
+        slot: str,
+        remaining_percent: int,
+        color: str | None,
         spool_id: int,
-        spool_name: str,
-        remaining_weight: float,
-        remaining_percent: float,
     ):
-        """Publish filament inventory low event."""
-        if not self.enabled or not self.connected:
+        """Publish that the spool in a slot crossed its low-stock threshold (once per crossing)."""
+        if not self.printer_events_ready:
             return
 
         self._publish(
-            f"{self.topic_prefix}/filament/low",
+            f"{self.topic_prefix}/printers/{printer_serial}/filament/low",
             {
-                "spool_id": spool_id,
-                "spool_name": spool_name,
-                "remaining_weight": remaining_weight,
+                "printer_id": printer_id,
+                "printer_name": printer_name,
+                "printer_serial": printer_serial,
+                "slot": slot,
                 "remaining_percent": remaining_percent,
+                "color": color,
+                "spool_id": spool_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
+
+    async def check_filament_low(self) -> None:
+        """Publish filament/low for each assigned spool newly below its low-stock threshold (upstream #2913's rule).
+
+        Remaining = label weight - used weight of the spool assigned to the slot (inventory or Spoolman), against the
+        spool's own threshold or the global ``low_stock_threshold``, as on the Inventory page; the AMS remain % is
+        not used. The record survives a broker drop (a reconnect re-sends nothing) and is forgotten when the events
+        are switched off, so switching them on reports what is low now.
+        """
+        if not (self.enabled and self.printer_events):
+            self._relayed_filament_low.clear()
+            return
+        if not self.connected:
+            return
+        from backend.app.core.database import async_session
+        from backend.app.models.printer import Printer
+        from backend.app.services.spool_assignment_notifications import (
+            _global_tray_from_assignment,
+            _slot_label_from_global_tray,
+        )
+
+        async with async_session() as db:
+            slots = await _filament_low_slots(db)
+            printers: dict[int, Printer | None] = {}
+            for key, (pct, threshold, color) in slots.items():
+                printer_id, ams_id, tray_id, spool_id = key
+                if pct >= threshold + FILAMENT_LOW_REARM_MARGIN:
+                    self._relayed_filament_low.discard(key)
+                    continue
+                if pct >= threshold or key in self._relayed_filament_low:
+                    continue
+                if printer_id not in printers:
+                    printers[printer_id] = await db.get(Printer, printer_id)
+                printer = printers[printer_id]
+                if printer is None:
+                    continue
+                self._relayed_filament_low.add(key)
+                slot = _slot_label_from_global_tray(_global_tray_from_assignment(ams_id, tray_id))
+                await self.on_filament_low(
+                    printer_id, printer.name, printer.serial_number, slot, int(pct), color, spool_id
+                )
+
+    async def run_filament_low_checks(self) -> None:
+        """Background loop for check_filament_low (started in main's lifespan)."""
+        while True:
+            try:
+                await self.check_filament_low()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("MQTT relay low-filament check failed: %s", e)
+            await asyncio.sleep(FILAMENT_LOW_CHECK_SECONDS)
 
     # =========================================================================
     # Smart Plug Events
@@ -738,6 +812,76 @@ class MQTTRelayService:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         )
+
+
+def _remaining_percent(label_weight: float | None, weight_used: float | None) -> float | None:
+    """Remaining filament in % of the label weight, as the Inventory page counts it; None without a label weight."""
+    if not label_weight or label_weight <= 0:
+        return None
+    return max(0.0, float(label_weight) - float(weight_used or 0.0)) / float(label_weight) * 100.0
+
+
+async def _filament_low_slots(db) -> dict[tuple[int, int, int, int], tuple[float, float, str | None]]:
+    """(printer_id, ams_id, tray_id, spool_id) -> (remaining %, threshold %, colour name) of every assigned spool."""
+    from sqlalchemy import select
+
+    from backend.app.api.routes.settings import get_setting
+    from backend.app.models.spool import Spool
+    from backend.app.models.spool_assignment import SpoolAssignment
+
+    try:
+        global_threshold = float(await get_setting(db, "low_stock_threshold") or 20.0)
+    except ValueError:
+        global_threshold = 20.0
+    if not 0 < global_threshold <= 100:
+        global_threshold = 20.0
+
+    slots: dict[tuple[int, int, int, int], tuple[float, float, str | None]] = {}
+    if (await get_setting(db, "spoolman_enabled") or "").lower() == "true":
+        from backend.app.api.routes._spoolman_helpers import _map_spoolman_spool
+        from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
+        from backend.app.services.spoolman import SpoolmanUnavailableError, get_spoolman_client
+
+        assignments = (await db.execute(select(SpoolmanSlotAssignment))).scalars().all()
+        client = await get_spoolman_client() if assignments else None
+        if client is None:
+            return slots
+        try:
+            by_id = {raw.get("id"): raw for raw in await client.get_all_spools()}  # archived spools excluded
+        except SpoolmanUnavailableError as e:
+            logger.debug("Low-filament check skipped, Spoolman unreachable: %s", e)
+            return slots
+        for a in assignments:
+            raw = by_id.get(a.spoolman_spool_id)
+            if raw is None:
+                continue
+            try:
+                mapped = _map_spoolman_spool(raw)
+            except ValueError:
+                continue
+            pct = _remaining_percent(mapped.get("label_weight"), mapped.get("weight_used"))
+            if pct is not None:  # Spoolman spools have no per-spool threshold
+                slots[(a.printer_id, a.ams_id, a.tray_id, a.spoolman_spool_id)] = (
+                    pct,
+                    global_threshold,
+                    mapped.get("color_name"),
+                )
+        return slots
+
+    rows = await db.execute(
+        select(SpoolAssignment, Spool)
+        .join(Spool, SpoolAssignment.spool_id == Spool.id)
+        .where(Spool.archived_at.is_(None))  # an archived spool is not stock
+    )
+    for a, spool in rows.all():
+        pct = _remaining_percent(spool.label_weight, spool.weight_used)
+        if pct is not None:
+            slots[(a.printer_id, a.ams_id, a.tray_id, spool.id)] = (
+                pct,
+                float(spool.low_stock_threshold_pct or global_threshold),
+                spool.color_name,
+            )
+    return slots
 
 
 # Global instance
