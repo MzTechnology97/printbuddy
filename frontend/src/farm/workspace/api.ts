@@ -4,7 +4,7 @@ import { farmRequest } from '../api';
 /** A project value as the 3MF stores it: a string, or one string per filament / extruder. */
 export type SettingValue = string | string[];
 
-export type SettingType = 'int' | 'float' | 'bool' | 'enum' | 'string';
+export type SettingType = 'int' | 'float' | 'bool' | 'enum' | 'string' | 'point';
 
 export interface SettingOverride {
   object_id: string | null;
@@ -18,18 +18,26 @@ export interface WorkspaceSetting {
   label: string;
   description?: string | null;
   section: 'process' | 'filament' | 'printer' | null;
-  group?: string | null;
-  tab: string | null;
   type: SettingType;
+  /** always: a percentage (``15%``); either: mm or % (``0.4`` / ``90%``); absent: a plain number */
+  percent?: 'always' | 'either' | null;
+  /** "nil" (the preset's value) may stand for an element */
+  nullable?: boolean;
+  /** text or G-code over several lines */
+  multiline?: boolean;
+  /** a list where any other value is fine too (material names...) */
+  open?: boolean;
   unit?: string | null;
   min?: number | null;
   max?: number | null;
   step?: number | null;
-  options?: { value: string; label: string }[] | null;
+  options?: { value: string; label: string; icon?: string }[] | null;
   value: SettingValue;
   editable: boolean;
-  /** unknown (no schema), text, category (could break printer compatibility), format (value doesn't read as its type) */
-  readonly_reason: 'unknown' | 'text' | 'category' | 'format' | null;
+  /** unknown (the slicer doesn't define it), identity (preset / printer identity), slicer (read only in the
+   * slicer too), project (project data the slicer keeps itself), format (doesn't read as its type, or only
+   * inherited), absent (the slicer shows it but the file doesn't hold it: the system preset's value applies) */
+  readonly_reason: 'unknown' | 'identity' | 'hardware' | 'slicer' | 'project' | 'format' | 'absent' | null;
   /** Against the system preset: true = changed, false = the preset's value, null = the file doesn't say. */
   differs_from_system: boolean | null;
   overrides: SettingOverride[];
@@ -49,6 +57,8 @@ export interface WorkspacePlate {
   object_ids: string[];
   /** Each placement of an object on the plate: the identity a future 3D editor moves, rotates or duplicates. */
   instances: { object_id: string; instance_id: string | null }[];
+  /** The plate's metadata in model_settings.config: its own settings (bed_type, print_sequence...) among them. */
+  metadata?: Record<string, string>;
 }
 
 export type WorkspaceKind = 'project' | 'sliced' | 'model' | 'other_slicer';
@@ -64,8 +74,18 @@ export interface WorkspaceDocument {
   objects: WorkspaceObject[];
   warnings: string[];
   settings: WorkspaceSetting[];
-  tabs: string[];
   copy_of: { copy_of_library_file_id: number; copy_of_filename: string; saved_at: string } | null;
+  /** The latest slice of each plate with the project's settings; ``current``: of the version open now. */
+  outputs: WorkspaceOutput[];
+}
+
+export interface WorkspaceOutput {
+  plate: number;
+  library_file_id: number;
+  filename: string;
+  print_time_seconds: number | null;
+  filament_used_g: number | null;
+  current: boolean;
 }
 
 export interface SavedCopy {

@@ -73,6 +73,37 @@ POST /api/v1/farm/library/files/{id}/slice   slicing con le impostazioni del 3MF
   (con la provenienza) nascono insieme; se qualcosa fallisce non resta niente. Una voce danneggiata o
   cifrata dà 422.
 
+## Layout come i client (OrcaSlicer / Bambu Studio)
+
+Disposizione, impostazioni, testi italiani, icone e colori vengono da OrcaSlicer `v2.5.0` (AGPL-3.0 come
+Printbuddy; vedi `THIRD_PARTY_NOTICES.md`). `tools/orca_settings/generate.py` legge da un checkout del tag
+`Tab.cpp` (pagine, gruppi e ordine), `PrintConfig.cpp` (etichette, tooltip, unità, intervalli, opzioni,
+modalità), `PublishSettings.cpp` e `OrcaSlicer_it.po`, e scrive `frontend/src/farm/workspace/orca-assets/`
+(`settings-layout.json` e le icone copiate da `resources/images`, mai loghi). I dati di OrcaSlicer guidano
+solo disposizione e testi: cosa si può modificare e i controlli restano quelli di Printbuddy. Il tema scuro
+del workspace usa la palette scura di OrcaSlicer (`StateColor.cpp`). La pagina non usa il nome OrcaSlicer o
+Bambu Studio come marchio: compare solo come slicer che ha salvato il progetto.
+
+- **Barra in alto:** Prepara / Anteprima, Salva copia, Slice del piatto, Stampa, Esporta (in Prepara il 3MF,
+  in Anteprima il `.gcode.3mf` del piatto).
+- **Barra laterale:** stampante (preset, ugello, piatto di stampa) e filamenti con colore; ognuno ha il
+  pulsante che apre le sue impostazioni. Poi gli oggetti (del piatto scelto) con le impostazioni proprie in
+  sola lettura, e il processo con le schede dei client (Qualità, Resistenza, Velocità, Supporti,
+  Multimateriale, Altro, con le loro icone) e l'interruttore Semplice / Avanzate; le impostazioni di
+  stampante e filamento si aprono con le pagine di OrcaSlicer.
+- **Semplice / Avanzate:** la modalità di ogni opzione in OrcaSlicer (`def->mode`; Semplice quando non ne
+  dichiara un'altra). Una chiave modificata resta visibile anche in Semplice.
+- **Centro (Prepara):** vista 3D, barra dei piatti numerati in basso, strumenti oggetto (sposta, ruota,
+  scala, taglia, pittura supporti, pittura cucitura) con le icone di OrcaSlicer, visibili ma disattivati
+  fino alla fase 2.
+- **Anteprima:** il G-code del piatto nel `GcodeViewer` esistente, in modalità "slicer": cursore verticale
+  dei layer, cursore orizzontale delle mosse del layer in cima (le mosse oltre il cursore non si
+  disegnano), legenda per tipo di elemento, tempo e filamento per colore (da `slice_info.config`).
+  `gcode-preview` colora per estrusore e legge solo T0-T7, quindi i tipi di elemento dei client sono
+  raggruppati in 8 gruppi (`utils/gcodeFeatures.ts`). Si apre l'ultimo slice del piatto già salvato
+  (`outputs` del documento), anche da una sessione precedente; uno slice di una versione vecchia del 3MF
+  è segnalato e non si stampa da qui.
+
 ## Roadmap: editor 3D (fase successiva, non in questa PR)
 
 Preparato in questa PR: la struttura del progetto arriva dal backend con l'identità delle istanze

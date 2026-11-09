@@ -80,8 +80,7 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
-        "settings": ws_settings.describe(cfg, overrides) if cfg else [],
-        "tabs": list(ws_settings.TABS),
+        "settings": ws_settings.describe(cfg, overrides, slicer) if cfg else [],
     }
 
 
@@ -112,7 +111,47 @@ async def get_workspace(
         "copy_of": (lib_file.file_metadata or {}).get("workspace"),
         **doc,
         "slicer": (state.slicer if state else None) or doc["slicer"],  # the per-file override wins, as when slicing
+        "outputs": await _outputs(db, lib_file, state.sha256 if state else lib_file.file_hash),
     }
+
+
+async def _outputs(db: AsyncSession, lib_file: LibraryFile, version: str | None) -> list[dict]:
+    """The latest project-settings slice of each plate (the Preview tab opens it), by plate.
+
+    ``current``: sliced from the version of the 3MF opened now. Colour variants and Klipper G-code
+    taken out of an output are left out: they are farm outputs of their own.
+    """
+    from backend.app.farm.slicing import colour_key, plate_key
+
+    latest: dict[int, LibraryFile] = {}
+    rows = await db.execute(
+        LibraryFile.active()
+        .where(
+            LibraryFile.source_type == "sliced",
+            LibraryFile.file_metadata["sliced_from_library_file_id"].as_integer() == lib_file.id,
+        )
+        .order_by(LibraryFile.id)
+    )
+    for out in rows.scalars():
+        meta = out.file_metadata or {}
+        if (
+            meta.get("used_embedded_settings")
+            and meta.get("sliced_from_library_file_id") == lib_file.id
+            and "extracted_from_library_file_id" not in meta
+            and not colour_key(meta.get("sliced_color"))
+        ):
+            latest[plate_key(meta.get("sliced_plate"))] = out
+    return [
+        {
+            "plate": plate,
+            "library_file_id": out.id,
+            "filename": out.filename,
+            "print_time_seconds": (out.file_metadata or {}).get("print_time_seconds"),
+            "filament_used_g": (out.file_metadata or {}).get("filament_used_g"),
+            "current": (out.file_metadata or {}).get("sliced_from_sha256") == version,
+        }
+        for plate, out in sorted(latest.items())
+    ]
 
 
 def _copy_name(source: str, wanted: str | None) -> str:
@@ -134,12 +173,12 @@ def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path) -
     try:
         zf = project.open_archive(data)
         cfg = project.read_settings(zf)
-        kind, _, _ = project.classify(lib_file.filename, zf, cfg)
+        kind, slicer, _ = project.classify(lib_file.filename, zf, cfg)
         if kind != project.KIND_PROJECT or cfg is None:
             raise HTTPException(status_code=400, detail=f"This file can only be inspected ({kind})")
         if project.read_structure(zf, cfg)["warnings"]:
             raise HTTPException(status_code=400, detail="This file can only be inspected (unreadable model settings)")
-        new_cfg, applied = ws_settings.apply_changes(cfg, changes)
+        new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
         project.write_copy(data, new_cfg, dest)
