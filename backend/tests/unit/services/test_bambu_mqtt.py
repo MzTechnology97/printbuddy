@@ -5633,3 +5633,61 @@ class TestPrintRunningObservedCallback:
             "raw_data",
             "ams_mapping",
         }
+
+
+class TestKProfileResponseDoesNotClobberNozzle:
+    """upstream #2663: an ``extrusion_cali_get`` response echoes the *requested*
+    nozzle_diameter (get_kprofiles probes 0.2/0.4/0.6/0.8). Only real status
+    pushes may set the installed nozzle size."""
+
+    @pytest.fixture
+    def mqtt_client(self):
+        from backend.app.services.bambu_mqtt import BambuMQTTClient
+
+        return BambuMQTTClient(ip_address="192.168.1.100", serial_number="A1TEST", access_code="12345678")
+
+    @staticmethod
+    def _kprofile_response(nozzle):
+        return {
+            "print": {
+                "command": "extrusion_cali_get",
+                "nozzle_diameter": nozzle,
+                "filaments": [
+                    {"cali_idx": 0, "nozzle_diameter": nozzle, "filament_id": "GFA00", "name": "PLA", "k_value": "0.02"}
+                ],
+                "sequence_id": "1501",
+            }
+        }
+
+    def test_single_nozzle(self, mqtt_client):
+        mqtt_client._process_message({"print": {"nozzle_diameter": "0.4"}})
+        mqtt_client._process_message(self._kprofile_response("0.8"))
+        assert mqtt_client.state.nozzles[0].nozzle_diameter == "0.4"
+        # the response is still parsed into K-profiles
+        assert len(mqtt_client.state.kprofiles) == 1
+        # a real status push still changes it
+        mqtt_client._process_message({"print": {"nozzle_diameter": "0.6"}})
+        assert mqtt_client.state.nozzles[0].nozzle_diameter == "0.6"
+
+    def test_dual_nozzle(self, mqtt_client):
+        def status(left, right):
+            return {
+                "print": {
+                    "device": {
+                        "nozzle": {
+                            "info": [
+                                {"id": 0, "type": "HS", "diameter": left},
+                                {"id": 1, "type": "HS", "diameter": right},
+                            ]
+                        }
+                    }
+                }
+            }
+
+        mqtt_client._process_message(status("0.4", "0.6"))
+        mqtt_client._process_message(self._kprofile_response("0.8"))
+        mqtt_client._process_message({"print": {"command": "extrusion_cali_sel", "nozzle_diameter": "0.2"}})
+        assert [n.nozzle_diameter for n in mqtt_client.state.nozzles[:2]] == ["0.4", "0.6"]
+
+        mqtt_client._process_message(status("0.6", "0.2"))
+        assert [n.nozzle_diameter for n in mqtt_client.state.nozzles[:2]] == ["0.6", "0.2"]
