@@ -47,6 +47,7 @@ export function GcodeViewer({
   useEffect(() => {
     if (!canvasRef.current || initRef.current) return;
     initRef.current = true;
+    truncatedRef.current = null; // fork: a new file starts with no layer cut by the move slider
 
     const canvas = canvasRef.current;
 

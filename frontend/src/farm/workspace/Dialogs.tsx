@@ -116,7 +116,6 @@ export function PresetDialog({ layout, kind, name, settings, draft, editable, on
           editable={editable}
           onChange={onChange}
           onReset={onReset}
-          showUnknown={false}
         />
       </div>
     </Dialog>

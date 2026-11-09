@@ -24,7 +24,7 @@ interface Props {
   onReset: (key: string) => void;
   /** The slicer's Simple mode: only its Simple settings (a changed one stays), and no "Other values" tab. */
   simple?: boolean;
-  /** Offer the "Other values" tab: values of the project the layout places on no page. */
+  /** Offer the "Other values" tab: values of this preset the layout places on no page. */
   showUnknown?: boolean;
 }
 
@@ -95,7 +95,8 @@ export function SettingsPanel({
     if (withUnknown) {
       const placed = placedKeys(layout);
       for (const s of settings) {
-        if (!placed.has(s.key) && (section === 'process' ? true : s.section === section)) {
+        // in its own preset: unknown keys (no section) with the process
+        if (!placed.has(s.key) && (s.section ?? 'process') === section) {
           out.push({ setting: s, tab: UNKNOWN_TAB, group: '', simple: false });
         }
       }

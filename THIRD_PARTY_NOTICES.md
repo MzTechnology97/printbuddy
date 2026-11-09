@@ -3,7 +3,7 @@
 ## OrcaSlicer
 
 - Project: OrcaSlicer, https://github.com/OrcaSlicer/OrcaSlicer
-- Version used: release tag `v2.5.0`
+- Version used: release tag `v2.5.0` (commit `40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19`)
 - License: GNU Affero General Public License v3.0 (AGPL-3.0), the same license as Printbuddy (see `LICENSE`)
 - Used in: `frontend/src/farm/workspace/orca-assets/` (3MF Workspace)
   - `settings-layout.json`: data generated from OrcaSlicer's `src/slic3r/GUI/Tab.cpp`, `src/libslic3r/PrintConfig.cpp`,

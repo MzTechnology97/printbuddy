@@ -67,14 +67,19 @@ export function WorkspacePage() {
       </div>
     );
   }
-  if (!docQuery.data) {
+  if (!docQuery.data || layoutQuery.isError) {
+    const error = docQuery.error ?? layoutQuery.error;
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-4 bg-bambu-dark text-white p-4 text-center">
         <AlertTriangle className="w-8 h-8 text-amber-400" />
-        <p>{docQuery.error instanceof Error ? docQuery.error.message : String(docQuery.error ?? '')}</p>
-        <Button variant="secondary" onClick={() => window.history.back()}>
-          {t('farm.workspace.close')}
-        </Button>
+        <p>{error instanceof Error ? error.message : String(error ?? '')}</p>
+        <div className="flex gap-2">
+          {/* a page part missing after an update (old tab): reloading gets the current one */}
+          {layoutQuery.isError && <Button onClick={() => window.location.reload()}>{t('common.retry')}</Button>}
+          <Button variant="secondary" onClick={() => window.history.back()}>
+            {t('farm.workspace.close')}
+          </Button>
+        </div>
       </div>
     );
   }

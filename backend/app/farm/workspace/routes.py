@@ -125,7 +125,14 @@ async def _outputs(db: AsyncSession, lib_file: LibraryFile, version: str | None)
     from backend.app.farm.slicing import colour_key, plate_key
 
     latest: dict[int, LibraryFile] = {}
-    rows = await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
+    rows = await db.execute(
+        LibraryFile.active()
+        .where(
+            LibraryFile.source_type == "sliced",
+            LibraryFile.file_metadata["sliced_from_library_file_id"].as_integer() == lib_file.id,
+        )
+        .order_by(LibraryFile.id)
+    )
     for out in rows.scalars():
         meta = out.file_metadata or {}
         if (
