@@ -503,7 +503,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     // the canvas's own keys only while it has focus: elsewhere Tab moves the focus and Ctrl+0 / Ctrl+E... stay the browser's
     const onCanvas = !!view && el === view.renderer.domElement;
     if (e.key === 'Tab' && !ctrl) {
-      if (!onCanvas) return;
+      // the Preview's G-code canvas switches back too (gcode/GcodePreview.tsx marks it)
+      if (!onCanvas && el?.dataset?.previewCanvas == null) return;
       e.preventDefault();
       if (e.shiftKey) setSidebarHidden((h) => !h);
       else setMode((m) => (m === 'prepare' ? 'preview' : 'prepare'));
@@ -850,6 +851,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
                 output={output}
                 bed={bed}
                 colours={colours}
+                layout={layout}
                 canSlice={canSlice}
                 onSlice={() => sliceMutation.mutate()}
               />
