@@ -4,11 +4,10 @@ import { useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/client';
-import { FilamentMapping } from '../components/PrintModal/FilamentMapping';
 import type { FilamentReqsData } from '../components/PrintModal/types';
 import { buildLoadedFilaments, useFilamentMapping } from '../hooks/useFilamentMapping';
-import { getCurrencySymbol } from '../utils/currency';
 import { farmApi } from './api';
+import { SlotGrid } from './SlotGrid';
 import { componentSlot } from './slotColour';
 import './i18n';
 
@@ -95,10 +94,8 @@ export function PrinterSlots({ printerId, plateId, plateLabel, color, colorHex, 
         <>
           <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsFor', { plate: plateLabel })}</p>
           {!reqs.data.sliced && <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsBeforeSlice')}</p>}
-          <FilamentMapping printerId={printerId} filamentReqs={filamentReqs} manualMappings={mappings}
-            onManualMappingChange={onMappings} defaultExpanded
-            currencySymbol={getCurrencySymbol(settings.data?.currency || 'USD')}
-            defaultCostPerKg={settings.data?.default_filament_cost ?? 0} />
+          <SlotGrid printerId={printerId} filamentReqs={filamentReqs} mappings={mappings} onMappings={onMappings}
+            preferLowest={settings.data?.prefer_lowest_filament} />
           {manual && <p className="text-xs text-bambu-gray">{t('farm.jobs.slotsChosen')}</p>}
         </>
       )}
