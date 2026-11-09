@@ -564,6 +564,25 @@ class TestColourVariantFile:
             (3, "PET-CF", 0),
         ]
 
+        def with_settings(name, **extra):
+            out = tmp_path / name
+            with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w") as zout:
+                for entry in zin.namelist():
+                    data = zin.read(entry)
+                    if entry == "Metadata/project_settings.config":
+                        data = json.dumps({**json.loads(data), **extra})
+                    zout.writestr(entry, data)
+            return out
+
+        # Supports on filament 1, interface on the object's own: the support filament gets its row.
+        sup = with_settings("sup.3mf", enable_support="1", support_filament="1", support_interface_filament="0")
+        assert [s["slot_id"] for s in plate_slots(sup, 1, 0)] == [1, 2]
+        off = with_settings("off.3mf", enable_support="0", support_filament="1")
+        assert [s["slot_id"] for s in plate_slots(off, 1, 0)] == [2]
+        # Dual nozzle on automatic grouping: the slicer picks the nozzles, the slots wait for the slice.
+        auto = with_settings("auto.3mf", physical_extruder_map=["1", "0"], filament_map_mode="Auto For Flush")
+        assert plate_slots(auto, 1, 0) is None
+
         typed = tmp_path / "typed.3mf"
         with zipfile.ZipFile(src) as zin, zipfile.ZipFile(typed, "w") as zout:
             for name in zin.namelist():

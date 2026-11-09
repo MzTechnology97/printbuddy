@@ -87,7 +87,11 @@ def plate_filaments(source: bytes | Path, plate: int) -> set[int]:
 def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] | None:
     """The filaments the plate will be sliced with, read from the unsliced project, as the print dialog's
     slot rows (``extract_filament_requirements`` without grams): ``filament`` when the colour variant moves
-    the plate there, else its own. None for a painted plate (its colours aren't in the extruders)."""
+    the plate there, else its own, plus the support filaments when supports are on.
+
+    None when the slice can't be foreseen: a painted plate (its colours aren't in the extruders), or a
+    dual-nozzle project left on automatic grouping (the slicer picks each filament's nozzle then).
+    """
     from backend.app.utils.threemf_tools import extract_nozzle_mapping_from_3mf
 
     with _zip(source) as zf:
@@ -97,8 +101,27 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
             return None
         if _painted(zf):
             return None
+        if len(cfg.get("physical_extruder_map") or []) > 1 and str(cfg.get("filament_map_mode", "")).lower().startswith(
+            "auto"
+        ):
+            return None
         nozzles = extract_nozzle_mapping_from_3mf(zf) or {}
+        try:
+            objects = _plate_objects(ET.fromstring(zf.read(MODEL_SETTINGS_ENTRY)), plate)
+        except KeyError:
+            objects = []
     used = {filament} if filament else plate_filaments(source, plate)
+    on = {"1", "true"}
+    supports = str(cfg.get("enable_support", "")).lower() in on or any(
+        str(m.get("value", "")).lower() in on for o in objects for m in o.findall("metadata[@key='enable_support']")
+    )
+    if supports:  # over-listing a filament is harmless, missing one sends it unmapped
+        for key in ("support_filament", "support_interface_filament"):
+            try:
+                used.add(int(cfg.get(key) or 0))  # 0: the object's own filament
+            except (TypeError, ValueError):
+                pass
+    used.discard(0)
     types, colours = cfg.get("filament_type") or [], cfg.get("filament_colour") or []
     slots = []
     for slot in sorted(used):

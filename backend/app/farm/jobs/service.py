@@ -38,6 +38,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -261,6 +262,10 @@ async def plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None)
     return await asyncio.to_thread(extract_filament_requirements, path, _plate_in_file(path, plate.plate_index))
 
 
+# Not on disk (NAS away), not a zip, or settings that don't parse: the slots wait for the slice.
+UNREADABLE_3MF = (OSError, zipfile.BadZipFile, ElementTree.ParseError, ValueError)
+
+
 async def unsliced_plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None) -> list[dict] | None:
     """Before the slice: the plate's filaments in the component's colour, read from the project, so the slots
     are chosen now as in the slicers' print dialog (the 3MF is not touched). None when they can't be told."""
@@ -279,11 +284,13 @@ async def unsliced_plate_filaments(db: AsyncSession, plate: FarmPlate, color: st
             filament = await slicing._variant_filament(db, lib_file, state, plate.plate_index, color)
         except HTTPException:
             return None  # no filament of that colour: the job will say so
+        except UNREADABLE_3MF:
+            return None
     try:
         return await asyncio.to_thread(
             variants.plate_slots, library_path(lib_file.file_path), slicing.plate_key(plate.plate_index), filament
         )
-    except (OSError, zipfile.BadZipFile):
+    except UNREADABLE_3MF:
         return None
 
 
@@ -700,6 +707,11 @@ def _matching_spool(printer: dict, materials: list[str], color_hex: str, toleran
     return min(spools, key=lambda f: plan.color_distance(f["color"], color_hex)) if spools else None
 
 
+def _unmapped(slots: list[dict], mapping: list[int]) -> list[int]:
+    """The sliced filaments (1-based) a hand-picked ``ams_mapping`` leaves without a slot."""
+    return [f["slot_id"] for f in slots if f["slot_id"] > len(mapping) or mapping[f["slot_id"] - 1] < 0]
+
+
 def _loaded_trays(printer_id: int) -> list[dict]:
     """The printer's loaded slots with their global tray ids: AMS, K2 CFS, external spool."""
     status = printer_manager.get_status(printer_id)
@@ -1024,6 +1036,13 @@ async def dispatch_once(db: AsyncSession) -> int:
                         plate_no = _plate_in_file(path, plate.plate_index)
                         read = (path, plate_no, await asyncio.to_thread(extract_filament_requirements, path, plate_no))
                     path, plate_no, slots = read
+                    if mapped and (missing := _unmapped(slots, mapped)):
+                        # Chosen before the slice: never send a filament of the slice without its slot.
+                        reasons.append(
+                            f"{printer['name']}: the slots chosen by hand miss filament {', '.join(map(str, missing))}"
+                            " of the slice: queue it again and choose them"
+                        )
+                        continue
                     auto = None  # trays of the component's colour for the filaments the plate uses
                     spool = None  # a spool of that colour, when the slots can't be mapped
                     if not (unreadable or mapped):
