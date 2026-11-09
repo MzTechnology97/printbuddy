@@ -4,13 +4,24 @@ The plate's G-code inside a .gcode.3mf has no thumbnail blocks (the slicer keeps
 as ``Metadata/plate_N.png``) and, with an empty layer-change G-code, no ``SET_PRINT_STATS_INFO``:
 Mainsail, Fluidd and the printer's screen show no preview and no layers. Both are added when the
 G-code has none; nothing else in it changes.
+
+Printing a .gcode.3mf on any non-Bambu printer outside the farm (library print, archive reprint,
+queue item) sends the plate's G-code the same way: ``plain_gcode_name`` and ``plain_gcode``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import re
+import tempfile
+import zipfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from backend.app.services.printer_providers.factory import MOONRAKER_PROVIDERS
 
 THUMBNAIL_SIZES = ((96, 96), (300, 300))  # the K2 profile's own; used when the G-code doesn't say
 LINE = 76  # base64 characters per comment line
@@ -70,3 +81,61 @@ def with_layer_info(gcode: bytes) -> bytes:
 
 def for_klipper(gcode: bytes, png: bytes | None) -> bytes:
     return with_layer_info(with_thumbnails(gcode, png))
+
+
+_PLATE_GCODE = re.compile(r"Metadata/plate_(\d+)\.gcode")
+
+
+class NoPlateGcode(RuntimeError):
+    """A 3MF sent to a G-code printer has no G-code for the plate."""
+
+
+def read_plate(path: Path, plate: int) -> tuple[bytes, bytes | None]:
+    """The plate's G-code and picture in a sliced 3MF (raises KeyError, OSError, BadZipFile)."""
+    with zipfile.ZipFile(path) as zf:
+        png = f"Metadata/plate_{plate}.png"
+        return zf.read(f"Metadata/plate_{plate}.gcode"), zf.read(png) if png in zf.namelist() else None
+
+
+def plain_gcode_name(path: Path, filename: str, provider: str, plate_id: int | None) -> tuple[str, int] | None:
+    """For a 3MF sent to a non-Bambu printer: the ``.gcode`` name to send it as and the plate it holds.
+
+    ``<name>.gcode``, or ``<name>_plate_<N>.gcode`` when the file has several sliced plates; no plate asked
+    means the lowest sliced one. None when the file goes as it is (Bambu, plain G-code). Raises
+    ``NoPlateGcode`` when the 3MF has no G-code for the plate.
+    """
+    if provider == "bambu" or not filename.lower().endswith(".3mf"):
+        return None
+    try:
+        with zipfile.ZipFile(path) as zf:
+            plates = sorted(int(m[1]) for n in zf.namelist() if (m := _PLATE_GCODE.fullmatch(n)))
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise NoPlateGcode(f"{filename} is not a readable 3MF file") from exc
+    if not plates:
+        raise NoPlateGcode(f"{filename} contains no sliced G-code. Slice it for this printer before printing.")
+    plate = plate_id or plates[0]
+    if plate not in plates:
+        sliced = ", ".join(map(str, plates))
+        raise NoPlateGcode(f"Plate {plate} of {filename} is not sliced (sliced plates: {sliced}).")
+    base = re.sub(r"(\.gcode)?\.3mf$", "", filename, flags=re.IGNORECASE)
+    return (f"{base}_plate_{plate}.gcode" if len(plates) > 1 else f"{base}.gcode"), plate
+
+
+def _write_plain_gcode(path: Path, plate: int, provider: str, out: Path) -> None:
+    gcode, png = read_plate(path, plate)
+    # SET_PRINT_STATS_INFO is a Klipper command: other firmwares get only the preview (comment lines).
+    out.write_bytes(for_klipper(gcode, png) if provider in MOONRAKER_PROVIDERS else with_thumbnails(gcode, png))
+
+
+@asynccontextmanager
+async def plain_gcode(path: Path, plan: tuple[str, int] | None, provider: str) -> AsyncIterator[Path]:
+    """The file to upload: ``path`` itself, or (with a ``plain_gcode_name`` plan) the plate's G-code in a
+    temporary file removed afterwards. The stored file is never changed."""
+    if plan is None:
+        yield path
+        return
+    name, plate = plan
+    with tempfile.TemporaryDirectory(prefix="printbuddy-gcode-", ignore_cleanup_errors=True) as tmp:
+        out = Path(tmp) / Path(name).name
+        await asyncio.to_thread(_write_plain_gcode, path, plate, provider, out)
+        yield out
