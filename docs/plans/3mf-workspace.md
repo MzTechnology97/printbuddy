@@ -65,7 +65,13 @@ POST /api/v1/farm/library/files/{id}/slice   slicing con le impostazioni del 3MF
   quelle cartelle (copia o upload) lo stato ora si legge dal file a ogni richiesta e non si salva: nessuno
   stato fittizio da tenere aggiornato. Le copie quindi non hanno piatti della farm, non entrano nei prodotti,
   nel controllo problemi della libreria (che legge solo i 3MF di prodotti attivi) né nel reslice automatico
-  (che parte solo dalla sincronizzazione). Si slicano solo su richiesta.
+  (che parte solo dalla sincronizzazione). Si slicano solo su richiesta. In coda, il controllo "slice di
+  una versione vecchia" (`jobs.service._slice_reason`) non ha una versione della farm da seguire per una
+  sorgente interna senza stato: l'output (o il G-code estratto per Klipper) si stampa com'è stato slicato.
+- **Salvataggio.** Una copia alla volta (la sorgente sta in memoria, fino a 128 MB), fuori dall'event loop:
+  la copia si scrive in un file temporaneo, si verifica, si rinomina, e il file e la sua riga in libreria
+  (con la provenienza) nascono insieme; se qualcosa fallisce non resta niente. Una voce danneggiata o
+  cifrata dà 422.
 
 ## Roadmap: editor 3D (fase successiva, non in questa PR)
 

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import os
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -25,7 +29,9 @@ from backend.app.farm.workspace import project, settings as ws_settings
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspace", tags=["farm-workspace"])
+_one_build = asyncio.Semaphore(1)  # a copy holds its source in memory: one at a time
 
 MAX_CHANGES = 1000
 Value = str | int | float | bool
@@ -123,8 +129,8 @@ def _copy_name(source: str, wanted: str | None) -> str:
     return name if name.lower().endswith(".3mf") else f"{name}.3mf"
 
 
-def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict) -> tuple[bytes, list[dict]]:
-    """Blocking: the copy's bytes and the changes applied (HTTP errors for what can't be saved)."""
+def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path) -> list[dict]:
+    """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
         zf = project.open_archive(data)
         cfg = project.read_settings(zf)
@@ -136,11 +142,29 @@ def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict) -> tuple[byte
         new_cfg, applied = ws_settings.apply_changes(cfg, changes)
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
-        return project.write_copy(data, new_cfg), applied
+        project.write_copy(data, new_cfg, dest)
+        return applied
     except ws_settings.InvalidChange as exc:
         raise HTTPException(status_code=422, detail=f"Some values were refused: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
+
+
+def _publish(tmp: Path) -> tuple[Path, str, dict | None, str | None]:
+    """Blocking: the checked copy under its library name, its hash, metadata and thumbnail (as an upload has)."""
+    path = tmp.with_name(f"{uuid.uuid4().hex}.3mf")
+    os.replace(tmp, path)  # a reader never sees half a file
+    metadata = thumbnail = None
+    try:
+        raw = lib.ThreeMFParser(str(path)).parse()
+        if raw.get("_thumbnail_data"):
+            thumb = lib.get_library_thumbnails_dir() / f"{uuid.uuid4().hex}{raw.get('_thumbnail_ext', '.png')}"
+            thumb.write_bytes(raw["_thumbnail_data"])
+            thumbnail = lib.to_relative_path(thumb)
+        metadata = lib._without_print_name(lib._clean_3mf_metadata(raw) or None)
+    except Exception as exc:  # metadata is optional, as for an upload
+        logger.warning("Workspace copy %s: metadata not read: %s", path.name, exc)
+    return path, lib.calculate_file_hash(path), metadata, thumbnail
 
 
 @router.post("/files/{file_id}/copy")
@@ -154,37 +178,55 @@ async def save_copy(
 
     Refused (409) when the file changed since ``base_sha256`` was read. The copy goes to the
     original's folder when that is an internal one, else to the library root: never next to a NAS
-    original, where library sync would take it for a farm project.
+    original, where library sync would take it for a farm project. One copy is built at a time
+    (the source is held in memory), off the event loop; the file and its library row (with the
+    ``workspace`` lineage) appear together, and nothing is left behind when either fails.
     """
     if len(body.changes) > MAX_CHANGES:
         raise HTTPException(status_code=422, detail=f"Too many changes at once (at most {MAX_CHANGES})")
     lib_file = await _library_3mf(db, file_id)
     filename = _copy_name(lib_file.filename, body.filename)
-    data, sha = await _read(lib_file)
-    if sha != body.base_sha256:
-        raise HTTPException(status_code=409, detail="The file changed since it was opened: reload it, then edit again")
-    copy, applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes)
-
     folder = await db.get(LibraryFolder, lib_file.folder_id) if lib_file.folder_id else None
-    saved, _ = await lib.save_3mf_bytes_to_library(
-        db,
-        file_bytes=copy,
-        filename=filename,
-        folder_id=folder.id if folder is not None and not folder.is_external else None,
-        source_type="3mf_workspace",
-        owner_id=user.id if user else None,
-    )
-    source_info = (lib_file.file_metadata or {}).get("workspace") or {}
-    saved.file_metadata = {
-        **(saved.file_metadata or {}),
-        "workspace": {
-            "copy_of_library_file_id": lib_file.id,
-            "copy_of_filename": lib_file.filename,
-            "original_library_file_id": source_info.get("original_library_file_id", lib_file.id),
-            "source_sha256": sha,
-            "saved_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "changes": applied,
-        },
-    }
-    await db.commit()
+    tmp = lib.get_library_files_dir() / f".{uuid.uuid4().hex}.3mf.part"
+    path = thumbnail = None
+    async with _one_build:
+        data, sha = await _read(lib_file)
+        if sha != body.base_sha256:
+            raise HTTPException(
+                status_code=409, detail="The file changed since it was opened: reload it, then edit again"
+            )
+        try:
+            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp)
+            del data
+            path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
+            source_info = (lib_file.file_metadata or {}).get("workspace") or {}
+            saved = LibraryFile(
+                folder_id=folder.id if folder is not None and not folder.is_external else None,
+                filename=filename,
+                file_path=lib.to_relative_path(path),
+                file_type="3mf",
+                file_size=path.stat().st_size,
+                file_hash=file_hash,
+                thumbnail_path=thumbnail,
+                source_type="3mf_workspace",
+                created_by_id=user.id if user else None,
+                file_metadata={
+                    **(metadata or {}),
+                    "workspace": {
+                        "copy_of_library_file_id": lib_file.id,
+                        "copy_of_filename": lib_file.filename,
+                        "original_library_file_id": source_info.get("original_library_file_id", lib_file.id),
+                        "source_sha256": sha,
+                        "saved_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                        "changes": applied,
+                    },
+                },
+            )
+            db.add(saved)
+            await db.commit()
+        except BaseException:
+            for leftover in (tmp, path, lib.to_absolute_path(thumbnail)):
+                if leftover is not None:
+                    leftover.unlink(missing_ok=True)
+            raise
     return {"library_file_id": saved.id, "filename": saved.filename, "folder_id": saved.folder_id, "changes": applied}

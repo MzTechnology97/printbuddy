@@ -17,7 +17,7 @@ import json
 import shutil
 import zipfile
 import zlib
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import defusedxml.ElementTree as SafeET
 from defusedxml import DefusedXmlException
@@ -33,7 +33,7 @@ from backend.app.farm.detect import (
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
 
-MAX_ARCHIVE_BYTES = 256 * 1024 * 1024  # the copy is built in memory
+MAX_ARCHIVE_BYTES = 128 * 1024 * 1024  # the source is read whole; farm 3MFs are well under 50 MB
 MAX_ENTRIES = 10_000
 MAX_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RATIO = 200  # inflation of one big entry beyond this is a ZIP bomb, not a mesh
@@ -51,18 +51,23 @@ class ArchiveError(Exception):
     """The file is not a 3MF the workspace can read safely (the message says why)."""
 
 
+# What a damaged entry raises while it is read: bad CRC or header, truncated deflate, encrypted, unknown method.
+_ENTRY_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError)
+
+
 def _safe_name(name: str) -> bool:
     if not name or "\\" in name or "\x00" in name or name.startswith("/") or ":" in name.split("/")[0]:
         return False
     return ".." not in PurePosixPath(name).parts
 
 
-def open_archive(data: bytes) -> zipfile.ZipFile:
-    """The archive, after the size, entry and path checks (``ArchiveError`` otherwise)."""
-    if len(data) > MAX_ARCHIVE_BYTES:
+def open_archive(data: bytes | Path) -> zipfile.ZipFile:
+    """The archive (bytes, or a file), after the size, entry and path checks (``ArchiveError`` otherwise)."""
+    size = data.stat().st_size if isinstance(data, Path) else len(data)
+    if size > MAX_ARCHIVE_BYTES:
         raise ArchiveError(f"the file is larger than {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB")
     try:
-        zf = zipfile.ZipFile(io.BytesIO(data))
+        zf = zipfile.ZipFile(data if isinstance(data, Path) else io.BytesIO(data))
         infos = zf.infolist()
     except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, ValueError) as exc:
         raise ArchiveError(f"not a valid 3MF (zip) archive: {exc}") from exc
@@ -95,7 +100,7 @@ def _read_small(zf: zipfile.ZipFile, name: str) -> bytes | None:
         raise ArchiveError(f"{name} is too large")
     try:
         return zf.read(info)
-    except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+    except _ENTRY_ERRORS as exc:
         raise ArchiveError(f"{name} cannot be read: {exc}") from exc
 
 
@@ -188,37 +193,38 @@ def classify(filename: str, zf: zipfile.ZipFile, settings: dict | None) -> tuple
     return kind, slicer, meta.get("Application") or None
 
 
-def write_copy(data: bytes, settings: dict) -> bytes:
-    """The archive with ``project_settings.config`` replaced by ``settings``; every other entry unchanged."""
+def write_copy(data: bytes, settings: dict, dest: Path) -> None:
+    """Write to ``dest`` the archive with ``project_settings.config`` replaced by ``settings``, every other
+    entry unchanged, and check it reads back. ``ArchiveError`` for a damaged entry; ``dest`` is then partial."""
     zin = open_archive(data)
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w") as zout:
-        for info in zin.infolist():
-            if info.filename == PROJECT_SETTINGS_ENTRY:
-                zout.writestr(info, json.dumps(settings, indent=4, ensure_ascii=False).encode("utf-8"))
-            elif info.is_dir():
-                zout.writestr(info, b"")
-            else:
-                with (
-                    zin.open(info) as src,
-                    zout.open(info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as dst,
-                ):
-                    shutil.copyfileobj(src, dst, _COPY_CHUNK)
-    copy = out.getvalue()
-    _check_copy(zin, copy, settings)
-    return copy
+    try:
+        with zipfile.ZipFile(dest, "w") as zout:
+            for info in zin.infolist():
+                if info.filename == PROJECT_SETTINGS_ENTRY:
+                    zout.writestr(info, json.dumps(settings, indent=4, ensure_ascii=False).encode("utf-8"))
+                elif info.is_dir():
+                    zout.writestr(info, b"")
+                else:
+                    with (
+                        zin.open(info) as src,
+                        zout.open(info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as dst,
+                    ):
+                        shutil.copyfileobj(src, dst, _COPY_CHUNK)
+        _check_copy(zin, dest, settings)
+    except _ENTRY_ERRORS as exc:
+        raise ArchiveError(f"an entry of the archive cannot be read: {exc}") from exc
 
 
-def _check_copy(original: zipfile.ZipFile, copy: bytes, settings: dict) -> None:
+def _check_copy(original: zipfile.ZipFile, copy: Path, settings: dict) -> None:
     """The copy reads back: same entries in the same order, same bytes (CRC) but the settings, which parse."""
-    zc = open_archive(copy)
-    if zc.testzip() is not None:
-        raise ArchiveError("the copy failed its integrity check")
-    before, after = original.infolist(), zc.infolist()
-    if [i.filename for i in before] != [i.filename for i in after]:
-        raise ArchiveError("the copy does not hold the same entries")
-    for a, b in zip(before, after, strict=True):
-        if a.filename != PROJECT_SETTINGS_ENTRY and (a.CRC, a.file_size) != (b.CRC, b.file_size):
-            raise ArchiveError(f"{a.filename} changed in the copy")
-    if read_settings(zc) != settings:
-        raise ArchiveError("the settings of the copy do not read back")
+    with open_archive(copy) as zc:
+        if zc.testzip() is not None:
+            raise ArchiveError("the copy failed its integrity check")
+        before, after = original.infolist(), zc.infolist()
+        if [i.filename for i in before] != [i.filename for i in after]:
+            raise ArchiveError("the copy does not hold the same entries")
+        for a, b in zip(before, after, strict=True):
+            if a.filename != PROJECT_SETTINGS_ENTRY and (a.CRC, a.file_size) != (b.CRC, b.file_size):
+                raise ArchiveError(f"{a.filename} changed in the copy")
+        if read_settings(zc) != settings:
+            raise ArchiveError("the settings of the copy do not read back")

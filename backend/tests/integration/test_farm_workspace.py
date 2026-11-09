@@ -14,6 +14,7 @@ import json
 import os
 import time
 import zipfile
+from datetime import datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -31,6 +32,17 @@ HEADERS = {
 }
 NS = 'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"'
 PROD_NS = 'xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"'
+
+
+def _png() -> bytes:
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (8, 8), "#808080").save(out, "PNG")
+    return out.getvalue()
+
+
+PNG = _png()  # a real plate picture: the Klipper G-code embeds it
 CUBE_FACES = (
     (0, 6, 4),
     (1, 5, 7),
@@ -137,8 +149,8 @@ def make_project(
         if model_settings:
             zf.writestr(project.MODEL_SETTINGS_ENTRY, model_settings)
         zf.writestr("Metadata/slice_info.config", '<?xml version="1.0"?><config><header/></config>')
-        zf.writestr("Metadata/plate_1.png", b"\x89PNG fake plate 1")
-        zf.writestr("Metadata/plate_2.png", b"\x89PNG fake plate 2")
+        zf.writestr("Metadata/plate_1.png", PNG)
+        zf.writestr("Metadata/plate_2.png", PNG)
         zf.writestr("Metadata/custom_vendor_data.xml", "<unknown>kept</unknown>")
         for name, data in (extra or {}).items():
             zf.writestr(name, data)
@@ -404,6 +416,32 @@ class TestSaveCopy:
         assert again["copy_of"]["copy_of_filename"] == "cubes.3mf"
         assert len(again["plates"]) == 2
 
+    @pytest.mark.parametrize("damage", ["crc", "encrypted"])
+    async def test_a_damaged_entry_is_refused_and_leaves_nothing(
+        self, async_client, db_session, damage, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(library, "get_library_files_dir", lambda: tmp_path)  # its own: workers share the real one
+        data = bytearray(make_project())
+        name = "3D/Objects/object_1.model"  # read only when the copy is written
+        with zipfile.ZipFile(io.BytesIO(bytes(data))) as zf:
+            local = zf.getinfo(name).header_offset
+        central = bytes(data).index(name.encode(), bytes(data).index(b"PK\x01\x02")) - 46
+        if damage == "crc":
+            data[local + 14] ^= 0xFF  # the data no longer matches its CRC (local and central header)
+            data[central + 16] ^= 0xFF
+        else:
+            data[local + 6] |= 0x01  # "encrypted" flag (local and central header)
+            data[central + 8] |= 0x01
+        f = await add_file(db_session, bytes(data))
+        files_dir = library.get_library_files_dir()
+        before = sorted(p.name for p in files_dir.iterdir())
+        doc = await open_ws(async_client, f.id)  # the settings read fine: the damage shows when copying
+        resp = await save(async_client, doc, {"layer_height": "0.1"})
+        assert resp.status_code == 422, resp.text
+        assert "Cannot save a copy" in resp.json()["detail"]
+        assert sorted(p.name for p in files_dir.iterdir()) == before  # no .part, no half copy
+        assert await library_count(db_session) == 1
+
     async def test_copy_of_a_copy_keeps_the_original(self, async_client, db_session):
         f = await add_file(db_session, make_project())
         first = (await save(async_client, await open_ws(async_client, f.id), {"wall_loops": "4"})).json()
@@ -483,17 +521,14 @@ class TestFarm:
         monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
         return calls
 
-    async def test_copy_is_sliced_with_its_own_settings(self, async_client, db_session, sidecar):
+    async def _slice_copy(self, async_client, db_session, plate: int) -> tuple[int, LibraryFile]:
+        """Save a copy of a Bambu project with one change and slice it through the farm route."""
         from backend.app.services.slice_dispatch import slice_dispatch
 
         f = await add_file(db_session, make_project("bambu"))
         saved = await save(async_client, await open_ws(async_client, f.id), {"layer_height": "0.1"})
         copy_id = saved.json()["library_file_id"]
-        info = await async_client.get(f"/api/v1/farm/library/files/{copy_id}/project")
-        assert info.status_code == 200, info.text
-        assert has(info.json(), slicer="bambu_studio", sliceable=True, printer_preset="Test Printer 0.4 nozzle")
-
-        job = await async_client.post(f"/api/v1/farm/library/files/{copy_id}/slice", json={"plate": 2})
+        job = await async_client.post(f"/api/v1/farm/library/files/{copy_id}/slice", json={"plate": plate})
         assert job.status_code == 202, job.text
         for _ in range(200):
             state = slice_dispatch.get(job.json()["job_id"])
@@ -502,17 +537,53 @@ class TestFarm:
             await asyncio.sleep(0.05)
         slice_dispatch._jobs.pop(job.json()["job_id"], None)  # global: later tests count jobs by file id
         assert state.status == "completed", state.error_detail
+        return copy_id, await db_session.get(LibraryFile, state.result["library_file_id"])
+
+    async def test_copy_is_sliced_with_its_own_settings(self, async_client, db_session, sidecar):
+        copy_id, out = await self._slice_copy(async_client, db_session, plate=2)
+        info = await async_client.get(f"/api/v1/farm/library/files/{copy_id}/project")
+        assert info.status_code == 200, info.text
+        assert has(info.json(), slicer="bambu_studio", sliceable=True, printer_preset="Test Printer 0.4 nozzle")
         assert sidecar[0]["url"] == library.app_settings.bambu_studio_api_url.rstrip("/")
         assert sidecar[0]["plate"] == 2
         sent = json.loads(entries(sidecar[0]["model_bytes"])[project.PROJECT_SETTINGS_ENTRY])
         assert sent["layer_height"] == "0.1"  # the copy's settings went to the slicer
-        out = await db_session.get(LibraryFile, state.result["library_file_id"])
         assert out.file_metadata["sliced_from_library_file_id"] == copy_id
         assert out.filename.endswith(" - plate 2.gcode.3mf")
         # No farm state was stored for the copy: it is not a farm project.
         assert (
             await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == copy_id)) is None
         )
+
+    @pytest.mark.parametrize("klipper", [False, True])
+    async def test_a_sliced_copy_prints_from_the_queue(
+        self, async_client, db_session, test_engine, printer_factory, sidecar, klipper
+    ):
+        """The queue's slice check has no farm version for a copy: the item starts, it is never failed."""
+        from backend.app.farm.jobs import service as jobs
+        from backend.app.models.print_queue import PrintQueueItem
+        from backend.tests.integration.test_farm_stale_slice import queue_check
+
+        copy_id, out = await self._slice_copy(async_client, db_session, plate=1)
+        sent = out
+        if klipper:  # Moonraker gets the plate's G-code taken out of the output
+            sent = await jobs.gcode_for_klipper(db_session, out, library.to_absolute_path(out.file_path), 1)
+            await db_session.commit()
+            assert sent.file_metadata["sliced_from_library_file_id"] == copy_id
+        printer = await printer_factory(name="P", model="A1")
+        item = PrintQueueItem(printer_id=printer.id, library_file_id=sent.id, position=1, status="pending")
+        db_session.add(item)
+        await db_session.commit()
+
+        assert await jobs.stale_slice_reason(db_session, item) is None
+        assert await queue_check(test_engine) == [(item.id, sent.id)]
+        await db_session.refresh(item)
+        assert item.status == "pending" and item.waiting_reason is None  # not failed (_start_print is stubbed)
+        # The copy moved to the trash: the output still prints as sliced, it has no farm version to wait for.
+        copy_row = await db_session.get(LibraryFile, copy_id)
+        copy_row.deleted_at = datetime(2026, 11, 9)
+        await db_session.commit()
+        assert await jobs.stale_slice_reason(db_session, item) is None
 
     async def test_saving_a_copy_of_a_farm_project_changes_nothing_of_the_farm(
         self, async_client, db_session, tmp_path, monkeypatch, sidecar
