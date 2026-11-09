@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
+from backend.app.services.kprofile_drift import KProfileDriftGuard
 from backend.app.utils.paho_teardown import retire_paho_client
 
 logger = logging.getLogger(__name__)
@@ -378,6 +379,8 @@ class BambuMQTTClient:
         self._previous_dry_times: dict[int, int] = {}
 
         self.state = PrinterState()
+        # Puts a slot's K-profile back when a restarted printer lost it (upstream #3219).
+        self._kprofile_drift = KProfileDriftGuard(serial_number)
         self._client: mqtt.Client | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._previous_gcode_state: str | None = None
@@ -635,6 +638,7 @@ class BambuMQTTClient:
             self._dev_mode_probe_time = 0.0
             self._dev_mode_probe_failures = 0
             self._connect_time = time.monotonic()
+            self._kprofile_drift.session_started()
             self._report_messages_since_connect = 0
             self._last_ams_cmd_time = 0.0
             self._ams_cmd_unanswered = 0
@@ -1003,10 +1007,21 @@ class BambuMQTTClient:
                 elif cmd == "ams_filament_setting":
                     self._last_ams_cmd_time = 0.0
                     self._ams_cmd_unanswered = 0
-            if "command" in print_data and print_data.get("command") == "extrusion_cali_get":
+            command = print_data.get("command")
+            if command == "extrusion_cali_get":
                 self._handle_kprofile_response(print_data)
 
-            self._update_state(print_data)
+            # K-profile command responses echo the *requested* nozzle_diameter
+            # (get_kprofiles probes 0.2/0.4/0.6/0.8 in turn), not the installed
+            # nozzle; feeding them to _update_state overwrote the real size and
+            # tripped the nozzle-mismatch dispatch guard (upstream #2663). They
+            # carry no status telemetry, so only real status pushes update state.
+            if not (isinstance(command, str) and command.startswith("extrusion_cali")):
+                self._update_state(print_data)
+                try:
+                    self._kprofile_drift.observe(self.state, self.extrusion_cali_sel)
+                except Exception:
+                    logger.exception("[%s] K-profile restore check failed", self.serial_number)
 
     def _handle_system_response(self, data: dict):
         """Handle system responses including accessories info.
@@ -4995,6 +5010,9 @@ class BambuMQTTClient:
         if not self._client or not self.state.connected:
             logger.warning("[%s] Cannot set calibration: not connected", self.serial_number)
             return False
+        if cali_idx < 0:
+            # A Default pick is deliberate: never restore the old profile over it.
+            self._kprofile_drift.forget_slot(ams_id, tray_id)
 
         # Calculate mqtt IDs based on AMS type.
         # IMPORTANT: extrusion_cali_sel uses GLOBAL tray_id (unlike ams_filament_setting
