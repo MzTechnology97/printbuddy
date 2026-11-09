@@ -2,13 +2,12 @@
 // objects (with the settings they slice with on their own, read only), then the process settings by tab.
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Boxes, ChevronDown, ChevronRight, Printer, SlidersHorizontal, Spline } from 'lucide-react';
+import { Boxes, ChevronDown, ChevronRight } from 'lucide-react';
 import type { SettingValue, WorkspaceDocument, WorkspaceObject, WorkspaceSetting } from './api';
 import type { Draft } from './draft';
+import { type OrcaLayout, orcaIcon } from './orcaLayout';
 import { SettingsPanel } from './SettingsPanel';
 import '../i18n';
-
-const PROCESS_TABS = ['quality', 'strength', 'speed', 'support', 'multimaterial', 'others'];
 
 function values(doc: WorkspaceDocument, key: string): string[] {
   const value = doc.settings.find((s) => s.key === key)?.value;
@@ -46,7 +45,7 @@ function EditButton({ label, onClick }: { label: string; onClick: () => void }) 
       aria-label={label}
       className="p-1 rounded text-bambu-gray hover:text-white hover:bg-bambu-dark-tertiary normal-case"
     >
-      <SlidersHorizontal className="w-3.5 h-3.5" />
+      <img src={orcaIcon('edit')} alt="" className="w-3.5 h-3.5" aria-hidden />
     </button>
   );
 }
@@ -105,6 +104,7 @@ function ObjectRow({ obj, colours }: { obj: WorkspaceObject; colours: string[] }
 }
 
 interface Props {
+  layout: OrcaLayout;
   doc: WorkspaceDocument;
   presets: { printer: string | null; process: string | null };
   selectedPlate: number | null;
@@ -114,7 +114,7 @@ interface Props {
   onEditPreset: (kind: 'printer' | 'filament') => void;
 }
 
-export function Sidebar({ doc, presets, selectedPlate, draft, onChange, onReset, onEditPreset }: Props) {
+export function Sidebar({ layout, doc, presets, selectedPlate, draft, onChange, onReset, onEditPreset }: Props) {
   const { t } = useTranslation();
   const [simple, setSimple] = useState(true);
   const colours = values(doc, 'filament_colour');
@@ -133,7 +133,7 @@ export function Sidebar({ doc, presets, selectedPlate, draft, onChange, onReset,
     <div className="flex flex-col h-full min-h-0 overflow-y-auto lg:overflow-visible">
       <Section
         title={t('farm.workspace.printer')}
-        icon={<Printer className="w-3.5 h-3.5" />}
+        icon={<img src={orcaIcon('printer')} alt="" className="w-4 h-4" aria-hidden />}
         action={
           hasSettings && (
             <EditButton
@@ -162,7 +162,7 @@ export function Sidebar({ doc, presets, selectedPlate, draft, onChange, onReset,
 
       <Section
         title={t('farm.workspace.filaments')}
-        icon={<Spline className="w-3.5 h-3.5" />}
+        icon={<img src={orcaIcon('filament')} alt="" className="w-4 h-4" aria-hidden />}
         action={
           hasSettings && (
             <EditButton
@@ -226,7 +226,8 @@ export function Sidebar({ doc, presets, selectedPlate, draft, onChange, onReset,
           <div className="flex-1 min-h-[32rem] lg:min-h-0">
             <SettingsPanel
               settings={doc.settings}
-              tabs={PROCESS_TABS}
+              layout={layout}
+              section="process"
               draft={draft}
               editable={doc.editable}
               onChange={onChange}

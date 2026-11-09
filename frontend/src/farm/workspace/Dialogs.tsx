@@ -6,6 +6,7 @@ import { Loader2, Save, X } from 'lucide-react';
 import { Button } from '../../components/Button';
 import type { SettingValue, WorkspaceSetting } from './api';
 import { type Draft, formatValue } from './draft';
+import type { OrcaLayout } from './orcaLayout';
 import { SettingsPanel } from './SettingsPanel';
 import '../i18n';
 
@@ -90,6 +91,7 @@ export function SaveCopyDialog({ filename, draft, settings, invalid, saving, err
 }
 
 interface PresetProps {
+  layout: OrcaLayout;
   kind: 'printer' | 'filament';
   name: string | null;
   settings: WorkspaceSetting[];
@@ -100,7 +102,7 @@ interface PresetProps {
   onClose: () => void;
 }
 
-export function PresetDialog({ kind, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
+export function PresetDialog({ layout, kind, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
   const { t } = useTranslation();
   const title = t(`farm.workspace.tabs.${kind}`) + (name ? ` · ${name}` : '');
   return (
@@ -108,7 +110,8 @@ export function PresetDialog({ kind, name, settings, draft, editable, onChange, 
       <div className="h-[60vh] min-h-0">
         <SettingsPanel
           settings={settings}
-          tabs={[kind]}
+          layout={layout}
+          section={kind}
           draft={draft}
           editable={editable}
           onChange={onChange}

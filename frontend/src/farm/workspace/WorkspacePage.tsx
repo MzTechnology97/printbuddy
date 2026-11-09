@@ -17,6 +17,7 @@ import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog } from './Dialogs';
 import { useSettingsDraft } from './draft';
+import { type OrcaLayout, loadOrcaLayout } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
 import { GizmoToolbar, PlateBar } from './Viewport';
@@ -36,6 +37,17 @@ function bedOf(doc: WorkspaceDocument): { x: number; y: number; z: number } | un
   return { x: Math.max(...corners.map((c) => c[0])), y: Math.max(...corners.map((c) => c[1])), z };
 }
 const SLICER_NAMES: Record<string, string> = { orcaslicer: 'OrcaSlicer', bambu_studio: 'Bambu Studio' };
+// OrcaSlicer's dark theme (src/slic3r/GUI/Widgets/StateColor.cpp, v2.5.0), on Printbuddy's colour tokens
+const SLICER_DARK = {
+  '--color-bambu-dark': '#242428',
+  '--color-bambu-dark-secondary': '#2D2D31',
+  '--color-bambu-dark-tertiary': '#3E3E45',
+  '--color-bambu-gray': '#909090',
+  '--color-bambu-gray-light': '#B2B3B5',
+  '--color-bambu-green': '#009688',
+  '--color-bambu-green-light': '#26A69A',
+  '--color-bambu-green-dark': '#00675B',
+} as React.CSSProperties;
 
 export function WorkspacePage() {
   const { id } = useParams();
@@ -47,7 +59,8 @@ export function WorkspacePage() {
     enabled: Number.isFinite(fileId),
     retry: false,
   });
-  if (docQuery.isLoading) {
+  const layoutQuery = useQuery({ queryKey: ['orcaLayout'], queryFn: loadOrcaLayout, staleTime: Infinity });
+  if (docQuery.isLoading || layoutQuery.isLoading) {
     return (
       <div className="h-screen flex items-center justify-center gap-2 bg-bambu-dark text-bambu-gray">
         <Loader2 className="w-5 h-5 animate-spin" /> {t('farm.workspace.loading')}
@@ -65,11 +78,12 @@ export function WorkspacePage() {
       </div>
     );
   }
+  if (!layoutQuery.data) return null; // a static asset of this build: it is there
   // keyed by file: opening the saved copy starts with no changes
-  return <Workspace key={docQuery.data.file.id} doc={docQuery.data} />;
+  return <Workspace key={docQuery.data.file.id} doc={docQuery.data} layout={layoutQuery.data} />;
 }
 
-function Workspace({ doc }: { doc: WorkspaceDocument }) {
+function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -164,7 +178,7 @@ function Workspace({ doc }: { doc: WorkspaceDocument }) {
       : api.downloadLibraryFile(fileId, doc.file.filename);
 
   return (
-    <div className="h-screen flex flex-col bg-bambu-dark text-white">
+    <div className="h-screen flex flex-col bg-bambu-dark text-white" style={SLICER_DARK}>
       {/* Top bar, as the clients: the file, Prepare / Preview, then save, slice, print, export */}
       <header className="flex flex-wrap items-center gap-2 px-3 py-2 bg-bambu-dark-secondary border-b border-bambu-dark-tertiary">
         <div className="flex items-center gap-2 min-w-0 w-full sm:w-auto sm:flex-1">
@@ -258,6 +272,7 @@ function Workspace({ doc }: { doc: WorkspaceDocument }) {
           className={`${pane === 'settings' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-[24rem] flex-shrink-0 border-r border-bambu-dark-tertiary bg-bambu-dark-secondary min-h-0`}
         >
           <Sidebar
+            layout={layout}
             doc={doc}
             presets={presets}
             selectedPlate={selectedPlate}
@@ -313,6 +328,7 @@ function Workspace({ doc }: { doc: WorkspaceDocument }) {
       )}
       {preset && (
         <PresetDialog
+          layout={layout}
           kind={preset}
           name={preset === 'printer' ? presets.printer : null}
           settings={doc.settings}

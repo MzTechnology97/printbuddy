@@ -2,17 +2,19 @@
 // yet: geometry edits come with a verified 3MF writer, see docs/plans/3mf-workspace.md) and the numbered
 // plate bar below.
 import { useTranslation } from 'react-i18next';
-import { Move, RotateCw, Scaling, Scissors, Paintbrush } from 'lucide-react';
 import { api } from '../../api/client';
 import type { WorkspacePlate } from './api';
+import { orcaIcon } from './orcaLayout';
 import '../i18n';
 
+// OrcaSlicer's object tools, with its own icons (orca-assets/icons)
 const TOOLS = [
-  { key: 'move', icon: Move },
-  { key: 'rotate', icon: RotateCw },
-  { key: 'scale', icon: Scaling },
-  { key: 'cut', icon: Scissors },
-  { key: 'paint', icon: Paintbrush },
+  { key: 'move', icon: 'toolbar_move_dark' },
+  { key: 'rotate', icon: 'toolbar_rotate_dark' },
+  { key: 'scale', icon: 'toolbar_scale_dark' },
+  { key: 'cut', icon: 'toolbar_cut_dark' },
+  { key: 'support', icon: 'toolbar_support_dark' },
+  { key: 'seam', icon: 'toolbar_seam_dark' },
 ] as const;
 
 export function GizmoToolbar() {
@@ -24,13 +26,13 @@ export function GizmoToolbar() {
       role="toolbar"
       aria-label={t('farm.workspace.gizmos.title')}
     >
-      {TOOLS.map(({ key, icon: Icon }) => {
+      {TOOLS.map(({ key, icon }) => {
         const label = `${t(`farm.workspace.gizmos.${key}`)}: ${soon}`;
         return (
           // a disabled button gets no hover: the wrapper carries the tooltip
           <span key={key} title={label}>
-            <button disabled aria-label={label} className="p-2 rounded text-bambu-gray opacity-50 cursor-not-allowed">
-              <Icon className="w-4 h-4" />
+            <button disabled aria-label={label} className="p-1.5 rounded opacity-70 cursor-not-allowed">
+              <img src={orcaIcon(icon)} alt="" className="w-6 h-6" aria-hidden />
             </button>
           </span>
         );

@@ -224,12 +224,6 @@ class TestOpen:
         f = await add_file(db_session, make_project())
         s = settings_by_key(await open_ws(async_client, f.id))
         assert has(s["layer_height"], tab="quality", type="float", unit="mm", value="0.2", editable=True)
-        # OrcaSlicer's Simple / Advanced mode (backend/app/data/slicer_simple_fields.json)
-        assert (s["layer_height"]["mode"], s["wall_loops"]["mode"], s["outer_wall_speed"]["mode"]) == (
-            "simple",
-            "simple",
-            "advanced",
-        )
         assert ws.catalogue()["prime_tower_enable"]["tab"] == "multimaterial"
         assert has(s["wall_loops"], tab="strength", type="int", differs_from_system=True)
         assert s["layer_height"]["differs_from_system"] is False  # same as the system preset

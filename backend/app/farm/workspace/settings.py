@@ -16,7 +16,6 @@ stays a percentage, ``1``/``0`` booleans stay so, ``nil`` (inherit) is never wri
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from functools import cache
@@ -58,20 +57,14 @@ _FLOAT_RE = re.compile(r"^-?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$")
 
 
 @cache
-def _simple_keys() -> frozenset[str]:
-    """The keys OrcaSlicer shows in its Simple mode (``backend/app/data/slicer_simple_fields.json``)."""
-    from backend.app.api.routes.cloud import FIELDS_DATA_DIR
-
-    with open(FIELDS_DATA_DIR / "slicer_simple_fields.json", encoding="utf-8") as fh:
-        return frozenset(json.load(fh)["simple"])
-
-
-@cache
 def catalogue() -> dict[str, dict]:
-    """Every schema field by key, with its section, tab, value type and slicer mode (simple / advanced)."""
+    """Every schema field by key, with its section, tab and value type.
+
+    The slicer's own layout, labels and Simple / Advanced mode come to the browser from OrcaSlicer
+    (``frontend/src/farm/workspace/orca-assets``); these tabs are the fallback for keys it doesn't list.
+    """
     from backend.app.api.routes.cloud import _load_fields
 
-    simple = _simple_keys()
     fields: dict[str, dict] = {}
     for section in SECTIONS:
         for raw in _load_fields(section)["fields"]:
@@ -97,7 +90,6 @@ def catalogue() -> dict[str, dict]:
                 "max": field.get("max"),
                 "step": field.get("step"),
                 "options": field.get("options"),
-                "mode": "simple" if field["key"] in simple else "advanced",
             }
     return fields
 
