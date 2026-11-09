@@ -37,7 +37,7 @@ export interface WorkspaceSetting {
   /** unknown (the slicer doesn't define it), identity (preset / printer identity), slicer (read only in the
    * slicer too), project (project data the slicer keeps itself), format (doesn't read as its type, or only
    * inherited), absent (the slicer shows it but the file doesn't hold it: the system preset's value applies) */
-  readonly_reason: 'unknown' | 'identity' | 'slicer' | 'project' | 'format' | 'absent' | null;
+  readonly_reason: 'unknown' | 'identity' | 'hardware' | 'slicer' | 'project' | 'format' | 'absent' | null;
   /** Against the system preset: true = changed, false = the preset's value, null = the file doesn't say. */
   differs_from_system: boolean | null;
   overrides: SettingOverride[];

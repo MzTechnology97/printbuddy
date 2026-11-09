@@ -576,6 +576,7 @@ const en = {
     readonly: {
       unknown: 'Not an option of this slicer version: shown as it is, read only.',
       identity: 'Preset or printer identity: read only.',
+      hardware: "Printer hardware: change the printer profile in the slicer (a copy stays in its printer's queue).",
       slicer: 'Read only in the slicer too.',
       project: 'Project data the slicer keeps itself (plate type, flushing volumes, prime tower position): read only.',
       format: 'The saved value does not read as this type (or is only inherited): read only.',
@@ -1225,6 +1226,7 @@ const it: typeof en = {
     readonly: {
       unknown: 'Non è un\'opzione di questa versione dello slicer: mostrata com\'è, in sola lettura.',
       identity: 'Identità del preset o della stampante: sola lettura.',
+      hardware: 'Hardware della stampante: cambia il profilo stampante nello slicer (la copia resta nella coda di quella stampante).',
       slicer: 'In sola lettura anche nello slicer.',
       project: 'Dati di progetto che lo slicer gestisce da sé (tipo di piatto, volumi di spurgo, posizione della torre): sola lettura.',
       format: 'Il valore salvato non si legge come questo tipo (o è solo ereditato): sola lettura.',

@@ -244,7 +244,9 @@ class TestOpen:
         assert has(s["outer_wall_speed"], value="200", editable=True)
         # text, G-code, material and printer settings change too, as in the client
         assert has(s["machine_start_gcode"], type="string", multiline=True, editable=True)
-        assert has(s["filament_type"], editable=True) and has(s["nozzle_diameter"], editable=True)
+        assert has(s["filament_type"], editable=True)
+        # the printer's hardware: changed with the printer profile, never in a copy queued for that printer
+        assert has(s["nozzle_diameter"], editable=False, readonly_reason="hardware")
         # The object that slices with its own value says so, by object and part.
         assert [(o["object"], o["part"], o["value"]) for o in s["wall_loops"]["overrides"]] == [("Cube B", None, "5")]
         assert [(o["object"], o["part"]) for o in s["sparse_infill_density"]["overrides"]] == [("Cube B", "Cube B")]
@@ -400,10 +402,8 @@ class TestChanges:
         assert "initial_layer_print_height" in cfg["different_settings_to_system"][0].split(";")
 
     def test_per_extruder_and_per_filament_lists(self):
-        cfg, _ = self.apply(
-            {"nozzle_diameter": ["0.6"], "retraction_length": [1.2], "nozzle_temperature": ["220", "250"]}
-        )
-        assert (cfg["nozzle_diameter"], cfg["retraction_length"]) == (["0.6"], ["1.2"])
+        cfg, _ = self.apply({"retraction_length": [1.2], "nozzle_temperature": ["220", "250"]})
+        assert cfg["retraction_length"] == ["1.2"]
         assert cfg["nozzle_temperature"] == ["220", "250"]
         # only the second filament changed: only its section of different_settings_to_system lists it
         assert cfg["different_settings_to_system"][1:3] == ["", "nozzle_temperature"]
@@ -413,6 +413,36 @@ class TestChanges:
         cfg, _ = self.apply({"machine_start_gcode": gcode, "filament_type": ["PLA-CF", "PETG"]})
         assert cfg["machine_start_gcode"] == gcode
         assert cfg["filament_type"] == ["PLA-CF", "PETG"]  # an open list: any material name
+
+    def test_printer_hardware_stays_the_printer_profiles(self):
+        cfg = project_settings(
+            printable_area=["0x0", "256x0", "256x256", "0x256"], gcode_flavor="klipper", printer_notes=""
+        )
+        for key, value in [
+            ("nozzle_diameter", ["0.6"]),
+            ("printable_area", ["0x0", "300x0", "300x300", "0x300"]),
+            ("gcode_flavor", "marlin2"),
+            ("printer_notes", "BBL"),
+        ]:
+            with pytest.raises(ws.InvalidChange) as info:
+                self.apply({key: value}, cfg)
+            assert info.value.errors[key] == "read only (hardware)"
+        # what the printer does stays editable, as in the client
+        changed, _ = self.apply({"machine_start_gcode": "G28 ; home\nG29", "retraction_length": ["1"]}, cfg)
+        assert changed["machine_start_gcode"] == "G28 ; home\nG29"
+
+    def test_text_keeps_the_slicers_line_breaks_and_a_save_has_a_size_limit(self):
+        cfg, _ = self.apply({"machine_start_gcode": "G28\r\nG1 Z5\r\n"})
+        assert cfg["machine_start_gcode"] == "G28\nG1 Z5\n"
+        with pytest.raises(ws.InvalidChange) as info:
+            self.apply(
+                {"machine_start_gcode": "G28 ;" + "x" * (200 * 1024), "filament_type": ["x" * (1024 * 1024)] * 2}
+            )
+        assert "MB in total" in info.value.errors["changes"]
+
+    def test_numbers_are_written_without_exponent(self):
+        cfg, _ = self.apply({"layer_height": "1e-05", "retraction_length": ["0.00002"]})
+        assert (cfg["layer_height"], cfg["retraction_length"]) == ("0.00001", ["0.00002"])
 
     def test_bambu_projects_use_bambu_studios_options(self):
         bambu = ws.options("bambu_studio")
@@ -476,7 +506,7 @@ class TestSlicerOptions:
         described = ws.describe(cfg, {}, slicer)
         assert {d["key"] for d in described if d["readonly_reason"] == "unknown"} == LEGACY_KEYS[fixture]
         reasons = {d["readonly_reason"] for d in described}
-        assert reasons <= {None, "identity", "slicer", "project", "format", "unknown"}
+        assert reasons <= {None, "identity", "hardware", "slicer", "project", "format", "unknown"}
         editable = [d for d in described if d["editable"]]
         assert len(editable) > 0.8 * len(described) - len(LEGACY_KEYS[fixture])
         # an editable value can be saved back as it is (the check accepts what the slicer wrote)

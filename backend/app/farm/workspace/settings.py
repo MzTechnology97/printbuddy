@@ -70,6 +70,58 @@ IDENTITY = frozenset(
         "printhost_ssl_ignore_revoke",
     }
 )
+# The printer's hardware (nozzle, bed, kinematics, firmware flavour, the fans and enclosure it has, extruders;
+# printer_notes, where the slicers read vendor tags): a copy keeps its printer model and goes to that model's queue,
+# so these change only with the printer profile in the slicer. G-code, speeds, accelerations, retraction stay editable.
+HARDWARE = frozenset(
+    {
+        "nozzle_diameter",
+        "nozzle_type",
+        "nozzle_hrc",
+        "nozzle_volume",
+        "nozzle_height",
+        "nozzle_flush_dataset",
+        "default_nozzle_volume_type",
+        "printer_nozzle_diameter_mode",
+        "extruder_type",
+        "extruder_offset",
+        "extruder_max_nozzle_count",
+        "extruders_count",
+        "extruder_printable_area",
+        "extruder_printable_height",
+        "extruder_bed_exclude_volumes",
+        "extruder_clearance_radius",
+        "extruder_clearance_max_radius",
+        "extruder_clearance_dist_to_rod",
+        "extruder_clearance_height_to_rod",
+        "extruder_clearance_height_to_lid",
+        "single_extruder_multi_material",
+        "printable_area",
+        "printable_height",
+        "bed_exclude_area",
+        "bed_exclude_volumes",
+        "bed_exclude_volume_mode",
+        "bed_custom_texture",
+        "bed_custom_model",
+        "bed_heat_soak_area",
+        "machine_bed_mass_Y",
+        "printer_structure",
+        "printer_technology",
+        "gcode_flavor",
+        "auxiliary_fan",
+        "support_air_filtration",
+        "support_chamber_temp_control",
+        "support_multi_bed_types",
+        "support_parallel_printheads",
+        "parallel_printheads_count",
+        "parallel_printheads_bed_exclude_areas",
+        "belt_printer",
+        "is_imex",
+        "ams_nozzle_idx",
+        "printer_notes",
+    }
+)
+MAX_CHANGES = 2 * 1024 * 1024  # all the values of one save together
 NIL = "nil"  # Orca/Bambu: "not set here, the preset's value applies"
 MAX_TEXT = 256 * 1024  # one text or G-code value; the projects' longest are a few kB
 _INT_RE = re.compile(r"^-?\d+$")
@@ -172,6 +224,8 @@ def readonly_reason(key: str, option: dict | None, value) -> str | None:
         return "unknown"
     if key in IDENTITY:
         return "identity"
+    if key in HARDWARE:
+        return "hardware"
     if option.get("readonly"):
         return "slicer"
     if not option.get("section"):
@@ -260,6 +314,8 @@ class InvalidChange(ValueError):
 
 def _format_number(number: float) -> str:
     text = repr(number)
+    if "e" in text or "E" in text:  # as the slicer's GUI writes it: 0.00001, not 1e-05
+        text = f"{number:.15f}".rstrip("0").rstrip(".")
     return text[:-2] if text.endswith(".0") else text
 
 
@@ -269,7 +325,7 @@ def _normalize(option: dict, new, old: str) -> str:
     if isinstance(new, bool):
         text = "1" if new else "0"
     elif k == "string":
-        text = str(new)  # text keeps its spaces and line breaks
+        text = str(new).replace("\r\n", "\n")  # spaces and line breaks kept; the slicer writes \n
     else:
         text = str(new).strip()
     if text == old:
@@ -300,6 +356,9 @@ def apply_changes(settings: dict, changes: dict, slicer: str = "orcaslicer") -> 
     against the system preset; nothing else is touched.
     """
     known = options(slicer)
+    values = [v for value in changes.values() for v in (value if isinstance(value, list) else [value])]
+    if sum(len(str(v).encode("utf-8")) for v in values) > MAX_CHANGES:
+        raise InvalidChange({"changes": f"larger than {MAX_CHANGES // (1024 * 1024)} MB in total"})
     errors: dict[str, str] = {}
     result = dict(settings)
     applied = []
