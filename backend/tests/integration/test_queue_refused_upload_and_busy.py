@@ -132,9 +132,9 @@ def test_backoff_doubles_up_to_an_hour():
     scheduler = PrintScheduler()
     printer = SimpleNamespace(id=7, name="X1C", model="X1C")
     waits = []
-    for _ in range(6):
+    for n in range(6):  # one item each: the same item would fail at its third refusal
         with patch.object(ps, "farm_job_events"), patch.object(ps, "notification_service"):
-            item = SimpleNamespace(id=1, waiting_reason=None, dispatching_at=None, target_model=None)
+            item = SimpleNamespace(id=n, waiting_reason=None, dispatching_at=None, target_model=None)
             db = MagicMock(commit=AsyncMock())
             asyncio.run(scheduler._hold_after_refused_upload(db, item, printer, "552", technical=[], job_name="j"))
         waits.append(round(scheduler._upload_backoff[7] - time.monotonic()))
@@ -161,6 +161,96 @@ async def test_refused_model_job_goes_back_to_the_pool(db_session, test_engine, 
     # Pending, unassigned, without the slots worked out for A: another A1 can take it.
     assert (item.status, item.printer_id, item.ams_mapping) == ("pending", None, None)
     assert a.id in scheduler.printers_refusing_uploads()
+    refused = item.waiting_reason
+    assert ps.UPLOAD_REFUSED_MARK in refused
+
+    # No free A1 now: the pool's "Busy" does not hide why the job is waiting.
+    with patch.object(scheduler, "_find_idle_printer_for_model", AsyncMock(return_value=(None, "Busy: A1 uno"))):
+        await run_queue(test_engine, scheduler, refusing={a.id})
+    await db_session.refresh(item)
+    assert item.waiting_reason == refused
+
+    # Assigned again after the backoff and refused again: "assigned" is not notified a second time.
+    scheduler._upload_backoff.clear()
+    with patch.object(scheduler, "_find_idle_printer_for_model", AsyncMock(return_value=(a.id, None))):
+        tried, notify = await run_queue(test_engine, scheduler, refusing={a.id})
+    assert tried == [a.id]
+    notify.on_queue_job_assigned.assert_not_awaited()
+    await db_session.refresh(item)
+    assert (item.status, item.printer_id) == ("pending", None)
+
+
+async def refuse(test_engine, scheduler, printer_id, times):
+    """``times`` checks in a row with the printer refusing, each after its backoff ended."""
+    tried, failed = [], 0
+    for _ in range(times):
+        scheduler._upload_backoff.pop(printer_id, None)
+        t, notify = await run_queue(test_engine, scheduler, refusing={printer_id})
+        tried += t
+        failed += notify.on_queue_job_failed.await_count
+    return tried, failed
+
+
+@pytest.mark.asyncio
+async def test_item_refused_three_times_fails_and_the_printer_goes_on(db_session, test_engine, queue):
+    scheduler = PrintScheduler()
+    tried, failed = await refuse(test_engine, scheduler, queue.a.id, ps.UPLOAD_REFUSED_MAX_PER_ITEM)
+    assert tried == [queue.a.id, queue.b.id, queue.a.id, queue.a.id]  # always A's first item
+    assert failed == 1  # notified once, when it failed
+    first = queue.items[0]
+    assert await statuses(db_session, queue.items) == ["failed", "pending", "pending", "printing"]
+    assert first.error_message.startswith("A1 uno refused this file 3 times in a row: ")
+    assert (first.failure_detail["phase"], first.waiting_reason) == ("upload", None)
+    assert not scheduler.printers_refusing_uploads()  # no backoff after the failure
+
+    # The next check sends A's next item at once.
+    tried, _ = await run_queue(test_engine, scheduler)
+    assert tried == [queue.a.id]
+    assert await statuses(db_session, queue.items[:3]) == ["failed", "printing", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_refused_item_ends_the_printer_backoff(db_session, test_engine, queue):
+    scheduler = PrintScheduler()
+    await run_queue(test_engine, scheduler, refusing={queue.a.id})
+    assert queue.a.id in scheduler.printers_refusing_uploads()
+    queue.items[0].status = "cancelled"
+    await db_session.commit()
+
+    tried, _ = await run_queue(test_engine, scheduler)
+    assert tried == [queue.a.id]  # A's next item, without waiting out the backoff
+    assert await statuses(db_session, queue.items[:3]) == ["cancelled", "printing", "pending"]
+    assert not scheduler._item_refusals
+
+
+@pytest.mark.asyncio
+async def test_start_by_hand_retries_a_held_item_now(async_client, db_session, queue, monkeypatch):
+    from backend.app.services.print_scheduler import scheduler
+
+    first = queue.items[0]
+    monkeypatch.setitem(scheduler._upload_backoff, queue.a.id, time.monotonic() + 300)
+    monkeypatch.setitem(scheduler._backoff_item, queue.a.id, first.id)
+    monkeypatch.setitem(scheduler._item_refusals, first.id, 2)
+    r = await async_client.post(f"/api/v1/queue/{first.id}/start", params={"skip_filament_check": True})
+    assert r.status_code == 200, r.text
+    assert queue.a.id not in scheduler.printers_refusing_uploads() and first.id not in scheduler._item_refusals
+
+
+@pytest.mark.asyncio
+async def test_printer_back_online_ends_its_backoff(monkeypatch):
+    from backend.app import main
+    from backend.app.services.print_scheduler import scheduler
+
+    monkeypatch.setattr(main, "_printer_last_connected", {})
+    monkeypatch.setattr(main, "_printer_offline_tasks", {})
+    monkeypatch.setattr(main.printer_manager, "offline_expected", lambda pid: True)  # no alert task here
+    monkeypatch.setitem(scheduler._upload_backoff, 9, time.monotonic() + 300)
+    main._track_printer_offline(9, True)
+    main._track_printer_offline(9, True)  # still connected: nothing changes
+    assert 9 in scheduler.printers_refusing_uploads()
+    main._track_printer_offline(9, False)
+    main._track_printer_offline(9, True)  # back after a disconnect
+    assert 9 not in scheduler.printers_refusing_uploads()
 
 
 # ---------------------------------------------------------------- busy printer (#2598)
@@ -269,6 +359,14 @@ async def test_farm_job_on_a_refusing_printer_stays_queued_and_the_other_starts(
     states = {j["id"]: j["state"] for j in (await async_client.get("/api/v1/farm/jobs")).json()}
     assert "failed" not in states.values()
     notify.on_queue_job_failed.assert_not_awaited()
+
+    # Refused twice more: the farm job fails like any failed queue item, and only that one.
+    _, failed = await refuse(test_engine, scheduler, a1_one, ps.UPLOAD_REFUSED_MAX_PER_ITEM - 1)
+    assert failed == 1
+    states = {j["id"]: j["state"] for j in (await async_client.get("/api/v1/farm/jobs")).json()}
+    by_printer = {(await db_session.get(FarmPrintJob, job["id"])).printer_id: states[job["id"]] for job in jobs}
+    assert by_printer[a1_one] == "failed" and by_printer[a1_two] != "failed"
+    assert a1_one not in scheduler.printers_refusing_uploads()
 
 
 @pytest.mark.asyncio

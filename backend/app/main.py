@@ -1249,6 +1249,8 @@ async def _notify_printer_offline_after_grace(printer_id: int) -> None:
         # Removed or disabled meanwhile (no client): not a printer that went offline.
         if printer_manager.get_client(printer_id) is None or printer_manager.is_connected(printer_id):
             return
+        if printer_manager.offline_expected(printer_id):  # powered off by us after the edge was seen
+            return
         async with async_session() as db:
             from backend.app.models.printer import Printer
 
@@ -1276,6 +1278,11 @@ def _track_printer_offline(printer_id: int, connected: bool) -> None:
         task = _printer_offline_tasks.pop(printer_id, None)
         if task is not None:
             task.cancel()
+        if was_connected is False:  # back: a refused upload is tried again now, a power-off is over
+            print_scheduler.clear_upload_backoff(printer_id)
+            printer_manager.back_online(printer_id)
+    elif printer_manager.offline_expected(printer_id):
+        return  # we powered it off (smart plug auto-off, or after a print): no alert
     elif was_connected and printer_id not in _printer_offline_tasks:
         _printer_offline_tasks[printer_id] = asyncio.create_task(_notify_printer_offline_after_grace(printer_id))
 
@@ -4542,6 +4549,7 @@ async def on_print_complete(printer_id: int, data: dict):
                                     p = result.scalar_one_or_none()
                                     if p and p.enabled:
                                         service = await smart_plug_manager.get_service_for_plug(p, new_db)
+                                        printer_manager.expect_offline(pid)  # no "offline" alert for it
                                         success = await service.turn_off(p)
                                         if success:
                                             logger.info("Powered off printer %s via smart plug '%s'", pid, p.name)

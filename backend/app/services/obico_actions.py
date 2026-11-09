@@ -57,6 +57,9 @@ async def _turn_off_linked_plugs(printer_id: int) -> None:
                 continue
             try:
                 service = await smart_plug_manager.get_service_for_plug(plug, db)
+                from backend.app.services.printer_manager import printer_manager
+
+                printer_manager.expect_offline(printer_id)  # no "offline" alert for it
                 await service.turn_off(plug)
                 logger.info("Obico action: turned off plug %s for printer %s", plug.name, printer_id)
             except Exception as e:

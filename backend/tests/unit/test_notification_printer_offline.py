@@ -22,6 +22,7 @@ def offline(monkeypatch):
     pm = MagicMock()
     pm.get_client.return_value = object()
     pm.is_connected.return_value = False
+    pm.offline_expected.return_value = False
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
@@ -68,6 +69,31 @@ async def test_no_notification_without_a_connected_edge_or_for_a_removed_printer
     main._track_printer_offline(2, False)
     await settle()
     offline.notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_our_own_power_off_sends_no_alert(offline):
+    offline.pm.offline_expected.return_value = True  # smart plug auto-off after a print
+    main._track_printer_offline(1, True)
+    main._track_printer_offline(1, False)
+    await settle()
+    offline.notify.assert_not_awaited()
+
+    # Powered off by us only after the disconnect was seen: still no alert.
+    offline.pm.offline_expected.side_effect = [False, True]
+    main._track_printer_offline(1, True)
+    main._track_printer_offline(1, False)
+    await settle()
+    offline.notify.assert_not_awaited()
+
+
+def test_power_off_marks_the_printer_expected_offline_until_it_is_back():
+    manager = PrinterManager()
+    assert not manager.offline_expected(3)
+    manager.mark_printer_offline(3)  # every smart plug power-off goes through it
+    assert manager.offline_expected(3)
+    manager.back_online(3)
+    assert not manager.offline_expected(3)
 
 
 @pytest.mark.asyncio

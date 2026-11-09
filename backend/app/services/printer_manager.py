@@ -39,6 +39,8 @@ def reported_nozzle_temperatures(temperatures: dict[str, object]) -> tuple[tuple
 # Replacing a client can synchronously wait for its network thread. Keep that
 # teardown bounded so a failed device connection cannot freeze the API loop.
 REPLACEMENT_DISCONNECT_TIMEOUT_SECONDS = 2.0
+# After a power-off we trigger, a disconnect within this long is expected (no "printer offline" alert).
+OFFLINE_EXPECTED_SECONDS = 600.0
 
 # Models that have a real chamber temperature sensor
 # Based on Home Assistant Bambu Lab integration
@@ -193,6 +195,9 @@ class PrinterManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         # In-flight background status polls of HTTP provider printers, by printer id.
         self._provider_polls: dict[int, asyncio.Task] = {}
+        # Printers we powered off ourselves (smart plug): printer_id -> until when the disconnect is expected,
+        # so it sends no "printer offline" alert. Cleared when the printer is back.
+        self._offline_expected: dict[int, float] = {}
         # Track who started the current print (Issue #206)
         self._current_print_user: dict[int, dict] = {}  # {printer_id: {"user_id": int, "username": str}}
         # Track printers awaiting plate-clear acknowledgment after a finished/failed print.
@@ -556,6 +561,16 @@ class PrinterManager:
         """Get the MQTT client for a printer."""
         return self._clients.get(printer_id)
 
+    def expect_offline(self, printer_id: int) -> None:
+        """We are powering this printer off: its disconnect in the next minutes is no outage."""
+        self._offline_expected[printer_id] = time.monotonic() + OFFLINE_EXPECTED_SECONDS
+
+    def offline_expected(self, printer_id: int) -> bool:
+        return time.monotonic() < self._offline_expected.get(printer_id, 0)
+
+    def back_online(self, printer_id: int) -> None:
+        self._offline_expected.pop(printer_id, None)
+
     def mark_printer_offline(self, printer_id: int):
         """Mark a printer as offline and trigger status callback.
 
@@ -566,6 +581,7 @@ class PrinterManager:
 
         logger = logging.getLogger(__name__)
 
+        self.expect_offline(printer_id)
         if printer_id in self._clients:
             client = self._clients[printer_id]
             if client.state.connected:
