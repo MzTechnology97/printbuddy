@@ -331,12 +331,11 @@ describe('PrintPlanPage', () => {
       '/farm/components/C-0121/image?c=6b4226',
     );
 
-    // A chosen printer shows what it has loaded and upstream's slot mapping; a slot picked by hand goes.
+    // A chosen printer shows what it has loaded and its slot grid; a slot picked by hand goes.
     await user.selectOptions(within(dialog).getByLabelText('Printer'), 'A1 uno · free');
     expect(await within(dialog).findByText('Loaded now:')).toBeInTheDocument();
-    const slot = await within(dialog).findByTitle('Auto-matched');
-    expect(slot).toHaveValue('1'); // the brown one, proposed
-    await user.selectOptions(slot, '0');
+    expect(await within(dialog).findByTitle(/^A2 · /)).toHaveAttribute('aria-pressed', 'true'); // the brown one
+    await user.click(within(dialog).getByTitle(/^A1 · /));
     await user.click(within(dialog).getByRole('button', { name: /Manual start/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Confirm and queue 1 print' }));
     await waitFor(() =>

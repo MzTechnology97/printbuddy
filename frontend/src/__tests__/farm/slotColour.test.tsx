@@ -45,8 +45,8 @@ describe('PrinterSlots', () => {
     );
     render(<PrinterSlots printerId={9} plateId={2} plateLabel="K2 · Plate 2" color="Arancio" colorHex="f28c28"
       mappings={{}} onMappings={() => undefined} onAmsMapping={() => undefined} />);
-    expect(await screen.findByText('(Ready)')).toBeInTheDocument();
-    expect(screen.queryByText('(Color mismatch)')).not.toBeInTheDocument();
-    expect(screen.getByTitle('Auto-matched')).toHaveValue('3');
+    expect(await screen.findByTitle(/^A4 · PETG HF/)).toHaveAttribute('aria-pressed', 'true'); // the orange one
+    expect(screen.getByLabelText('material and colour match')).toBeInTheDocument();
+    expect(screen.queryByText('Colour differs from the plate')).not.toBeInTheDocument();
   });
 });
