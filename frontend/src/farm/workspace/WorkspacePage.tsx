@@ -264,9 +264,10 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     if (view?.grid) view.grid.visible = canvas.grid;
     if (view) applyDisplay(view, canvas, stats);
   }, [view, canvas, stats]);
+  const currentPlate = selectedPlate ?? doc.plates[0]?.index ?? null;
   useEffect(() => {
-    if (view) setSection(view, section > 0 && sectionNormal.current ? { normal: sectionNormal.current, ratio: section } : null);
-  }, [view, section, sectionAngle]);
+    if (view) setSection(view, section > 0 && sectionNormal.current ? { normal: sectionNormal.current, ratio: section } : null, currentPlate);
+  }, [view, section, sectionAngle, currentPlate]);
   const sectionTo = (ratio: number) => {
     const r = Math.min(1, Math.max(0, ratio));
     if (r > 0 && !sectionNormal.current && view) sectionNormal.current = viewDirection(view);
@@ -312,7 +313,6 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       setSelectedPlate(plateOf(objectId));
     }
   };
-  const currentPlate = selectedPlate ?? doc.plates[0]?.index ?? null;
   const deselect = () => {
     setSelection(null);
     setSelectedIds([]);
@@ -419,10 +419,12 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     },
   );
   // the 3D view's pointer: hover light, Shift+drag rectangle selection, double click (OrcaSlicer's canvas)
-  const live = useRef({ selectedIds, hovered: null as string | null, section, sectionTo });
-  live.current.selectedIds = selectedIds;
+  // the listeners below are set once per view: they read what changes (the plate shown, the section) from here
+  const live = useRef({ hovered: null as string | null, section, sectionTo, select, plate: selectedPlate });
   live.current.section = section;
   live.current.sectionTo = sectionTo;
+  live.current.select = select;
+  live.current.plate = selectedPlate;
   useEffect(() => {
     const canvasEl = view?.renderer.domElement;
     const host = canvasEl?.parentElement;
@@ -440,7 +442,10 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         if (id !== live.current.hovered) hover(view, (live.current.hovered = id));
       });
     };
+    // the canvas takes the keyboard when clicked: OrcaSlicer's canvas keys (Tab, Ctrl+0..7...) work while it has focus
+    canvasEl.tabIndex = 0;
     const down = (e: PointerEvent) => {
+      if (e.target === canvasEl) canvasEl.focus({ preventScroll: true });
       if (!e.shiftKey || e.button !== 0) return;
       start = { x: e.clientX, y: e.clientY };
       view.controls.enabled = false; // Shift+drag selects instead of panning
@@ -453,7 +458,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       setRubber(null);
       view.controls.enabled = true;
       setSelectedIds(ids);
-      if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
+      if (ids.length) live.current.select({ kind: 'object', id: ids[0], plate: live.current.plate });
     };
     const leave = () => hover(view, (live.current.hovered = null));
     const dbl = (e: MouseEvent) => setPerObject(!!pick(view, e.clientX, e.clientY)); // Objects / Global panel
@@ -479,7 +484,6 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       canvasEl.removeEventListener('pointerleave', leave);
       canvasEl.removeEventListener('dblclick', dbl);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- select reads the plate shown; the view is what matters
   }, [view]);
   const toggleTool = (key: string) => {
     setTool((cur) => (cur === key ? null : key));
@@ -494,9 +498,12 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   keys.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement | null;
     if (dialogOpen || e.altKey) return;
-    if (el?.closest?.('input, textarea, select, [role="listbox"], [role="menu"], [role="combobox"]')) return;
+    if (el?.isContentEditable || el?.closest?.('input, textarea, select, [role="listbox"], [role="menu"], [role="combobox"]')) return;
     const ctrl = e.ctrlKey || e.metaKey;
+    // the canvas's own keys only while it has focus: elsewhere Tab moves the focus and Ctrl+0 / Ctrl+E... stay the browser's
+    const onCanvas = !!view && el === view.renderer.domElement;
     if (e.key === 'Tab' && !ctrl) {
+      if (!onCanvas) return;
       e.preventDefault();
       if (e.shiftKey) setSidebarHidden((h) => !h);
       else setMode((m) => (m === 'prepare' ? 'preview' : 'prepare'));
@@ -508,6 +515,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       return;
     }
     if (mode !== 'prepare' || !view) return;
+    if (!onCanvas && e.key !== 'Escape') return;
     const handled = () => e.preventDefault();
     if (ctrl && e.key in VIEW_KEYS) {
       handled();
@@ -549,7 +557,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   }, []);
   const selectedObject = selectedId != null ? doc.objects.find((o) => o.id === selectedId) : undefined;
   // the info box (Plater.cpp): one instance or one part; a whole object only when it has one instance
-  const info = (() => {
+  // memoised: targetStats walks the meshes, and the page re-renders on every pointer move of a Shift+drag
+  const info = useMemo(() => {
     if (selection?.kind !== 'object' || !view) return null;
     if (selectedIds.length > 1) return { count: selectedIds.length };
     const partId =
@@ -558,7 +567,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     if (whole && (instances.get(selection.id)?.length ?? 1) > 1) return null;
     const s = whole ? stats.get(selection.id) : targetStats(view, { objectId: selection.id, instance: selection.instance ?? 0, partId });
     return s ? { count: 1, stats: s, part: partId ? selection.part : null } : null;
-  })();
+  }, [selection, selectedIds.length, view, stats, instances, selectedObject]);
   const distance = measure.length === 2 ? measure[0].distanceTo(measure[1]) : null;
 
   useEffect(() => {

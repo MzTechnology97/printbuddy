@@ -64,6 +64,7 @@ interface BuildItem {
   extruder?: number; // Can override object's extruder
   plateId?: number | null;
   printable?: boolean; // fork (printfarm): the build item's printable flag
+  instance?: number; // fork (printfarm): its place among the object's build items (bbs_3mf writes them in instance order)
 }
 
 interface Parsed3MFData {
@@ -183,7 +184,8 @@ function parsePlateIdFromAttributes(element: Element): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
+// eslint-disable-next-line react-refresh/only-export-components -- fork (printfarm): exported for tests
+export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(arrayBuffer);
@@ -212,6 +214,7 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
   const partExtruderMap = new Map<string, number>(); // Key: "objectId:partId"
   const objectNameById = new Map<string, string>();
   const plateAssignmentsByObjectId = new Map<string, number>();
+  const plateAssignmentsByInstance = new Map<string, number>(); // fork (printfarm): "objectId:instanceId"
   const modelSettingsFile = zip.files['Metadata/model_settings.config'];
   if (modelSettingsFile) {
     try {
@@ -304,15 +307,22 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
         for (let j = 0; j < modelInstances.length; j++) {
           const instanceEl = modelInstances[j];
           const instanceMetadata = instanceEl.getElementsByTagName('metadata');
+          let instanceObject: string | null = null;
+          let instanceId: string | null = null;
           for (let k = 0; k < instanceMetadata.length; k++) {
             const metaEl = instanceMetadata[k];
             if (metaEl.getAttribute('key') === 'object_id') {
               const value = metaEl.getAttribute('value');
               if (value) {
+                instanceObject = value;
                 plateAssignmentsByObjectId.set(value, plateId);
               }
+            } else if (metaEl.getAttribute('key') === 'instance_id') {
+              instanceId = metaEl.getAttribute('value');
             }
           }
+          // fork (printfarm): an object's instances can sit on different plates
+          if (instanceObject && instanceId) plateAssignmentsByInstance.set(`${instanceObject}:${instanceId}`, plateId);
         }
       }
     } catch {
@@ -510,7 +520,8 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
       if (!objectId) continue;
 
       const transform = parseTransform(itemEl.getAttribute('transform'));
-      const itemPlateId = parsePlateIdFromAttributes(itemEl);
+      const instance = buildItems.filter((b) => b.objectId === objectId).length;
+      const itemPlateId = parsePlateIdFromAttributes(itemEl) ?? plateAssignmentsByInstance.get(`${objectId}:${instance}`) ?? null;
       const objectPlateId = objects.get(objectId)?.plateId ?? null;
       const objectName = objectNameById.get(objectId);
       const namePlateId = objectName ? plateAssignmentsByName.get(objectName) ?? null : null;
@@ -519,6 +530,7 @@ async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData> {
         transform,
         plateId: itemPlateId ?? objectPlateId ?? namePlateId ?? null,
         printable: itemEl.getAttribute('printable') !== '0',
+        instance,
       });
     }
   }
@@ -562,7 +574,8 @@ function disposeGroup(group: THREE.Group) {
   });
 }
 
-function buildModelGroup(
+// eslint-disable-next-line react-refresh/only-export-components -- fork (printfarm): exported for tests
+export function buildModelGroup(
   parsedData: Parsed3MFData,
   selectedPlateId: number | null,
   filamentColors?: string[],
@@ -595,13 +608,6 @@ function buildModelGroup(
     : buildItems.filter((item) => item.plateId === selectedPlateId);
   const activeBuildItems = plateFilteredItems.length > 0 ? plateFilteredItems : buildItems;
 
-  // fork (printfarm): the instance number of each build item (its place among the object's items, all plates)
-  const instanceOf = new Map<BuildItem, number>();
-  const seen = new Map<string, number>();
-  for (const item of buildItems) {
-    instanceOf.set(item, seen.get(item.objectId) ?? 0);
-    seen.set(item.objectId, (seen.get(item.objectId) ?? 0) + 1);
-  }
   const byPart = new Map<string, Map<number, THREE.BufferGeometry[]>>();
 
   // If we have build items, use them for positioning
@@ -646,7 +652,7 @@ function buildModelGroup(
         itemGroup.userData = {
           objectId: item.objectId,
           printable: item.printable !== false,
-          instance: instanceOf.get(item) ?? 0,
+          instance: item.instance ?? 0,
           plateId: item.plateId ?? null,
           paint: {
             supports: objectData.meshes.some((m) => m.paint?.supports),

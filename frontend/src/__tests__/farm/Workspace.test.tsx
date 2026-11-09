@@ -30,13 +30,17 @@ import {
   CANVAS_DEFAULTS,
   type ObjectStats,
   VIEW_KEYS,
+  drawMeasure,
   meshVolume,
   navigatorView,
   objectStats,
   openEdges,
   parseVolumes,
   plateOrigin,
+  targetStats,
 } from '../../farm/workspace/viewTools';
+import JSZip from 'jszip';
+import { buildModelGroup, parse3MF } from '../../components/ModelViewer';
 import { CanvasButtons } from '../../farm/workspace/Viewport';
 import type { ViewerScene } from '../../components/ModelViewer';
 import { type OrcaLayout, type Section, keyText, orcaFormat, orcaPlural } from '../../farm/workspace/orcaLayout';
@@ -871,5 +875,59 @@ describe('batch B: tree columns, instances, info box, shortcuts, section and nav
     expect(s.sinking).toBe(true);
     expect(s.paint).toEqual({ supports: true, color: false });
     expect(s.variableLayers).toBe(true);
+  });
+});
+
+describe('review of #142: info box size, instances across plates, freed helpers', () => {
+  it("measures a scaled and rotated instance as OrcaSlicer's info box: its transformed box on the bed's axes", () => {
+    const model = new THREE.Group();
+    const item = new THREE.Group();
+    item.userData = { objectId: '3', instance: 0 };
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10).toNonIndexed());
+    mesh.scale.set(2, 1, 1); // 20 mm along its own x...
+    mesh.rotation.y = Math.PI / 2; // ...turned to the scene's z (the slicer's Y)
+    item.add(mesh);
+    model.add(item);
+    const s = targetStats({ model } as unknown as ViewerScene, { objectId: '3', instance: 0 })!;
+    expect(s.size.map((v) => Math.round(v))).toEqual([10, 20, 10]);
+    expect(Math.round(s.volume)).toBe(2000);
+  });
+
+  it('numbers instances and places each on its own plate, as the object list does', async () => {
+    const zip = new JSZip();
+    const v = [[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]].map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}"/>`).join('');
+    const t = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]].map(([a, b, c]) => `<triangle v1="${a}" v2="${b}" v3="${c}"/>`).join('');
+    zip.file(
+      '3D/3dmodel.model',
+      `<?xml version="1.0"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>` +
+        `<object id="2" type="model"><mesh><vertices>${v}</vertices><triangles>${t}</triangles></mesh></object></resources>` +
+        `<build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 10 10 0"/><item objectid="2" transform="1 0 0 0 1 0 0 0 1 50 10 0"/>` +
+        `<item objectid="2" transform="1 0 0 0 1 0 0 0 1 300 10 0"/></build></model>`,
+    );
+    const inst = (plate: number, ids: number[]) =>
+      `<plate><metadata key="plater_id" value="${plate}"/>` +
+      ids.map((i) => `<model_instance><metadata key="object_id" value="2"/><metadata key="instance_id" value="${i}"/></model_instance>`).join('') +
+      '</plate>';
+    zip.file('Metadata/model_settings.config', `<?xml version="1.0"?><config><object id="2"></object>${inst(1, [0, 1])}${inst(2, [2])}</config>`);
+    const parsed = await parse3MF(await zip.generateAsync({ type: 'arraybuffer' }));
+    const shown = (plate: number) => buildModelGroup(parsed, plate, [], true).children.filter((c) => c.userData.objectId != null);
+    expect(shown(1).map((c) => c.userData.instance)).toEqual([0, 1]);
+    expect(shown(2).map((c) => [c.userData.instance, c.userData.plateId])).toEqual([[2, 2]]);
+  });
+
+  it("frees the measuring line's geometries and materials when it is redrawn", () => {
+    const scene = new THREE.Scene();
+    const view = { scene } as unknown as ViewerScene;
+    drawMeasure(view, new THREE.Vector3(), new THREE.Vector3(1, 0, 0));
+    const used = new Set<THREE.EventDispatcher<{ dispose: object }>>();
+    const freed = new Set<unknown>();
+    scene.traverse((o) => {
+      if (o instanceof THREE.Mesh || o instanceof THREE.Line) used.add(o.geometry).add(o.material as THREE.Material);
+    });
+    for (const u of used) u.addEventListener('dispose', (e) => freed.add(e.target));
+    drawMeasure(view, null, null);
+    expect(scene.children).toHaveLength(0);
+    expect(freed.size).toBe(5); // 2 dots and the line: 3 geometries; the dots' material and the line's
+    expect([...used].every((u) => freed.has(u))).toBe(true);
   });
 });

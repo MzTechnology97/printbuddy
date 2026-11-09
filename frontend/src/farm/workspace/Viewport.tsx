@@ -357,14 +357,17 @@ export function Navigator({
   };
   useEffect(() => {
     let frame = 0;
+    let last = '';
     const turn = () => {
-      const d = read.current();
-      if (d && cube.current) {
-        const azimuth = (Math.atan2(d.x, d.z) * 180) / Math.PI;
-        const elevation = (Math.asin(Math.max(-1, Math.min(1, d.y))) * 180) / Math.PI;
-        cube.current.style.transform = `rotateX(${-elevation}deg) rotateY(${-azimuth}deg)`;
-      }
       frame = requestAnimationFrame(turn);
+      // nothing to do while the view is hidden (the phone's other pane) or the camera hasn't moved
+      if (!cube.current || cube.current.offsetParent === null) return;
+      const d = read.current();
+      if (!d) return;
+      const azimuth = (Math.atan2(d.x, d.z) * 180) / Math.PI;
+      const elevation = (Math.asin(Math.max(-1, Math.min(1, d.y))) * 180) / Math.PI;
+      const transform = `rotateX(${(-elevation).toFixed(2)}deg) rotateY(${(-azimuth).toFixed(2)}deg)`;
+      if (transform !== last) cube.current.style.transform = last = transform;
     };
     turn();
     return () => cancelAnimationFrame(frame);
@@ -406,9 +409,16 @@ export function Labels({ place }: { place: () => { id: string; name: string; x: 
   read.current = place;
   useEffect(() => {
     let frame = 0;
+    let last = '';
     const tick = () => {
-      setShown(read.current());
       frame = requestAnimationFrame(tick);
+      const now = read.current();
+      // a new state (a render) only when a label moved
+      const key = now.map((l) => `${l.id}:${Math.round(l.x)}:${Math.round(l.y)}:${l.name}`).join('|');
+      if (key !== last) {
+        last = key;
+        setShown(now);
+      }
     };
     tick();
     return () => cancelAnimationFrame(frame);

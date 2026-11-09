@@ -59,6 +59,9 @@ export interface Target {
   partId?: string | null;
 }
 
+// one raycaster for every pick (the pointer moves often)
+const RAY = new THREE.Raycaster();
+
 const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
 
 /** The scene nodes a target covers: instances, or the part's group in each. */
@@ -106,7 +109,7 @@ function statsOf(node: THREE.Object3D): ObjectStats {
   node.updateMatrixWorld(true);
   node.traverse((o) => {
     if (o instanceof THREE.Mesh) {
-      const v = meshVolume(o.geometry);
+      const v = meshVolume(o.geometry) * o.matrixWorld.determinant(); // scaled as the mesh is
       volume += v;
       triangles += (o.geometry.getIndex()?.count ?? o.geometry.getAttribute('position').count) / 3;
       open += openEdges(o.geometry);
@@ -114,7 +117,8 @@ function statsOf(node: THREE.Object3D): ObjectStats {
       weighted.addScaledVector(o.geometry.boundingBox!.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld), Math.abs(v));
     }
   });
-  const box = new THREE.Box3().setFromObject(node);
+  // Plater.cpp's size: the instance's (or part's) transformed hull, boxed on the bed's axes (precise: its vertices)
+  const box = new THREE.Box3().setFromObject(node, true);
   const size = box.getSize(new THREE.Vector3());
   let item: THREE.Object3D | null = node;
   while (item && item.userData.objectId == null) item = item.parent;
@@ -178,9 +182,8 @@ export function pick(
   const rect = view.renderer.domElement.getBoundingClientRect();
   if (!rect.width || !rect.height) return null;
   const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-  const ray = new THREE.Raycaster();
-  ray.setFromCamera(ndc, view.camera);
-  const hit = ray.intersectObjects(items(view), true)[0];
+  RAY.setFromCamera(ndc, view.camera);
+  const hit = RAY.intersectObjects(items(view), true)[0];
   if (!hit) return null;
   let o: THREE.Object3D | null = hit.object;
   let partId: string | null = null;
@@ -251,14 +254,35 @@ export function orbit(view: ViewerScene, azimuth: number, polar: number) {
   view.controls.update();
 }
 
-/** Remove a helper group added by name, freeing its geometry. */
+/** Remove a helper group added by name, freeing its geometries and materials (those kept for reuse, with
+ * ``userData.keep``, stay). */
 function clear(view: ViewerScene, name: string) {
   const old = view.scene.getObjectByName(name);
   if (!old) return;
   view.scene.remove(old);
   old.traverse((o) => {
-    if (o instanceof THREE.Mesh || o instanceof THREE.Line) o.geometry.dispose();
+    if (!(o instanceof THREE.Mesh || o instanceof THREE.Line)) return;
+    if (!o.geometry.userData.keep) o.geometry.dispose();
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (!m.userData.keep) m.dispose();
   });
+}
+
+// the selection's outline: one material, and each mesh's edges worked out once (freed with the mesh's geometry)
+const OUTLINE = new THREE.LineBasicMaterial({ color: 0xff9800 });
+OUTLINE.userData.keep = true;
+const EDGES = new WeakMap<THREE.BufferGeometry, THREE.EdgesGeometry>();
+function edgesOf(geometry: THREE.BufferGeometry): THREE.EdgesGeometry {
+  let edges = EDGES.get(geometry);
+  if (!edges) {
+    const made = new THREE.EdgesGeometry(geometry, 40);
+    made.userData.keep = true;
+    geometry.addEventListener('dispose', () => {
+      made.dispose();
+      EDGES.delete(geometry);
+    });
+    EDGES.set(geometry, (edges = made));
+  }
+  return edges;
 }
 
 const HIGHLIGHT = 'workspace-selection';
@@ -275,7 +299,7 @@ export function highlight(view: ViewerScene, targets: Target[], outline = true) 
     if (!outline) continue;
     item.traverse((o) => {
       if (!(o instanceof THREE.Mesh)) return;
-      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 40), new THREE.LineBasicMaterial({ color: 0xff9800 }));
+      const edges = new THREE.LineSegments(edgesOf(o.geometry), OUTLINE);
       edges.applyMatrix4(o.matrixWorld);
       group.add(edges);
     });
@@ -413,13 +437,16 @@ export function setPerspective(view: ViewerScene, on: boolean) {
 }
 
 /** The section view, as GLCanvas3D::_get_section_view_plane: a plane facing ``normal`` (towards the camera when
- * it was set) sweeping the models' bounding sphere from the camera side (ratio 0: nothing cut) to the far side
- * (1: all cut); what lies on the camera side of it is cut away. null or ratio 0: no section. */
-export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; ratio: number } | null) {
+ * it was set) sweeping the bounding sphere of the current plate's objects (volumes_bounding_box(true); all of
+ * them when it has none) from the camera side (ratio 0: nothing cut) to the far side (1: all cut); what lies on
+ * the camera side of it is cut away. null or ratio 0: no section. */
+export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; ratio: number } | null, plate: number | null = null) {
   const on = !!section && section.ratio > 0;
   view.renderer.localClippingEnabled = on;
   let plane: THREE.Plane | null = null;
-  const box = new THREE.Box3().setFromObject(view.model);
+  const box = new THREE.Box3();
+  for (const item of items(view)) if (plate != null && item.userData.plateId === plate) box.expandByObject(item);
+  if (box.isEmpty()) box.setFromObject(view.model);
   if (section && on && !box.isEmpty()) {
     const n = section.normal.clone().normalize();
     const sphere = box.getBoundingSphere(new THREE.Sphere());
@@ -429,8 +456,10 @@ export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; 
   for (const item of items(view)) {
     item.traverse((o) => {
       if (o instanceof THREE.Mesh && o.material instanceof THREE.Material) {
+        // the cut shows the inside (both sides drawn); without it the material's own side again
+        o.material.userData.side ??= o.material.side;
         o.material.clippingPlanes = plane ? [plane] : null;
-        o.material.side = plane ? THREE.DoubleSide : THREE.FrontSide;
+        o.material.side = plane ? THREE.DoubleSide : o.material.userData.side;
         o.material.needsUpdate = true;
       }
     });
@@ -440,9 +469,8 @@ export function setSection(view: ViewerScene, section: { normal: THREE.Vector3; 
 /** Whether the pointer (client coordinates) is over the bed: a right click there opens the plate's menu. */
 export function onBed(view: ViewerScene, clientX: number, clientY: number): boolean {
   const rect = view.renderer.domElement.getBoundingClientRect();
-  const ray = new THREE.Raycaster();
-  ray.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), view.camera);
-  const p = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+  RAY.setFromCamera(new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1), view.camera);
+  const p = RAY.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
   return !!p && p.x >= 0 && p.x <= view.bed.x && p.z >= 0 && p.z <= view.bed.y;
 }
 
@@ -529,13 +557,7 @@ const MEASURE = 'workspace-measure';
 
 /** The measuring line from ``a`` to ``b`` (a dot when only ``a``); none with no points. */
 export function drawMeasure(view: ViewerScene, a: THREE.Vector3 | null, b: THREE.Vector3 | null) {
-  const old = view.scene.getObjectByName(MEASURE);
-  if (old) {
-    view.scene.remove(old);
-    old.traverse((o) => {
-      if (o instanceof THREE.Mesh || o instanceof THREE.Line) o.geometry.dispose();
-    });
-  }
+  clear(view, MEASURE);
   if (!a) return;
   const group = new THREE.Group();
   group.name = MEASURE;
