@@ -38,9 +38,12 @@ export function selectionBox(view: ViewerScene, keys: string[]): THREE.Box3 | nu
 // the slicer's X, Y, Z in the model group's frame
 const LOCAL_AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 1, 0)];
 
-/** The slicer's axis as a unit direction in the scene. */
-export function axisInScene(view: ViewerScene, axis: Axis): THREE.Vector3 {
-  return LOCAL_AXES[axis].clone().transformDirection(view.model.matrixWorld);
+/** The slicer's axis (turned by ``orient``, the instance's rotation, in Object coordinates) as a direction in the scene. */
+export function axisInScene(view: ViewerScene, axis: Axis, orient?: THREE.Matrix4): THREE.Vector3 {
+  const d = new THREE.Vector3().setComponent(axis, 1);
+  if (orient) d.applyMatrix4(orient);
+  return LOCAL_AXES[0].clone().multiplyScalar(d.x).add(LOCAL_AXES[1].clone().multiplyScalar(d.y)).add(LOCAL_AXES[2].clone().multiplyScalar(d.z))
+    .transformDirection(view.model.matrixWorld);
 }
 
 /** GLGizmoMove3D::calc_projection: how far along ``dir`` the pointer ray has taken the grab from ``start``. */
@@ -70,7 +73,7 @@ function clear(view: ViewerScene) {
 }
 
 /** The arrows on the selection's box (none when it has no box): their grabbers named "grabber-<axis>". */
-export function drawMoveGizmo(view: ViewerScene, keys: string[], hover: Axis | null): THREE.Group | null {
+export function drawMoveGizmo(view: ViewerScene, keys: string[], hover: Axis | null, orient?: THREE.Matrix4): THREE.Group | null {
   clear(view);
   const box = selectionBox(view, keys);
   if (!box) return null;
@@ -81,7 +84,7 @@ export function drawMoveGizmo(view: ViewerScene, keys: string[], hover: Axis | n
   const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
   const reach = [half.x, half.z, half.y]; // to the box's side on each slicer axis
   for (const axis of [0, 1, 2] as Axis[]) {
-    const dir = axisInScene(view, axis);
+    const dir = axisInScene(view, axis, orient);
     const tip = center.clone().addScaledVector(dir, reach[axis] + SPACE_PX * px);
     const color = axis === hover ? HOVER[axis] : COLORS[axis];
     // the stem (Orca's grabber connection) and the arrow head, a few pixels wide whatever the zoom
@@ -109,6 +112,8 @@ export function drawMoveGizmo(view: ViewerScene, keys: string[], hover: Axis | n
 }
 
 export interface MoveHandlers {
+  /** Object coordinates: the instance's rotation, the arrows' axes (the move is then on those axes) */
+  orient?: () => THREE.Matrix4 | undefined;
   /** while dragging: the move so far on the slicer's axes (mm); release: ``done`` */
   onMove: (delta: [number, number, number], done: boolean) => void;
   /** the grabber under the pointer while dragging, for the tooltip ("X: 12.34") */
@@ -127,7 +132,7 @@ export function useMoveGizmo(view: ViewerScene | null, keys: string[], handlers:
     const ray = new THREE.Raycaster();
     let hover: Axis | null = null;
     let drag: { axis: Axis; start: THREE.Vector3; dir: THREE.Vector3; moved: number } | null = null;
-    const redraw = () => drawMoveGizmo(view, keys, drag?.axis ?? hover);
+    const redraw = () => drawMoveGizmo(view, keys, drag?.axis ?? hover, live.current.orient?.());
     let gizmo = redraw();
     const rayAt = (e: PointerEvent) => {
       const r = canvas.getBoundingClientRect();
@@ -146,7 +151,7 @@ export function useMoveGizmo(view: ViewerScene | null, keys: string[], handlers:
       e.stopPropagation(); // not an orbit, not a click on the object
       e.preventDefault();
       const axis = g.userData.axis as Axis;
-      drag = { axis, start: (g.userData.tip as THREE.Vector3).clone(), dir: axisInScene(view, axis), moved: 0 };
+      drag = { axis, start: (g.userData.tip as THREE.Vector3).clone(), dir: axisInScene(view, axis, live.current.orient?.()), moved: 0 };
       view.controls.enabled = false;
       live.current.onDrag?.(axis, { x: e.clientX, y: e.clientY });
     };
@@ -198,6 +203,6 @@ export function useMoveGizmo(view: ViewerScene | null, keys: string[], handlers:
   }, [view, keysKey]);
   /** Draw it again where the instances are now (after a move). */
   return () => {
-    if (view && keys.length) drawMoveGizmo(view, keys, null);
+    if (view && keys.length) drawMoveGizmo(view, keys, null, live.current.orient?.());
   };
 }

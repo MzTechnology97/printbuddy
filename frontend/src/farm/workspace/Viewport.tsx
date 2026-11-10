@@ -4,7 +4,7 @@
 // right-click menus, and the numbered plate bar. What only looks works now (views, zoom, grid, measure, info,
 // selection); what would change the geometry or the plates is shown disabled, "phase 2" (it needs a
 // model_settings.config writer, see docs/plans/3mf-workspace.md).
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, ChevronRight, X } from 'lucide-react';
 import { api } from '../../api/client';
@@ -172,18 +172,31 @@ export function MainToolbar({
 }
 
 /** One number field of a gizmo's window: committed on Enter or when it loses focus, as Orca's ImGui inputs. */
-function GizmoNumber({ label, value, onCommit, language }: { label: string; value: number; onCommit: (v: number) => void; language?: string }) {
+function GizmoNumber({
+  label,
+  shown: tag,
+  value,
+  onCommit,
+  language,
+}: {
+  label: string;
+  /** what shows beside the field (its axis); ``label`` is its accessible name */
+  shown?: string;
+  value: number;
+  onCommit: (v: number) => void;
+  language?: string;
+}) {
   const shown = toLocaleDecimal(value.toFixed(2), language);
   const [text, setText] = useState(shown);
   useEffect(() => setText(shown), [shown]);
   const commit = () => {
     const v = Number(text.replace(',', '.'));
     if (Number.isFinite(v) && Math.abs(v - value) > 1e-6) onCommit(v);
-    else setText(shown);
+    setText(shown); // a relative field is back at 0 after its turn; the others show the new value when it comes
   };
   return (
     <label className="flex items-center gap-1">
-      <span className="w-3 text-bambu-gray">{label}</span>
+      <span className="w-3 text-bambu-gray">{tag ?? label}</span>
       <input
         value={text}
         inputMode="decimal"
@@ -201,70 +214,237 @@ function GizmoNumber({ label, value, onCommit, language }: { label: string; valu
   );
 }
 
-/** OrcaSlicer's Move window (GizmoObjectManipulation::do_render_move_window): the coordinate system (World; Object
- * comes with Rotate and Scale), the position, Drop and Done. */
+type Cs = 'world' | 'object';
+type Vec3T = [number, number, number];
+
+function GizmoWindow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div
+      className="absolute top-14 left-1/2 -translate-x-1/2 rounded-md border border-bambu-dark-tertiary bg-bambu-dark-secondary/95 p-2 text-[12px] text-white space-y-2"
+      role="dialog"
+      aria-label={label}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** The coordinate system combo (World / Object; Part comes with the parts). */
+function CoordinatesCombo({ layout, value, onChange, object = true }: { layout: OrcaLayout; value: Cs; onChange: (cs: Cs) => void; object?: boolean }) {
+  const tr = useOrcaText(layout);
+  return (
+    <select
+      className="rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 py-0.5"
+      title={tr('Coordinate system used for transform actions.')}
+      aria-label={tr('Coordinate system used for transform actions.')}
+      value={value}
+      onChange={(e) => onChange(e.target.value as Cs)}
+    >
+      <option value="world">{tr('World')}</option>
+      {object && <option value="object">{tr('Object')}</option>}
+    </select>
+  );
+}
+
+function Row({
+  caption,
+  values,
+  unit,
+  onCommit,
+  after,
+}: {
+  caption: string;
+  values: Vec3T;
+  unit: string;
+  onCommit: (axis: 0 | 1 | 2, v: number) => void;
+  after?: ReactNode;
+}) {
+  const { i18n } = useTranslation();
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-24 truncate text-bambu-gray" title={caption}>{caption}</span>
+      {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+        <GizmoNumber key={axis} label={`${caption} ${axis}`} shown={axis} value={values[i]} language={i18n.language} onCommit={(v) => onCommit(i as 0 | 1 | 2, v)} />
+      ))}
+      <span className="text-bambu-gray">{unit}</span>
+      {after}
+    </div>
+  );
+}
+
+function ResetButton({ title, onClick, visible }: { title: string; onClick: () => void; visible: boolean }) {
+  // Orca keeps the button's place while it is hidden, so the window doesn't jump
+  return (
+    <button type="button" title={title} aria-label={title} onClick={onClick} className={`rounded px-1 hover:bg-bambu-dark-tertiary ${visible ? '' : 'invisible'}`}>
+      ↺
+    </button>
+  );
+}
+
+function Done({ layout, onDone, left }: { layout: OrcaLayout; onDone: () => void; left?: ReactNode }) {
+  const tr = useOrcaText(layout);
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span>{left}</span>
+      <button type="button" onClick={onDone} className="rounded bg-bambu-green px-2 py-0.5 hover:bg-bambu-green/80">
+        {tr('Done')}
+      </button>
+    </div>
+  );
+}
+
+/** OrcaSlicer's Move window (GizmoObjectManipulation::do_render_move_window): the coordinate system, the position
+ * (World) or a move along the object's own axes (Object: "Relative", from 0), Drop and Done. */
 export function MoveWindow({
   layout,
   position,
+  cs = 'world',
+  onCs,
   canDrop,
-  objectLater,
   onPosition,
   onDrop,
   onDone,
 }: {
   layout: OrcaLayout;
-  position: [number, number, number];
+  position: Vec3T;
+  cs?: Cs;
+  onCs?: (cs: Cs) => void;
   canDrop: boolean;
-  /** why Object coordinates are greyed */
-  objectLater: string;
   onPosition: (axis: 0 | 1 | 2, value: number) => void;
   onDrop: () => void;
   onDone: () => void;
 }) {
-  const { i18n } = useTranslation();
   const tr = useOrcaText(layout);
   return (
-    <div
-      className="absolute top-14 left-1/2 -translate-x-1/2 rounded-md border border-bambu-dark-tertiary bg-bambu-dark-secondary/95 p-2 text-[12px] text-white space-y-2"
-      role="dialog"
-      aria-label={tr('Move')}
-    >
-      <div className="flex items-center gap-2">
-        <select
-          className="rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 py-0.5"
-          title={tr('Coordinate system used for transform actions.')}
-          aria-label={tr('Coordinate system used for transform actions.')}
-          value="world"
-          onChange={() => {}}
-        >
-          <option value="world">{tr('World')}</option>
-          <option value="object" disabled title={objectLater}>
-            {tr('Object')}
-          </option>
-        </select>
-        <span className="text-bambu-gray">{tr('Position')}</span>
+    <GizmoWindow label={tr('Move')}>
+      <CoordinatesCombo layout={layout} value={cs} onChange={(v) => onCs?.(v)} />
+      <Row caption={tr(cs === 'object' ? 'Relative' : 'Position')} values={cs === 'object' ? [0, 0, 0] : position} unit={tr('mm')} onCommit={onPosition} />
+      <Done
+        layout={layout}
+        onDone={onDone}
+        left={
+          <button
+            type="button"
+            disabled={!canDrop}
+            title={tr('Move the selection along Z so that its lowest point touches the bed.')}
+            onClick={onDrop}
+            className="rounded border border-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-dark-tertiary disabled:opacity-40"
+          >
+            {tr('Drop')}
+          </button>
+        }
+      />
+    </GizmoWindow>
+  );
+}
+
+/** OrcaSlicer's Rotate window (do_render_rotate_window): World; a turn from now (its fields from 0) and back to when
+ * the tool opened; the absolute rotation and back to none; Done. */
+export function RotateWindow({
+  layout,
+  absolute,
+  changed,
+  turned,
+  onRelative,
+  onAbsolute,
+  onResetRelative,
+  onResetAbsolute,
+  onDone,
+}: {
+  layout: OrcaLayout;
+  /** the instance's rotation (one instance selected), else null */
+  absolute: Vec3T | null;
+  /** turned since the tool opened: the first reset shows */
+  changed: boolean;
+  /** turned at all: the second reset shows */
+  turned: boolean;
+  onRelative: (axis: 0 | 1 | 2, degrees: number) => void;
+  onAbsolute: (axis: 0 | 1 | 2, degrees: number) => void;
+  onResetRelative: () => void;
+  onResetAbsolute: () => void;
+  onDone: () => void;
+}) {
+  const tr = useOrcaText(layout);
+  return (
+    <GizmoWindow label={tr('Rotate')}>
+      <div className="text-bambu-gray" title={tr('Coordinate system used for transform actions.')}>
+        {tr('World')}
       </div>
-      <div className="flex items-center gap-2">
-        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
-          <GizmoNumber key={axis} label={axis} value={position[i]} language={i18n.language} onCommit={(v) => onPosition(i as 0 | 1 | 2, v)} />
-        ))}
-        <span className="text-bambu-gray">{tr('mm')}</span>
-      </div>
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          disabled={!canDrop}
-          title={tr('Move the selection along Z so that its lowest point touches the bed.')}
-          onClick={onDrop}
-          className="rounded border border-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-dark-tertiary disabled:opacity-40"
-        >
-          {tr('Drop')}
-        </button>
-        <button type="button" onClick={onDone} className="rounded bg-bambu-green px-2 py-0.5 hover:bg-bambu-green/80">
-          {tr('Done')}
-        </button>
-      </div>
-    </div>
+      <Row
+        caption={tr('Relative')}
+        values={[0, 0, 0]}
+        unit="°"
+        onCommit={onRelative}
+        after={<ResetButton title={tr('Reset current rotation to the value when open the rotation tool.')} onClick={onResetRelative} visible={changed} />}
+      />
+      {absolute && (
+        <Row
+          caption={tr('Absolute')}
+          values={absolute}
+          unit="°"
+          onCommit={onAbsolute}
+          after={<ResetButton title={tr('Reset current rotation to real zeros.')} onClick={onResetAbsolute} visible={turned} />}
+        />
+      )}
+      <Done layout={layout} onDone={onDone} />
+    </GizmoWindow>
+  );
+}
+
+/** OrcaSlicer's Scale window (do_render_scale_input_window): the coordinate system, the scale (%) and back to 100%,
+ * the size (mm), Uniform scale, Done. */
+export function ScaleWindow({
+  layout,
+  cs,
+  onCs,
+  objectCs,
+  scale,
+  size,
+  uniform,
+  onUniform,
+  onScale,
+  onSize,
+  onReset,
+  onDone,
+}: {
+  layout: OrcaLayout;
+  cs: Cs;
+  onCs: (cs: Cs) => void;
+  /** Object coordinates offered (not for several objects) */
+  objectCs: boolean;
+  scale: Vec3T;
+  size: Vec3T;
+  uniform: boolean;
+  onUniform: (on: boolean) => void;
+  onScale: (axis: 0 | 1 | 2, percent: number) => void;
+  onSize: (axis: 0 | 1 | 2, mm: number) => void;
+  onReset: () => void;
+  onDone: () => void;
+}) {
+  const tr = useOrcaText(layout);
+  const scaled = scale.some((v) => Math.abs(v - 100) > 0.1);
+  return (
+    <GizmoWindow label={tr('Scale')}>
+      <CoordinatesCombo layout={layout} value={cs} onChange={onCs} object={objectCs} />
+      <Row
+        caption={tr('Noun\u0004Scale')}
+        values={scale}
+        unit="%"
+        onCommit={(axis, v) => v > 0 && onScale(axis, v)}
+        after={<ResetButton title={tr('Reset scale')} onClick={onReset} visible={scaled} />}
+      />
+      <Row caption={tr('Size')} values={size} unit={tr('mm')} onCommit={(axis, v) => v > 0 && onSize(axis, v)} />
+      <Done
+        layout={layout}
+        onDone={onDone}
+        left={
+          <label className="flex items-center gap-1">
+            <input type="checkbox" checked={uniform} onChange={(e) => onUniform(e.target.checked)} />
+            {tr('Uniform scale')}
+          </label>
+        }
+      />
+    </GizmoWindow>
   );
 }
 

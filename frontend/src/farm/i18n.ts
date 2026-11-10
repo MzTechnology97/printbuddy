@@ -539,7 +539,6 @@ const en = {
       distance: 'Distance: {{value}} mm',
     },
     move: {
-      objectLater: 'comes with Rotate and Scale',
       tooLarge: "This project's model is too large to save objects moved in a copy",
     },
     topbar: {
@@ -1248,7 +1247,6 @@ const it: typeof en = {
       distance: 'Distanza: {{value}} mm',
     },
     move: {
-      objectLater: 'arriva con Ruota e Ridimensiona',
       tooLarge: 'Il modello di questo progetto è troppo grande per salvare gli oggetti spostati in una copia',
     },
     topbar: {

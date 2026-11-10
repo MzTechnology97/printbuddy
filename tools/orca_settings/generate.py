@@ -487,6 +487,15 @@ UI_STRINGS = [
     "Move the selection along Z so that its lowest point touches the bed.",
     "Done",
     "Please select at least one object.",
+    # ...and the Rotate and Scale gizmos' (GLGizmoRotate.cpp, GLGizmoScale.cpp)
+    "Relative",
+    "Absolute",
+    "Reset current rotation to the value when open the rotation tool.",
+    "Reset current rotation to real zeros.",
+    "NounScale",
+    "Size",
+    "Uniform scale",
+    "Reset scale",
     # Save preset and Compare presets (SavePresetDialog.cpp, UnsavedChangesDialog.cpp, Tab.cpp, ParamsPanel.cpp)
     "Save preset",
     "Save %s as",

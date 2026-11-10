@@ -113,18 +113,22 @@ describe("a move is one undo step (D1's history)", () => {
 });
 
 describe("Orca's Move window and toolbar", () => {
-  it('shows the position, commits a field on Enter, greys Drop on the bed and Object coordinates', () => {
+  it('shows the position, commits a field on Enter, greys Drop on the bed; in Object coordinates a move from 0', () => {
     const onPosition = vi.fn();
-    render(
-      <MoveWindow layout={LAYOUT} position={[100, 110, 0]} canDrop={false} objectLater="later" onPosition={onPosition} onDrop={vi.fn()} onDone={vi.fn()} />,
+    const onCs = vi.fn();
+    const { rerender } = render(
+      <MoveWindow layout={LAYOUT} position={[100, 110, 0]} canDrop={false} onCs={onCs} onPosition={onPosition} onDrop={vi.fn()} onDone={vi.fn()} />,
     );
-    const x = screen.getByRole('textbox', { name: 'X' });
+    const x = screen.getByRole('textbox', { name: 'Position X' });
     expect(x).toHaveValue('100.00');
     fireEvent.change(x, { target: { value: '40' } });
     fireEvent.keyDown(x, { key: 'Enter' });
     expect(onPosition).toHaveBeenCalledWith(0, 40);
     expect(screen.getByRole('button', { name: 'Drop' })).toBeDisabled();
-    expect(screen.getByRole('option', { name: 'Object' })).toBeDisabled();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'object' } });
+    expect(onCs).toHaveBeenCalledWith('object');
+    rerender(<MoveWindow layout={LAYOUT} position={[100, 110, 0]} cs="object" canDrop onPosition={onPosition} onDrop={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByRole('textbox', { name: 'Relative X' })).toHaveValue('0.00');
   });
 
   it('Move works with a selection, and says why it does not without one', () => {

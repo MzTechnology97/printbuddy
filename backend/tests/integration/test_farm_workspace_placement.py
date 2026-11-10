@@ -15,7 +15,7 @@ import pytest
 from backend.app.api.routes import library
 from backend.app.farm.workspace import placement, project
 from backend.app.models.library import LibraryFile
-from backend.tests.integration.test_farm_workspace import add_file, entries, make_project, open_ws, save
+from backend.tests.integration.test_farm_workspace import MODEL_SETTINGS, add_file, entries, make_project, open_ws, save
 
 MOVED = [1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 60, 5]
 TURNED = [0, 1, 0, -1, 0, 0, 0, 0, 1, 50, 50, 5]  # 90° about Z
@@ -101,6 +101,16 @@ class TestPlace:
         out, _ = placement.place(model, [placement.InstanceTransform(object_id="2", instance=0, matrix=MOVED)])
         assert out == model.replace(b"1 0 0 0 1 0 0 0 1 10 10 0", b"1 0 0 0 1 0 0 0 1 80 60 5")
         assert len(parsed) == 2 and not any(b"<mesh" in text for text in parsed)  # before and after: the build alone
+
+
+class TestAutoDrop:
+    async def test_each_objects_auto_drop_is_read_on_unless_off(self, async_client, db_session):
+        # bbs_3mf writes <object ... auto_drop="0"> for an object Orca must not put back on the bed after a move
+        settings = MODEL_SETTINGS.replace('<object id="4">', '<object id="4" auto_drop="0">')
+        assert settings != MODEL_SETTINGS
+        f = await add_file(db_session, make_project(model_settings=settings))
+        doc = await open_ws(async_client, f.id)
+        assert {o["id"]: o["auto_drop"] for o in doc["objects"]} == {"2": True, "4": False}
 
 
 class TestSaveCopy:
