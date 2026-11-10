@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from fastapi.responses import FileResponse as FastAPIFileResponse
+from fastapi.responses import FileResponse as FastAPIFileResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -4498,19 +4498,22 @@ async def get_gcode(
     if file.file_type == "gcode" and not zipfile.is_zipfile(abs_path):
         return FastAPIFileResponse(str(abs_path), media_type="text/plain")
     elif file.file_type in ("3mf", "gcode"):
-        # Extract gcode from 3mf
+        # Extract gcode from 3mf. Fork: streamed a MiB at a time (plates run to ~800 MB), with its size from the
+        # zip directory as Content-Length (the Preview's progress bar reads it).
         try:
             with zipfile.ZipFile(str(abs_path), "r") as zf:
-                # Find gcode file
-                gcode_files = [n for n in zf.namelist() if n.endswith(".gcode")]
-                if not gcode_files:
-                    raise HTTPException(status_code=404, detail="No gcode found in 3MF file")
-                gcode_content = zf.read(gcode_files[0])
-                from fastapi.responses import Response
-
-                return Response(content=gcode_content, media_type="text/plain")
+                entry = next((i for i in zf.infolist() if i.filename.endswith(".gcode")), None)
         except zipfile.BadZipFile:
             raise HTTPException(status_code=400, detail="Invalid 3MF file")
+        if entry is None:
+            raise HTTPException(status_code=404, detail="No gcode found in 3MF file")
+
+        def chunks():
+            with zipfile.ZipFile(str(abs_path), "r") as zf, zf.open(entry.filename) as f:
+                while chunk := f.read(1 << 20):
+                    yield chunk
+
+        return StreamingResponse(chunks(), media_type="text/plain", headers={"Content-Length": str(entry.file_size)})
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
