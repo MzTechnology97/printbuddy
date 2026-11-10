@@ -470,6 +470,15 @@ UI_STRINGS = [
     "A G-code path goes beyond the max print height.",
     "A G-code path goes beyond plate boundaries.",
     "The prime tower extends beyond the plate boundary.",
+    # ...and a multi-nozzle printer's, each nozzle's area and height (GLCanvas3D::_set_warning_notification)
+    "left nozzle",
+    "right nozzle",
+    "Tool %d",
+    "Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+    "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.",
+    "Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+    "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
+    "Open wiki for more information.",
     # Save preset and Compare presets (SavePresetDialog.cpp, UnsavedChangesDialog.cpp, Tab.cpp, ParamsPanel.cpp)
     "Save preset",
     "Save %s as",

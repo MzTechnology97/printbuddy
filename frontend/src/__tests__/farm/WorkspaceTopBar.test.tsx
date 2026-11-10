@@ -10,7 +10,7 @@ import { COALESCE_MS, type DraftHistory, draftHistory } from '../../farm/workspa
 import { type MenuActions, type MenuState, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from '../../farm/workspace/menuBar';
 import { TopBar, type TopBarProps } from '../../farm/workspace/TopBar';
 import { ContextMenu } from '../../farm/workspace/Viewport';
-import { bedRectangle, sliceWarnings } from '../../farm/workspace/gcode/checks';
+import { bedRectangle, sliceWarnings, warningText } from '../../farm/workspace/gcode/checks';
 import { parseGcode } from '../../farm/workspace/gcode/parse';
 
 describe('undo / redo of the settings edits', () => {
@@ -245,5 +245,86 @@ describe("the slice's checks against the bed (GLCanvas3D)", () => {
     const x1 = plate(['; FEATURE: Custom', 'G1 X10.1 Y200.0 Z0.28 F1500.0 E15 ;Draw the first line', 'G1 X10.4 Y20 Z0.28 F1500.0 E30 ;Draw the second line']);
     const k2 = plate([';TYPE:Custom', 'G1 X0 Y0 Z0.3 F6000', 'G1 X150 Y0 E15 F6000', 'G1 X-2 Y0 E15 F6000']);
     for (const p of [a1, x1, k2]) expect(sliceWarnings(p)).toEqual([]);
+  });
+});
+
+describe("each nozzle's printable area and height (H2D, X2D: GCodeProcessor::check_multi_extruder_gcode_valid)", () => {
+  // the public v2.5.0 H2D machine profile: the left nozzle can't reach x > 325, the right one x < 25
+  const H2D = [
+    '; printable_area = 0x0,350x0,350x320,0x320',
+    '; printable_height = 325',
+    '; extruder_printable_area = 0x0,325x0,325x320,0x320#25x0,350x0,350x320,25x320',
+    '; extruder_printable_height = 320,325',
+    '; extruder_offset = 0x0,0x0',
+    '; nozzle_diameter = 0.4,0.4',
+    '; printer_model = Bambu Lab H2D',
+  ];
+  /** ``objects``: per object, its filament (0-based, as T<n>) and the x span its extrusions end in; ``map``: filament -> nozzle (1-based) */
+  const slice = (objects: { filament: number; x: [number, number]; z?: number }[], { map = '2,1', config = H2D } = {}) =>
+    parseGcode(
+      ['; CONFIG_BLOCK_START', ...config, `; filament_map = ${map}`, '; CONFIG_BLOCK_END', 'M83', '; FEATURE: Custom', 'G1 X-10 Y5 Z0.2', 'G1 X0 Y5 E2',
+        ...objects.flatMap((o, i) => [
+          `; CHANGE_LAYER`, `; Z_HEIGHT: ${o.z ?? 0.2}`, `; start printing object, unique label id: ${8 + 4 * i}`, `T${o.filament}`,
+          '; FEATURE: Outer wall', `G1 X${o.x[0] - 1} Y100 Z${o.z ?? 0.2}`, `G1 X${o.x[0]} Y100 E0.1`, `G1 X${o.x[1]} Y100 E1`, `; stop printing object, unique label id: ${8 + 4 * i}`,
+        ])].join('\n'),
+    );
+  const text = (w: ReturnType<typeof sliceWarnings>[number]) => warningText(w, (t) => t);
+
+  it('finds nothing when each filament stays in its nozzle\'s area (the custom start G-code off the bed is left out)', () => {
+    expect(sliceWarnings(slice([{ filament: 1, x: [10, 300] }, { filament: 0, x: [30, 340] }]))).toEqual([]);
+  });
+
+  it("a filament past its nozzle's reach is an error naming the filament and the nozzle", () => {
+    // filament_map 2,1: filament 2 (T1) prints with the left nozzle, which stops at x = 325
+    const out = sliceWarnings(slice([{ filament: 1, x: [300, 330] }]));
+    expect(out.map((w) => [w.key, w.error])).toEqual([['nozzleArea', true]]);
+    expect(text(out[0])).toBe('Filament 2 is placed in the left nozzle, but the generated G-code path exceeds the printable range of the left nozzle.');
+    // touching the edge counts, as Orca's box grown by SCALED_EPSILON
+    expect(sliceWarnings(slice([{ filament: 1, x: [300, 325] }])).map((w) => w.key)).toEqual(['nozzleArea']);
+    expect(sliceWarnings(slice([{ filament: 1, x: [300, 324.9] }]))).toEqual([]);
+  });
+
+  it('one line per nozzle, left first; a filament two objects print is listed twice, as Orca lists it', () => {
+    const out = sliceWarnings(slice([{ filament: 0, x: [5, 20] }, { filament: 1, x: [320, 330] }, { filament: 1, x: [330, 340] }]));
+    expect(text(out[0]).split('\n')).toEqual([
+      'Filaments 2, 2 are placed in the left nozzle, but the generated G-code path exceeds the printable range of the left nozzle.',
+      'Filament 1 is placed in the right nozzle, but the generated G-code path exceeds the printable range of the right nozzle.',
+    ]);
+  });
+
+  it("the nozzle's own height (320 for the left one), with Orca's wiki line", () => {
+    const out = sliceWarnings(slice([{ filament: 1, x: [100, 120], z: 322 }]));
+    expect(out.map((w) => w.key)).toEqual(['nozzleHeight']);
+    expect(text(out[0]).split('\n')).toEqual([
+      'Filament 2 is placed in the left nozzle, but the generated G-code path exceeds the printable height of the left nozzle.',
+      'Open wiki for more information.',
+    ]);
+    expect(sliceWarnings(slice([{ filament: 0, x: [100, 120], z: 322 }]))).toEqual([]); // the right nozzle reaches 325
+  });
+
+  it('in Italian, with the nozzle translated; "Tool N" for a printer that is not a Bambu Lab one', () => {
+    const it = (t: string) => (({
+      'Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable range of the %2%.':
+        'Il filamento %1% è posizionato nel %2%, ma il percorso G-code generato supera l\'area stampabile del %2%.',
+      'left nozzle': 'ugello sinistro',
+      'Tool %d': 'Testina %d',
+    }) as Record<string, string>)[t] ?? t;
+    const h2d = sliceWarnings(slice([{ filament: 1, x: [300, 330] }]));
+    expect(warningText(h2d[0], it)).toBe('Il filamento 2 è posizionato nel ugello sinistro, ma il percorso G-code generato supera l\'area stampabile del ugello sinistro.');
+    const other = sliceWarnings(slice([{ filament: 1, x: [300, 330] }], { config: H2D.map((l) => l.replace('Bambu Lab H2D', 'Other IDEX')) }));
+    expect(warningText(other[0], it)).toContain('nel Testina 1,');
+  });
+
+  it('not on a single-nozzle printer, nor for a nozzle area that is not a rectangle (no false error)', () => {
+    const single = H2D.map((l) => l.replace('0.4,0.4', '0.4'));
+    expect(sliceWarnings(slice([{ filament: 1, x: [300, 330] }], { config: single }))).toEqual([]);
+    // fdm_bbl_3dp_002_common's right-nozzle area, a quadrilateral that is not a rectangle
+    const odd = H2D.map((l) => l.replace('25x0,350x0,350x320,25x320', '25x0,350x0,350x320,0x320'));
+    expect(sliceWarnings(slice([{ filament: 0, x: [5, 20] }], { config: odd }))).toEqual([]);
+  });
+
+  it("keeps each object's and filament's paths apart, custom G-code left out", () => {
+    const tp = slice([{ filament: 1, x: [10, 20] }, { filament: 0, x: [30, 40] }]);
+    expect(tp.stats.nozzlePaths.map((p) => [p.object, p.filament, p.box[0], p.box[2]])).toEqual([[8, 1, 10, 20], [12, 0, 30, 40]]);
   });
 });

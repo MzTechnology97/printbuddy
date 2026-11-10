@@ -11,7 +11,7 @@ import type { ViewerScene } from '../../../components/ModelViewer';
 import { VIEW_KEYS, setView } from '../viewTools';
 import { LegendPanel } from './LegendPanel';
 import { type OptionKey, type RangeView, type ViewType, VIEW_TYPES, defaultViewType, paint, rangeOf, shortTime } from './legend';
-import { sliceWarnings } from './checks';
+import { sliceWarnings, warningText } from './checks';
 import { MOVE, ROLES, type Toolpaths } from './parse';
 import type { WorkerReply, WorkerRequest } from './parse.worker';
 import { ToolpathScene } from './scene';
@@ -275,11 +275,11 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
           {warnings.map((w) => (
             <p
               key={w.key}
-              className={`rounded border px-2 py-1 text-xs shadow ${
+              className={`whitespace-pre-line rounded border px-2 py-1 text-xs shadow ${
                 w.error ? 'border-red-500/70 bg-red-950/90 text-red-200' : 'border-amber-500/70 bg-amber-950/90 text-amber-200'
               }`}
             >
-              {o(w.text)}
+              {warningText(w, o)}
             </p>
           ))}
         </div>
