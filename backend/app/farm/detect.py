@@ -55,9 +55,10 @@ def _read_header_metadata(zf: zipfile.ZipFile) -> dict[str, str]:
             if b"<resources" in buf:
                 break
     buf = buf.split(b"<resources", 1)[0]
+    # The first of a repeated name wins: the Orca CLI writes its own ``OrcaSlicer`` tag and keeps the project's after it.
     return {
         name.decode("utf-8", "replace"): (value or b"").decode("utf-8", "replace").strip()
-        for name, value in _METADATA_RE.findall(buf)
+        for name, value in reversed(_METADATA_RE.findall(buf))
     }
 
 
@@ -93,6 +94,16 @@ def detect_slicer(metadata: dict[str, str]) -> str:
     return SLICER_UNKNOWN
 
 
+def slicer_version(metadata: dict[str, str], slicer: str | None = None) -> str | None:
+    """The version of the slicer that wrote the 3MF: Orca's own ``OrcaSlicer`` tag (Orca 2.4+ writes a Bambu Studio
+    Application for compatibility), else the Application's: "BambuStudio-02.08.02.61" -> "02.08.02.61". With
+    ``slicer`` Bambu Studio, an Orca tag kept from the project is not its own."""
+    if slicer != SLICER_BAMBU and metadata.get("OrcaSlicer"):
+        return metadata["OrcaSlicer"]
+    found = re.match(r"(?:OrcaSlicer|BambuStudio)[-_ ]?v?(\d\S*)", metadata.get("Application", ""))
+    return found.group(1) if found else None
+
+
 def printer_model_from_settings(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -118,8 +129,9 @@ def inspect_3mf(path: Path) -> ProjectInfo:
                     pass  # CAD exports / partial settings: no printer, file still usable
     except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, KeyError, zlib.error) as exc:
         raise CorruptFileError(f"invalid zip: {exc}") from exc
+    orca = metadata.get("OrcaSlicer")  # Orca's own version: the Application of Orca 2.4+ names a Bambu Studio release
     return ProjectInfo(
-        application=metadata.get("Application") or None,
+        application=f"OrcaSlicer-{orca}" if orca else metadata.get("Application") or None,
         slicer=detect_slicer(metadata),
         printer_model_raw=printer_raw,
         printer_model=printer_model_from_settings(printer_raw),

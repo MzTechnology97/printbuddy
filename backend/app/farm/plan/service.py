@@ -31,6 +31,7 @@ from backend.app.farm.products.models import (
     FarmShape,
 )
 from backend.app.farm.products.shapes import candidate_plates, plate_yield, product_shapes
+from backend.app.models.library import LibraryFile
 from backend.app.models.printer import Printer
 from backend.app.models.project import Project
 from backend.app.services.print_scheduler import _canonical_filament_type, scheduler
@@ -242,6 +243,27 @@ async def _disabled_only(db: AsyncSession) -> set[str]:
     return disabled - active
 
 
+async def _slice_fidelity(db: AsyncSession, plates: list[FarmPlate], states: dict) -> dict[int, dict | None]:
+    """Plate -> what its slice changes: the report of its output, else (not sliced yet) who saved the project
+    against the sidecar's version."""
+    from backend.app.farm import slicing  # imports this module
+
+    sliced = {p.sliced_file_id for p in plates if p.sliced_file_id}
+    outputs = {
+        f.id: (f.file_metadata or {}).get("slice_fidelity")
+        for f in (await db.execute(select(LibraryFile).where(LibraryFile.id.in_(sliced)))).scalars()
+    }
+    sidecars = {s: await slicing.sidecar_version(db, s) for s in {st.slicer for st in states.values()} if s}
+    found = {}
+    for plate in plates:
+        state = states.get(plate.library_file_id)
+        if plate.sliced_file_id in outputs:
+            found[plate.id] = outputs[plate.sliced_file_id]
+        elif state is not None:
+            found[plate.id] = slicing.predicted_fidelity(state, sidecars.get(state.slicer))
+    return found
+
+
 async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, codes: list[str] | None = None) -> dict:
     """Components to print (``to_print > 0``), most urgent first, each with its ranked plates.
 
@@ -276,6 +298,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
         ).scalars()
     }
     paths = {fid: s.path for fid, s in states.items()}
+    fidelity = await _slice_fidelity(db, plates, states)
     shape_names = dict((await db.execute(select(FarmShape.id, FarmShape.name))).all())
     # The products using each component, colour variants included (a variant takes the component of each
     # shaped part in its colour): their names and covers help tell the piece apart from its title.
@@ -331,6 +354,7 @@ async def build_plan(db: AsyncSession, queued: dict[str, int] | None = None, cod
                     "sliced": plate.sliced_file_id is not None,
                     "sliced_file_id": plate.sliced_file_id,  # its G-code, for the 3D view
                     "slicer": states[plate.library_file_id].slicer if plate.library_file_id in states else None,
+                    "slice_fidelity": fidelity.get(plate.id),
                     "printers": fits,
                     "score": 2 if ready else 1 if free else 0,
                 }

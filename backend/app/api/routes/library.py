@@ -2991,13 +2991,15 @@ _PROJECT_SETTINGS_SENTINEL_KEYS = frozenset(
 )
 
 
-def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
+def _sanitize_project_settings_sentinels(
+    zip_bytes: bytes, keys: frozenset[str] = _PROJECT_SETTINGS_SENTINEL_KEYS
+) -> bytes:
     """Strip ``"-1"`` inherit-from-parent sentinels from the 3MF's
     ``Metadata/project_settings.config`` so the slicer CLI's range validator
     accepts the file (#1201).
 
-    Removes only allowlisted keys (see ``_PROJECT_SETTINGS_SENTINEL_KEYS``)
-    when their value is exactly ``"-1"``. The rest of the config — and every
+    Removes only allowlisted keys (``keys``, by default
+    ``_PROJECT_SETTINGS_SENTINEL_KEYS``) when their value is exactly ``"-1"``. The rest of the config — and every
     other entry in the zip — is preserved byte-for-byte. Unlike the earlier
     full-strip experiment (see ``_strip_3mf_embedded_settings`` and the
     cautionary comment in ``_run_slicer_with_fallback``) this leaves
@@ -3022,7 +3024,7 @@ def _sanitize_project_settings_sentinels(zip_bytes: bytes) -> bytes:
                 return zip_bytes
             if not isinstance(config, dict):
                 return zip_bytes
-            removed = [key for key in _PROJECT_SETTINGS_SENTINEL_KEYS if config.get(key) == "-1"]
+            removed = [key for key in keys if config.get(key) == "-1"]
             if not removed:
                 return zip_bytes
             for key in removed:

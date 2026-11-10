@@ -51,6 +51,13 @@ class ParsedPlate:
     fingerprints: dict[str, list[float]] = field(default_factory=dict)  # object name -> geometry
 
 
+def output_grams(meta: dict) -> float | None:
+    """Grams of a sliced output from its metadata: its filaments' sum (``slice_info``), else the plate's weight, else
+    the sidecar's figure, which outputs from before kept and which counts the first filament only."""
+    slots = round(sum(s.get("used_g") or 0 for s in meta.get("filament_slots") or []), 2)
+    return slots or meta.get("filament_used_grams") or meta.get("filament_used_g") or None
+
+
 def _meta(elem, key: str) -> str | None:
     for m in elem.findall("metadata"):
         if m.get("key") == key:
@@ -345,11 +352,14 @@ async def refresh_plates(db: AsyncSession, lib_file: LibraryFile, state: FarmLib
     )
     for plate_index, out in (await _latest_slices(db, lib_file, state.sha256)).items():
         plate = next((p for p in current if p.plate_index == plate_index), None)
-        if plate is not None and plate.sliced_file_id != out.id:
-            meta = out.file_metadata or {}
+        if plate is None:
+            continue
+        meta = out.file_metadata or {}
+        if plate.sliced_file_id != out.id:
             plate.sliced_file_id = out.id
             plate.print_time_seconds = meta.get("print_time_seconds") or plate.print_time_seconds
-            plate.filament_grams = meta.get("filament_used_g") or plate.filament_grams
+        # also for a plate linked before: its grams then came from the sidecar's first filament only
+        plate.filament_grams = output_grams(meta) or plate.filament_grams
     await db.commit()
     return current
 

@@ -14,7 +14,9 @@ import { ConfirmModal } from '../components/ConfirmModal';
 import { useToast } from '../contexts/ToastContext';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { appAssetPath } from '../utils/assetPaths';
-import { farmApi, type FarmBoardDetail, type FarmBoardEvent, type FarmBoardGroup, type FarmBoardRow } from './api';
+import {
+  farmApi, type FarmBoardDetail, type FarmBoardEvent, type FarmBoardGroup, type FarmBoardRow, type FarmSliceFidelity,
+} from './api';
 import { OutsidePrints } from './OutsidePrints';
 import './i18n';
 
@@ -53,6 +55,47 @@ export function SlicerBadge({ slicer }: { slicer: string | null }) {
       <img src={appAssetPath(s.icon)} alt={s.name} className="w-4 h-4" />
       <span className="hidden sm:inline">{s.name}</span>
     </span>
+  );
+}
+
+/** Whether a slice report asks for a look: another slicer version, or the machine G-code / nozzle changed. */
+const fidelityWarns = (f?: FarmSliceFidelity | null) => !!f && (f.version_drift || !!f.highlight?.length);
+
+/** What the slicer changed in the project: the version drift, then the settings it changed, expandable. */
+export function SliceFidelityNote({ fidelity }: { fidelity?: FarmSliceFidelity | null }) {
+  const { t } = useTranslation();
+  const changed = fidelity?.changed ?? [];
+  if (!fidelity || (!fidelity.version_drift && !changed.length)) return null;
+  const highlight = fidelity.highlight ?? [];
+  const count = fidelity.changed_count ?? changed.length;
+  return (
+    <div className="space-y-1 text-xs">
+      {fidelity.version_drift && (
+        <p className="text-amber-400 flex items-start gap-1">
+          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+          {t('farm.fidelity.versionDrift', { project: fidelity.project, slicer: fidelity.slicer })}
+        </p>
+      )}
+      {changed.length > 0 && (
+        // inside a clickable plate row: opening the list doesn't pick the plate
+        <details onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+          <summary className="cursor-pointer text-bambu-gray">
+            {t('farm.fidelity.changed', { count })}
+            {highlight.length > 0 && (
+              <span className="text-amber-400"> · {t('farm.fidelity.watched', { keys: highlight.join(', ') })}</span>
+            )}
+          </summary>
+          <ul className="mt-1 ml-4 list-disc text-bambu-gray break-all">
+            {changed.map(([key, before, after]) => (
+              <li key={key} className={highlight.includes(key) ? 'text-amber-400' : undefined}>
+                {key}{before !== null || after !== null ? `: ${before ?? '…'} → ${after ?? '…'}` : ''}
+              </li>
+            ))}
+            {count > changed.length && <li>{t('farm.fidelity.more', { count: count - changed.length })}</li>}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -202,6 +245,7 @@ function Details({ row }: { row: FarmBoardRow }) {
   return (
     <div className="space-y-4">
       <Timeline row={row} events={data.events} />
+      <SliceFidelityNote fidelity={row.slice_fidelity} />
       <div className="flex flex-wrap gap-2">
         {has('retry_slice') && (
           <Button size="sm" disabled={busy} onClick={() => act.mutate('retry-slice')}>
@@ -279,6 +323,9 @@ function Row({ row }: { row: FarmBoardRow }) {
           <span className="text-xs text-bambu-gray inline-flex items-center gap-1"><PrinterIcon className="w-3 h-3" />{row.printer}</span>
         )}
         <SlicerBadge slicer={row.slicer} />
+        {fidelityWarns(row.slice_fidelity) && (
+          <AlertTriangle className="w-4 h-4 text-amber-400" aria-label={t('farm.fidelity.warning')} />
+        )}
         <span className="basis-full sm:basis-auto sm:ml-auto text-xs break-words">
           {row.group === 'printing' && row.printer_id ? <Progress printerId={row.printer_id} /> : (
             <span className={row.group === 'problems' ? 'text-red-300' : 'text-bambu-gray'}>
