@@ -19,7 +19,7 @@ import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
-import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic } from './menuBar';
+import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { type Selection, instancesOf } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
@@ -519,16 +519,21 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     }
     // the top bar's keys (Shortcuts.cpp), anywhere but in a text field: undo / redo, save, slice, export, print
     if (ctrl && !e.altKey) {
-      const k = e.key.toLowerCase();
-      const run = (action: (() => void) | undefined) => {
-        e.preventDefault();
-        action?.();
-      };
-      if (k === 'z' && !e.shiftKey) return run(canUndo ? undo : undefined);
-      if (k === 'y' && !e.shiftKey) return run(canRedo ? redo : undefined);
-      if (k === 's') return run(canSave ? () => setSaveOpen(true) : undefined);
-      if (k === 'r' && !e.shiftKey) return run(sliceRun);
-      if (k === 'g') return run(e.shiftKey ? printRun : printActions.exportSliced);
+      const action = topBarShortcut(e.key, e.shiftKey, {
+        undo: canUndo ? undo : undefined,
+        redo: canRedo ? redo : undefined,
+        save: canSave ? () => setSaveOpen(true) : undefined,
+        slice: sliceRun,
+        print: printRun,
+        exportSliced: printActions.exportSliced,
+        slicing: busy,
+      });
+      if (action) {
+        e.preventDefault(); // only when the key does something here: else it stays the browser's
+        if (action === 'slicing') showToast(t('farm.workspace.topbar.slicingNoReload'), 'info');
+        else action();
+        return;
+      }
     }
     if (mode !== 'prepare' || !view) return;
     if (!onCanvas && e.key !== 'Escape') return;

@@ -22,23 +22,17 @@ export function bedOutline(tp: Toolpaths): [number, number][] {
     .filter((p): p is [number, number] => p.length === 2 && p.every(Number.isFinite));
 }
 
-function inside(poly: [number, number][], x: number, y: number): boolean {
-  let c = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const [xi, yi] = poly[i], [xj, yj] = poly[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
-  }
-  return c;
-}
-
-/** Whether the box's footprint is on the bed: the outline's bounds for a rectangle (as Orca), else its corners. */
-function onBed(poly: [number, number][], box: number[]): boolean {
+/** The bed's rectangle [x0, y0, x1, y1] when ``printable_area`` is one (BuildVolume_Type::Rectangle), else null. */
+export function bedRectangle(poly: [number, number][]): [number, number, number, number] | null {
   const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  const rect = poly.length === 4 && poly.every(([x, y]) => (x === x0 || x === x1) && (y === y0 || y === y1));
-  if (rect) return box[0] >= x0 - EPSILON && box[1] >= y0 - EPSILON && box[3] <= x1 + EPSILON && box[4] <= y1 + EPSILON;
-  // shortcut: a custom bed is checked at the paths' bounding-box corners, not path by path; enough for convex beds
-  return [[box[0], box[1]], [box[3], box[1]], [box[3], box[4]], [box[0], box[4]]].every(([x, y]) => inside(poly, x, y));
+  const rect = poly.length === 4 && x1 > x0 && y1 > y0 && poly.every(([x, y]) => (x === x0 || x === x1) && (y === y0 || y === y1));
+  return rect ? [x0, y0, x1, y1] : null;
+}
+
+/** Whether the paths' box is on a rectangular bed, as BuildVolume::all_paths_inside's bounding-box test. */
+function onBed(rect: [number, number, number, number], box: number[]): boolean {
+  return box[0] >= rect[0] - EPSILON && box[1] >= rect[1] - EPSILON && box[3] <= rect[2] + EPSILON && box[4] <= rect[3] + EPSILON;
 }
 
 export function sliceWarnings(tp: Toolpaths): SliceWarning[] {
@@ -48,11 +42,14 @@ export function sliceWarnings(tp: Toolpaths): SliceWarning[] {
   const top = Math.max(0, ...tp.layerZ);
   const tooHigh = height > 0 && top - height >= 1e-6;
   if (tooHigh) out.push({ key: 'height', text: 'A G-code path goes beyond the max print height.', error: true });
+  // shortcut: only a rectangular bed is checked; a round or custom one would need every path point tested
+  // (Orca's Circle / Convex cases), so no edge warning there rather than a false one
+  const rect = bedRectangle(poly);
   const box = tp.stats.pathBox;
-  if (!tooHigh && poly.length >= 3 && box && !onBed(poly, box))
+  if (!tooHigh && rect && box && !onBed(rect, box))
     out.push({ key: 'outside', text: 'A G-code path goes beyond plate boundaries.', error: true });
   const tower = tp.stats.towerBox;
-  if (poly.length >= 3 && tower && !onBed(poly, tower))
+  if (rect && tower && !onBed(rect, tower))
     out.push({ key: 'tower', text: 'The prime tower extends beyond the plate boundary.', error: false });
   return out;
 }

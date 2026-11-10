@@ -173,6 +173,34 @@ export function mainMenu(
   ];
 }
 
+/** What the top bar's keys can do now: each action is set only when it would run. */
+export interface ShortcutActions {
+  undo?: () => void;
+  redo?: () => void;
+  save?: () => void;
+  slice?: () => void;
+  print?: () => void;
+  exportSliced?: () => void;
+  /** A slice is running: Ctrl+R is held back so a reload doesn't lose it. */
+  slicing: boolean;
+}
+
+/** The top bar's keys (Shortcuts.cpp: Ctrl+Z / Y / S / R / G, Ctrl+Shift+G). null: not ours, or nothing to do, so
+ * the browser keeps the key (a reload, its own save...). 'slicing': Ctrl+R while slicing, held back on purpose. */
+export function topBarShortcut(key: string, shift: boolean, a: ShortcutActions): (() => void) | 'slicing' | null {
+  const k = key.toLowerCase();
+  const run =
+    k === 'z' && !shift ? a.undo
+    : k === 'y' && !shift ? a.redo
+    : k === 's' ? a.save
+    : k === 'r' && !shift ? a.slice
+    : k === 'g' ? (shift ? a.print : a.exportSliced)
+    : undefined;
+  if (run) return run;
+  if (k === 'r' && !shift && a.slicing) return 'slicing';
+  return null;
+}
+
 /** The Print button's actions (MainFrame::available_print_actions for a Bambu-network printer, without Send /
  * Send all / multi-device, which Printbuddy does with its own queue). */
 export const PRINT_ACTIONS = ['printPlate', 'printAll', 'exportSliced', 'exportAllSliced', 'exportGcode'] as const;

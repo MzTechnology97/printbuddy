@@ -562,6 +562,12 @@ export function ContextMenu({
   const close = useRef(onClose);
   close.current = onClose;
   const [sub, setSub] = useState<{ index: number; at: { x: number; y: number } } | null>(null);
+  // what had the focus when the menu opened (its trigger): it gets it back on Esc or a chosen item
+  const returnTo = useRef<HTMLElement | null>(nested ? null : (document.activeElement as HTMLElement | null));
+  const done = () => {
+    returnTo.current?.focus?.();
+    close.current();
+  };
   const openSub = (index: number, el: HTMLElement) => {
     const r = el.getBoundingClientRect();
     setSub({ index, at: { x: r.right, y: r.top - 4 } });
@@ -585,7 +591,7 @@ export function ContextMenu({
     ref.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])')?.focus();
     if (nested) return;
     const outside = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && close.current();
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && close.current();
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && done();
     document.addEventListener('mousedown', outside);
     window.addEventListener('keydown', esc);
     return () => {
@@ -596,6 +602,7 @@ export function ContextMenu({
   }, []);
 
   const run = (item: MenuItem) => {
+    returnTo.current?.focus?.(); // before the action: a dialog it opens takes the focus from there
     item.onClick?.();
     close.current();
   };
@@ -613,7 +620,7 @@ export function ContextMenu({
       e.preventDefault();
       onBack();
     } else if (e.key === 'Escape') {
-      close.current();
+      done();
     }
   };
 

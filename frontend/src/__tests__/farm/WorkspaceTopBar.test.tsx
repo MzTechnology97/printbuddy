@@ -7,10 +7,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, screen, within } from '@testing-library/react';
 import { render } from '../utils';
 import { COALESCE_MS, type DraftHistory, draftHistory } from '../../farm/workspace/draft';
-import { type MenuActions, type MenuState, fileMenu, mainMenu, stripMnemonic } from '../../farm/workspace/menuBar';
+import { type MenuActions, type MenuState, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from '../../farm/workspace/menuBar';
 import { TopBar, type TopBarProps } from '../../farm/workspace/TopBar';
 import { ContextMenu } from '../../farm/workspace/Viewport';
-import { sliceWarnings } from '../../farm/workspace/gcode/checks';
+import { bedRectangle, sliceWarnings } from '../../farm/workspace/gcode/checks';
 import { parseGcode } from '../../farm/workspace/gcode/parse';
 
 describe('undo / redo of the settings edits', () => {
@@ -104,6 +104,46 @@ describe('menus (MainFrame.cpp)', () => {
     expect(run).toHaveBeenCalled();
     expect(close).toHaveBeenCalled();
   });
+
+  it('Esc or a chosen item gives the focus back to what opened the menu', () => {
+    const { unmount } = render(<button type="button">File</button>);
+    const trigger = screen.getByRole('button', { name: 'File' });
+    trigger.focus();
+    const close = vi.fn();
+    const menu = render(<ContextMenu items={[{ label: 'Save', onClick: vi.fn() }]} at={{ x: 0, y: 0 }} onClose={close} />);
+    screen.getByRole('menuitem', { name: 'Save' }).focus();
+    fireEvent.keyDown(window, { key: 'Escape' }); // jsdom's selector engine can't run the menu's own key handler
+    expect(close).toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+    menu.unmount();
+    trigger.focus();
+    render(<ContextMenu items={[{ label: 'Save', onClick: vi.fn() }]} at={{ x: 0, y: 0 }} onClose={vi.fn()} />);
+    screen.getByRole('menuitem', { name: 'Save' }).focus();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Save' }));
+    expect(trigger).toHaveFocus();
+    unmount();
+  });
+});
+
+describe('the top bar keys (Shortcuts.cpp)', () => {
+  it('a key runs its action only when there is one; otherwise the browser keeps it', () => {
+    const save = vi.fn();
+    expect(topBarShortcut('s', false, { save, slicing: false })).toBe(save);
+    expect(topBarShortcut('z', false, { slicing: false })).toBeNull(); // nothing to undo: the browser's undo
+    expect(topBarShortcut('r', false, { slicing: false })).toBeNull(); // nothing to slice: the browser reloads
+    expect(topBarShortcut('p', false, { save, slicing: false })).toBeNull(); // not ours
+  });
+
+  it('Ctrl+R while slicing is held back on purpose (no reload mid-slice)', () => {
+    expect(topBarShortcut('r', false, { slicing: true })).toBe('slicing');
+    expect(topBarShortcut('R', true, { slicing: true })).toBeNull(); // Ctrl+Shift+R stays the browser's
+  });
+
+  it('Ctrl+G exports the sliced file, Ctrl+Shift+G prints', () => {
+    const print = vi.fn(), exportSliced = vi.fn();
+    expect(topBarShortcut('g', false, { print, exportSliced, slicing: false })).toBe(exportSliced);
+    expect(topBarShortcut('G', true, { print, exportSliced, slicing: false })).toBe(print);
+  });
 });
 
 describe('TopBar', () => {
@@ -134,6 +174,17 @@ describe('TopBar', () => {
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Slice all' }));
     expect(all).toHaveBeenCalled();
   });
+
+  it('a menu trigger closes its own open menu', () => {
+    render(<TopBar {...props({ file: [{ label: 'Save Project', onClick: vi.fn() }] })} />);
+    const file = screen.getByRole('button', { name: 'File' });
+    fireEvent.click(file);
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    fireEvent.mouseDown(file); // the menu's close-on-outside-press must not see this press...
+    fireEvent.click(file); // ...or the click would open it again
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(file).toHaveAttribute('aria-expanded', 'false');
+  });
 });
 
 describe("the slice's checks against the bed (GLCanvas3D)", () => {
@@ -161,5 +212,38 @@ describe("the slice's checks against the bed (GLCanvas3D)", () => {
   it('a prime tower beyond the plate is a warning', () => {
     const tower = plate(['; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Prime tower', 'G1 X250 Y250 Z0.2', 'G1 X258 Y250 E1']);
     expect(sliceWarnings(tower).map((w) => [w.key, w.error])).toEqual([['outside', true], ['tower', false]]);
+  });
+
+  it('a round or custom bed is not checked at the edges (no false error from the box corners)', () => {
+    const round = parseGcode(
+      ['; CONFIG_BLOCK_START', '; printable_area = 0x-100,70x-70,100x0,70x70,0x100,-70x70,-100x0,-70x-70', '; printable_height = 250', '; CONFIG_BLOCK_END', 'M83',
+        '; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X-90 Y0 Z0.2', 'G1 X90 Y0 E5', 'G1 X0 Y90 E5'].join('\n'),
+    );
+    expect(sliceWarnings(round)).toEqual([]);
+    expect(bedRectangle([[256, 256], [0, 0], [256, 0], [0, 256]])).toEqual([0, 0, 256, 256]);
+    expect(bedRectangle([[0, 0], [256, 0], [128, 256]])).toBeNull();
+  });
+
+  it('extrusion before the first feature tag (role undefined) is left out, as Orca', () => {
+    expect(sliceWarnings(plate(['G1 X-40 Y5 Z0.2', 'G1 X-30 Y5 E2', '; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X10 Y10', 'G1 X20 Y10 E1']))).toEqual([]);
+  });
+
+  it("the nozzle's extruder_offset is added, as GCodeProcessor (X1 / P1: 0x2)", () => {
+    const at = (offset: string) =>
+      parseGcode(
+        ['; CONFIG_BLOCK_START', '; printable_area = 0x0,256x0,256x256,0x256', '; printable_height = 250', `; extruder_offset = ${offset}`, '; CONFIG_BLOCK_END', 'M83',
+          '; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X10 Y255 Z0.2', 'G1 X20 Y255 E1'].join('\n'),
+      );
+    expect(sliceWarnings(at('0x0'))).toEqual([]);
+    expect(sliceWarnings(at('0x2')).map((w) => w.key)).toEqual(['outside']);
+    expect(at('0x2').stats.pathBox?.[4]).toBeCloseTo(257);
+  });
+
+  // the start G-code of the public v2.5.0 profiles, as their CLI slices print it: all tagged custom, so left out
+  it('real start G-code patterns: A1 wipe off the bed, X1 / P1S / H2D / X2D purge lines, K2 (Klipper) purge on the edge', () => {
+    const a1 = plate(['; FEATURE: Custom', 'G1 X-28.5 F30000', 'G1 X-48.2 F3000', 'G1 X-28.5 E0.5 F3000 ;wipe and shake', 'G1 X-48.2 E0.5 F3000']);
+    const x1 = plate(['; FEATURE: Custom', 'G1 X10.1 Y200.0 Z0.28 F1500.0 E15 ;Draw the first line', 'G1 X10.4 Y20 Z0.28 F1500.0 E30 ;Draw the second line']);
+    const k2 = plate([';TYPE:Custom', 'G1 X0 Y0 Z0.3 F6000', 'G1 X150 Y0 E15 F6000', 'G1 X-2 Y0 E15 F6000']);
+    for (const p of [a1, x1, k2]) expect(sliceWarnings(p)).toEqual([]);
   });
 });

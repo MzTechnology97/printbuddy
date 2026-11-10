@@ -216,6 +216,7 @@ export class GcodeParser {
   private densities: number[] = [];
   private diameters: number[] = [];
   private filamentMap: number[] = [];
+  private offsets: [number, number][] = [];
 
   private x = 0; private y = 0; private z = 0; private e = 0;
   private absolute = true; private absoluteE = true;
@@ -286,7 +287,8 @@ export class GcodeParser {
       }
     }
     const c = this.cur;
-    c.pos[3 * i] = px; c.pos[3 * i + 1] = py; c.pos[3 * i + 2] = pz;
+    const [ox, oy] = this.offset(); // GCodeProcessor::store_move_vertex adds the extruder's offset
+    c.pos[3 * i] = px + ox; c.pos[3 * i + 1] = py + oy; c.pos[3 * i + 2] = pz;
     c.type[i] = type;
     c.role[i] = this.role;
     c.extruder[i] = Math.max(0, this.filament);
@@ -301,6 +303,11 @@ export class GcodeParser {
     c.flow[i] = clamp16(mm3 * SCALE.flow);
     c.line[i] = this.lineNo;
     this.n++;
+  }
+
+  /** The current nozzle's ``extruder_offset`` ("0x2", "0x0,0x0"). */
+  private offset(): [number, number] {
+    return this.offsets[Math.max(0, this.nozzle)] ?? this.offsets[0] ?? [0, 0];
   }
 
   private radius(f: number) {
@@ -344,10 +351,12 @@ export class GcodeParser {
       else this.width = (dE * Math.PI * r * r) / (xyz * h) + (1 - 0.25 * Math.PI) * h;
       if (this.width === 0) this.width = 0.4;
       this.width = Math.min(this.width, Math.max(2, 4 * h));
-      // the paths the bed checks look at (BuildVolume::all_paths_inside: extrusions, not custom G-code)
-      if (role !== ROLE.Custom && this.width > 0 && h > 0) {
-        grow(this.pathBox, nx, ny, nz);
-        if (role === ROLE['Prime tower']) grow(this.towerBox, nx, ny, nz);
+      // the paths the bed checks look at (BuildVolume::all_paths_inside: extrusions, not custom G-code; nor the
+      // start G-code's before any feature tag), where the nozzle prints (its extruder offset added, as Orca)
+      if (role !== ROLE.Custom && role !== ROLE.Undefined && this.width > 0 && h > 0) {
+        const [ox, oy] = this.offset();
+        grow(this.pathBox, nx + ox, ny + oy, nz);
+        if (role === ROLE['Prime tower']) grow(this.towerBox, nx + ox, ny + oy, nz);
       }
     } else if (type === MOVE.unretract && this.flushing) {
       this.add(this.flushMm3, f, area * dE);
@@ -446,6 +455,8 @@ export class GcodeParser {
     if (key === 'filament_density') this.densities = numbers(value);
     else if (key === 'filament_diameter') this.diameters = numbers(value);
     else if (key === 'filament_map') this.filamentMap = numbers(value);
+    else if (key === 'extruder_offset')
+      this.offsets = value.split(',').map((p) => p.trim().split('x').map(Number) as [number, number]).filter((p) => p.length === 2 && p.every(Number.isFinite));
     else if (key === 'default_acceleration' && first(value)) this.accel ||= first(value);
     else if (key === 'travel_acceleration' && first(value)) this.travelAccel ||= first(value);
     else if (key === 'machine_max_jerk_x') this.jerk ||= first(value);

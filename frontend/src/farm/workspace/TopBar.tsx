@@ -44,6 +44,8 @@ export function TopBar(p: TopBarProps) {
     if (items.length) setOpen({ which, at: { x: r.left, y: r.bottom + 2 } });
   };
   const menus: Record<string, MenuItem[]> = { file: p.file, main: p.main, slice: p.slice.options, print: p.print.options };
+  // its own trigger closes an open menu: the menu's close-on-outside-press must not see that press first
+  const keepOpen = (which: string) => (e: React.MouseEvent) => open?.which === which && e.nativeEvent.stopImmediatePropagation();
 
   return (
     <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 bg-bambu-dark-secondary border-b border-bambu-dark-tertiary">
@@ -56,6 +58,7 @@ export function TopBar(p: TopBarProps) {
           className="flex items-center gap-1 px-2 py-1 rounded text-sm text-white hover:bg-white/10"
           aria-haspopup="menu"
           aria-expanded={open?.which === 'file'}
+          onMouseDown={keepOpen('file')}
           onClick={(e) => show('file', e, p.file)}
         >
           {p.labels.file}
@@ -66,6 +69,7 @@ export function TopBar(p: TopBarProps) {
           className={iconButton}
           aria-haspopup="menu"
           aria-expanded={open?.which === 'main'}
+          onMouseDown={keepOpen('main')}
           aria-label={p.labels.menu}
           title={p.labels.menu}
           onClick={(e) => show('main', e, p.main)}
@@ -130,6 +134,7 @@ export function TopBar(p: TopBarProps) {
                 title={b.more}
                 aria-haspopup="menu"
                 aria-expanded={open?.which === which}
+                onMouseDown={keepOpen(which)}
                 onClick={(e) => show(which, e, b.options)}
                 className={`px-1.5 border-l border-black/20 ${
                   which === 'slice' ? 'bg-bambu-green text-white hover:bg-bambu-green-dark' : 'bg-bambu-dark-tertiary text-white hover:bg-white/15'
