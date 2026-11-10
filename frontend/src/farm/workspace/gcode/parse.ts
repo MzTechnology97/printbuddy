@@ -103,8 +103,18 @@ export interface GcodeStats {
    * null when there are none. */
   pathBox: Box | null;
   towerBox: Box | null;
+  /** Per object (its label id, -1 outside any) and filament: where its extrusions go, custom G-code left out
+   * ([minX, minY, maxX, maxY], the nozzle's offset added) and their highest print Z; by object, then filament. */
+  nozzlePaths: NozzlePath[];
   densities: number[];
   diameters: number[];
+}
+
+export interface NozzlePath {
+  object: number;
+  filament: number;
+  box: [number, number, number, number];
+  top: number;
 }
 
 /** The moves, one entry per column, all of length ``count``; values in the units of ``SCALE``. */
@@ -250,6 +260,8 @@ export class GcodeParser {
   private used = new Set<number>();
   private pathBox: Box = emptyBox();
   private towerBox: Box = emptyBox();
+  private label = -1;
+  private nozzlePaths = new Map<number, NozzlePath>();
   private filamentChanges = 0;
   private extruderChanges = 0;
 
@@ -358,6 +370,19 @@ export class GcodeParser {
         grow(this.pathBox, nx + ox, ny + oy, nz);
         if (role === ROLE['Prime tower']) grow(this.towerBox, nx + ox, ny + oy, nz);
       }
+      // the per-nozzle checks (GCodeProcessor::check_multi_extruder_gcode_valid) take every extrusion but custom G-code
+      if (role !== ROLE.Custom) {
+        const [ox, oy] = this.offset();
+        const key = (this.label + 1) * 256 + f;
+        const top = this.layer >= 0 ? (this.layerZ[this.layer] ?? 0) : 0;
+        const p = this.nozzlePaths.get(key);
+        if (!p) this.nozzlePaths.set(key, { object: this.label, filament: f, box: [nx + ox, ny + oy, nx + ox, ny + oy], top });
+        else {
+          const b = p.box;
+          b[0] = Math.min(b[0], nx + ox); b[1] = Math.min(b[1], ny + oy); b[2] = Math.max(b[2], nx + ox); b[3] = Math.max(b[3], ny + oy);
+          p.top = Math.max(p.top, top);
+        }
+      }
     } else if (type === MOVE.unretract && this.flushing) {
       this.add(this.flushMm3, f, area * dE);
     }
@@ -416,6 +441,10 @@ export class GcodeParser {
     const rest = () => s.slice(s.indexOf(':', a) + 1, b);
     const num = () => Number.parseFloat(rest());
     if (at('FEATURE:') || at('TYPE:')) this.role = roleOf(rest());
+    else if (at('start printing object')) {
+      const id = Number.parseInt(rest(), 10); // "; start printing object, unique label id: 12"
+      this.label = Number.isFinite(id) && id >= 0 ? id : -1;
+    } else if (at('stop printing object')) this.label = -1;
     else if (at('CHANGE_LAYER') || at('LAYER_CHANGE')) {
       this.layer++;
       this.layerStart[this.layer] = this.n;
@@ -719,6 +748,7 @@ export class GcodeParser {
         usedExtruders: [...this.used].sort((a, b) => a - b),
         pathBox: Number.isFinite(this.pathBox[0]) ? this.pathBox : null,
         towerBox: Number.isFinite(this.towerBox[0]) ? this.towerBox : null,
+        nozzlePaths: [...this.nozzlePaths.keys()].sort((a, b) => a - b).map((k) => this.nozzlePaths.get(k)!),
         densities: this.densities, diameters: this.diameters,
       },
     };
