@@ -22,7 +22,8 @@ export interface ViewerScene {
   controls: OrbitControls;
   renderer: THREE.WebGLRenderer;
   /** One child group per build item (object instance), ``userData`` {objectId, printable, instance (its number
-   * among the object's build items, from 0), plateId, paint {supports, color}, variableLayers}; in it one group per
+   * among the object's build items, from 0), plateId, paint {supports, color}, variableLayers, transform (its 12
+   * numbers in the file)}; its vertices are already placed by that transform. In it one group per
    * part, ``userData.partId`` (the part's id in model_settings.config). */
   model: THREE.Group;
   grid: THREE.GridHelper | null;
@@ -65,6 +66,7 @@ interface BuildItem {
   plateId?: number | null;
   printable?: boolean; // fork (printfarm): the build item's printable flag
   instance?: number; // fork (printfarm): its place among the object's build items (bbs_3mf writes them in instance order)
+  spec?: number[]; // fork (printfarm): its transform's 12 numbers as the file has them (the workspace places it anew)
 }
 
 interface Parsed3MFData {
@@ -99,18 +101,16 @@ function parseTransform3MF(transformStr: string | null): THREE.Matrix4 {
     return matrix; // Identity matrix
   }
 
-  // 3MF transform is a 3x4 affine matrix in row-major order:
-  // "m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32"
-  // Where (m30, m31, m32) is the translation vector
+  // 3MF transform is a 4x3 matrix applied to row vectors ([x y z 1] * M):
+  // "m00 m01 m02 m10 m11 m12 m20 m21 m22 m30 m31 m32", (m30, m31, m32) the translation.
+  // fork (printfarm): on column vectors (Three.js) that is its transpose, as OrcaSlicer reads it
+  // (bbs_get_transform_from_3mf_specs_string); reading it row by row turned rotated instances the other way
   const values = transformStr.trim().split(/\s+/).map(parseFloat);
   if (values.length >= 12) {
-    // Three.js Matrix4.set takes row-major order arguments:
-    // set(n11, n12, n13, n14, n21, n22, n23, n24, n31, n32, n33, n34, n41, n42, n43, n44)
-    // 3MF row-major: m00, m01, m02, m10, m11, m12, m20, m21, m22, m30, m31, m32
     matrix.set(
-      values[0], values[1], values[2], values[9],   // m00, m01, m02, tx
-      values[3], values[4], values[5], values[10],  // m10, m11, m12, ty
-      values[6], values[7], values[8], values[11],  // m20, m21, m22, tz
+      values[0], values[3], values[6], values[9],   // m00, m10, m20, tx
+      values[1], values[4], values[7], values[10],  // m01, m11, m21, ty
+      values[2], values[5], values[8], values[11],  // m02, m12, m22, tz
       0, 0, 0, 1
     );
   }
@@ -520,6 +520,8 @@ export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData>
       if (!objectId) continue;
 
       const transform = parseTransform(itemEl.getAttribute('transform'));
+      const specValues = (itemEl.getAttribute('transform') ?? '').trim().split(/\s+/).map(Number);
+      const spec = specValues.length === 12 && specValues.every(Number.isFinite) ? specValues : [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
       const instance = buildItems.filter((b) => b.objectId === objectId).length;
       const itemPlateId = parsePlateIdFromAttributes(itemEl) ?? plateAssignmentsByInstance.get(`${objectId}:${instance}`) ?? null;
       const objectPlateId = objects.get(objectId)?.plateId ?? null;
@@ -531,6 +533,7 @@ export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData>
         plateId: itemPlateId ?? objectPlateId ?? namePlateId ?? null,
         printable: itemEl.getAttribute('printable') !== '0',
         instance,
+        spec,
       });
     }
   }
@@ -659,6 +662,7 @@ export function buildModelGroup(
             color: objectData.meshes.some((m) => m.paint?.color),
           },
           variableLayers: !!parsedData.variableLayers?.has(item.objectId),
+          transform: item.spec,
         };
         for (const [partId, perExtruder] of byPart) {
           const partGroup = new THREE.Group();

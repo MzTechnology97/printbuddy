@@ -479,6 +479,14 @@ UI_STRINGS = [
     "Filament %1% is placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
     "Filaments %1% are placed in the %2%, but the generated G-code path exceeds the printable height of the %2%.",
     "Open wiki for more information.",
+    # the Move gizmo and its window (GLGizmoMove.cpp, GizmoObjectManipulation.cpp)
+    "World",
+    "Position",
+    "Coordinate system used for transform actions.",
+    "Drop",
+    "Move the selection along Z so that its lowest point touches the bed.",
+    "Done",
+    "Please select at least one object.",
     # Save preset and Compare presets (SavePresetDialog.cpp, UnsavedChangesDialog.cpp, Tab.cpp, ParamsPanel.cpp)
     "Save preset",
     "Save %s as",
