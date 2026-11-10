@@ -6,8 +6,10 @@ one preset's values with its inheritance resolved, a user preset by id or a cach
 (OrcaSlicer's ``inherits`` chain).
 
 Everything here reads the base-profile cache that ``services/orca_profiles`` fills when local presets are imported:
-no network, and nothing is written. A system preset is named only as the cache has it; any other name (a path, a
-name not cached) is refused before anything is looked up. Saving a user preset is ``POST /local-presets/``.
+no network, and the reads write nothing. A system preset is named only as the cache has it; any other name (a path,
+a name not cached) is refused before anything is looked up. Saving a user preset is
+``POST /farm/workspace/presets/user``: its name and values are checked as Orca checks them, and it is stored as given
+(its parent and the values it changes), in Printbuddy's local presets.
 
 A preset switch (OrcaSlicer's preset combos) resolves from the base-profile cache only, never half: a preset whose
 chain isn't all there isn't offered, and what is offered is exactly what the saved copy gets (``switch_target``,

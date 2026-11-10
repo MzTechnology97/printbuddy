@@ -178,16 +178,18 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // OrcaSlicer's preset combos (presetSwitch.ts): the page shows the switched project; ``livePresets`` is the page now
   const livePresets = useRef<LiveState | null>(null);
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
-  const { switched, pending } = presetSwitch;
-  const doc = useMemo(() => ({ ...source, settings: withSwitched(source.settings, switched.values) }), [source, switched.values]);
+  const { pending } = presetSwitch;
+  // the switches are part of the draft's undo history: a switch is one step, preset and values together
+  const { settings, switched, switchTo, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+    useSettingsDraft(source.settings, withSwitched);
+  const doc = useMemo(() => ({ ...source, settings }), [source, settings]);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const { trackJob } = useSliceJobTracker();
   const fileId = doc.file.id;
-  const { draft, set, reset, resetAll, replace, invalid, count: edits, undo, redo, canUndo, canRedo } = useSettingsDraft(doc.settings);
   const count = edits + switched.refs.length; // unsaved: the edits and the preset switches
-  livePresets.current = { settings: doc.settings, draft, replace };
+  livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
   // focus mode (on at first, as OrcaSlicer) shows one plate, the first to begin with; off: null, every plate

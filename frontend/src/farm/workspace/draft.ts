@@ -1,7 +1,7 @@
 // Fork (printfarm): the workspace's unsaved changes. Pure functions, so they're tested apart from the UI.
 // The backend checks every value again (farm/workspace/settings.py); this only spares a round trip.
 import { useCallback, useMemo, useReducer } from 'react';
-import type { SettingValue, WorkspaceSetting } from './api';
+import type { PresetRef, SettingValue, WorkspaceSetting } from './api';
 
 export const NIL = 'nil';
 export type Draft = Record<string, SettingValue>;
@@ -97,41 +97,70 @@ export function withoutKey(draft: Draft, key: string): Draft {
   return next;
 }
 
-/** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
-export interface DraftHistory {
+/** The preset switches made from the sidebar combos (presetSwitch.ts): which presets, and the values they set. */
+export interface Switched {
+  refs: PresetRef[];
+  values: Record<string, SettingValue>;
+}
+export const NO_SWITCH: Switched = { refs: [], values: {} };
+
+/** One undo step: the draft, and the preset switches it was made on (none: ``undefined``). */
+export interface DraftStep {
   draft: Draft;
-  past: Draft[];
-  future: Draft[];
+  switched?: Switched;
+}
+/** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
+export interface DraftHistory extends DraftStep {
+  past: DraftStep[];
+  future: DraftStep[];
   /** The setting the last edit changed and when: typing in one field is one step, not one per key. */
   last: { key: string; at: number } | null;
 }
 export type DraftAction =
   | { type: 'edit'; edit: (d: Draft) => Draft; key: string | null; at: number }
+  /** a preset switch (or Undo all): the switches and the draft change together, as one step */
+  | { type: 'switch'; switched: Switched; draft: Draft }
   | { type: 'undo' }
   | { type: 'redo' };
 /** Edits of the same setting closer than this make one undo step. */
 export const COALESCE_MS = 1000;
 const HISTORY = 100;
 
+const stepOf = (h: DraftHistory): DraftStep => ({ draft: h.draft, switched: h.switched });
+
 export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
   if (a.type === 'undo') {
     if (!h.past.length) return h;
-    return { draft: h.past[h.past.length - 1], past: h.past.slice(0, -1), future: [h.draft, ...h.future], last: null };
+    return { ...h.past[h.past.length - 1], past: h.past.slice(0, -1), future: [stepOf(h), ...h.future], last: null };
   }
   if (a.type === 'redo') {
     if (!h.future.length) return h;
-    return { draft: h.future[0], past: [...h.past, h.draft], future: h.future.slice(1), last: null };
+    return { ...h.future[0], past: [...h.past, stepOf(h)], future: h.future.slice(1), last: null };
+  }
+  if (a.type === 'switch') {
+    const same = JSON.stringify([a.draft, a.switched]) === JSON.stringify([h.draft, h.switched ?? NO_SWITCH]);
+    if (same) return h;
+    return { draft: a.draft, switched: a.switched, past: [...h.past, stepOf(h)].slice(-HISTORY), future: [], last: null };
   }
   const next = a.edit(h.draft);
   if (JSON.stringify(next) === JSON.stringify(h.draft)) return h;
   const same = a.key != null && h.last?.key === a.key && a.at - h.last.at < COALESCE_MS;
-  const past = same ? h.past : [...h.past, h.draft].slice(-HISTORY);
-  return { draft: next, past, future: [], last: a.key == null ? null : { key: a.key, at: a.at } };
+  const past = same ? h.past : [...h.past, stepOf(h)].slice(-HISTORY);
+  return { draft: next, switched: h.switched, past, future: [], last: a.key == null ? null : { key: a.key, at: a.at } };
 }
 
-export function useSettingsDraft(settings: WorkspaceSetting[]) {
+/**
+ * ``source``: the project's settings. ``view``: the settings as the switches made show them (presetTools.withSwitched);
+ * ``settings`` is that view, so the values are checked against the switched presets.
+ */
+export function useSettingsDraft(
+  source: WorkspaceSetting[],
+  view?: (settings: WorkspaceSetting[], values: Switched['values']) => WorkspaceSetting[],
+) {
   const [history, dispatch] = useReducer(draftHistory, { draft: {}, past: [], future: [], last: null });
   const draft = history.draft;
+  const switched = history.switched ?? NO_SWITCH;
+  const settings = useMemo(() => (view ? view(source, switched.values) : source), [view, source, switched.values]);
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
   const set = useCallback(
     (setting: WorkspaceSetting, value: SettingValue) =>
@@ -139,8 +168,9 @@ export function useSettingsDraft(settings: WorkspaceSetting[]) {
     [],
   );
   const reset = useCallback((key: string) => dispatch({ type: 'edit', edit: (d) => withoutKey(d, key), key: null, at: Date.now() }), []);
-  const resetAll = useCallback(() => dispatch({ type: 'edit', edit: () => ({}), key: null, at: Date.now() }), []);
-  const replace = useCallback((next: Draft) => dispatch({ type: 'edit', edit: () => next, key: null, at: Date.now() }), []);
+  // Undo all: the edits and the preset switches, one step that Undo brings back
+  const resetAll = useCallback(() => dispatch({ type: 'switch', switched: NO_SWITCH, draft: {} }), []);
+  const switchTo = useCallback((next: Switched, nextDraft: Draft) => dispatch({ type: 'switch', switched: next, draft: nextDraft }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
   const redo = useCallback(() => dispatch({ type: 'redo' }), []);
   const invalid = useMemo(
@@ -154,7 +184,7 @@ export function useSettingsDraft(settings: WorkspaceSetting[]) {
     [draft, byKey],
   );
   return {
-    draft, set, reset, resetAll, replace, invalid, count: Object.keys(draft).length,
+    settings, switched, switchTo, draft, set, reset, resetAll, invalid, count: Object.keys(draft).length,
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };
 }

@@ -3,12 +3,13 @@
  * section's values, the differences between two presets, what a saved user preset holds, and both dialogs.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { useRef } from 'react';
 import { act, fireEvent, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createTestQueryClient, render } from '../utils';
 import type { PresetRef, SettingValue, WorkspaceSetting } from '../../farm/workspace/api';
-import type { Draft } from '../../farm/workspace/draft';
-import { usePresetSwitch } from '../../farm/workspace/presetSwitch';
+import { useSettingsDraft } from '../../farm/workspace/draft';
+import { type LiveState, usePresetSwitch } from '../../farm/workspace/presetSwitch';
 import { workspaceApi } from '../../farm/workspace/api';
 import type { OrcaLayout } from '../../farm/workspace/orcaLayout';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from '../../farm/workspace/PresetDialogs';
@@ -205,47 +206,103 @@ describe('preset switch (the preset combos)', () => {
   });
 });
 
-describe('usePresetSwitch: a preview applies onto the page as it is when it comes back', () => {
+describe('a preset switch with the undo history (usePresetSwitch on useSettingsDraft)', () => {
   const WITH_DIFF = [...SETTINGS, setting('different_settings_to_system', null, ['', '', '', ''], { editable: false, readonly_reason: 'identity' })];
+  const WALLS = WITH_DIFF.find((s) => s.key === 'wall_loops')!;
+  const FINE = { layer_height: '0.12', print_settings_id: '0.12mm Fine @Test' };
   const ref = (name: string): PresetRef => ({ section: 'process', index: 0, source: 'system', name });
+  type Answer = { values: Record<string, SettingValue> };
   const deferred = () => {
-    let resolve!: (v: { values: Record<string, SettingValue> }) => void;
-    return { promise: new Promise<{ values: Record<string, SettingValue> }>((r) => (resolve = r)), resolve: (v: { values: Record<string, SettingValue> }) => resolve(v) };
+    let resolve!: (v: Answer) => void;
+    return { promise: new Promise<Answer>((r) => (resolve = r)), resolve: (v: Answer) => resolve(v) };
   };
-  const setup = () => {
-    const page = { settings: WITH_DIFF, draft: {} as Draft, replace: vi.fn((d: Draft) => (page.draft = d)) };
-    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>;
-    const hook = renderHook(() => usePresetSwitch(WITH_DIFF, () => page, vi.fn()), { wrapper });
-    return { page, hook };
+  // the page's wiring (WorkspacePage): the switch hook reads the draft hook as it is now
+  const usePage = () => {
+    const live = useRef<LiveState | null>(null);
+    const presets = usePresetSwitch(WITH_DIFF, () => live.current!, vi.fn());
+    const page = useSettingsDraft(WITH_DIFF, withSwitched);
+    live.current = { settings: page.settings, draft: page.draft, switched: page.switched, switchTo: page.switchTo };
+    return { presets, page };
   };
+  const setup = () =>
+    renderHook(usePage, { wrapper: ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider> });
+  const value = (h: ReturnType<typeof setup>, key: string) => h.result.current.page.settings.find((s) => s.key === key)?.value;
 
   it('keeps an edit typed while the preview runs, and takes no other pick meanwhile', async () => {
     const first = deferred();
     const preview = vi.spyOn(workspaceApi, 'previewSwitch').mockReturnValueOnce(first.promise);
-    const { page, hook } = setup();
-    act(() => hook.result.current.pick(ref('0.12mm Fine @Test')));
-    await waitFor(() => expect(hook.result.current.busy).toBe(true));
-    act(() => hook.result.current.pick(ref('0.16mm Other @Test'))); // ignored: one at a time
-    page.draft = { wall_loops: '4' }; // typed meanwhile
-    await act(async () => first.resolve({ values: { layer_height: '0.12', print_settings_id: '0.12mm Fine @Test' } }));
+    const h = setup();
+    act(() => h.result.current.presets.pick(ref('0.12mm Fine @Test')));
+    await waitFor(() => expect(h.result.current.presets.busy).toBe(true));
+    act(() => h.result.current.presets.pick(ref('0.16mm Other @Test'))); // ignored: one at a time
+    act(() => h.result.current.page.set(WALLS, '4')); // typed meanwhile
+    await act(async () => first.resolve({ values: FINE }));
     expect(preview).toHaveBeenCalledTimes(1);
     // the edit typed meanwhile is seen: the unsaved-changes dialog asks about it, and Transfer keeps it
-    await waitFor(() => expect(hook.result.current.pending?.keys).toEqual(['wall_loops']));
-    act(() => hook.result.current.commit(hook.result.current.pending!, true));
-    expect(hook.result.current.switched.refs).toEqual([ref('0.12mm Fine @Test')]);
-    expect(page.draft).toEqual({ wall_loops: '4' });
+    await waitFor(() => expect(h.result.current.presets.pending?.keys).toEqual(['wall_loops']));
+    act(() => h.result.current.presets.commit(h.result.current.presets.pending!, true));
+    expect(h.result.current.page.switched.refs).toEqual([ref('0.12mm Fine @Test')]);
+    expect(h.result.current.page.draft).toEqual({ wall_loops: '4' });
   });
 
-  it('drops an answer that comes back after the switches were undone', async () => {
-    const first = deferred();
-    vi.spyOn(workspaceApi, 'previewSwitch').mockReturnValueOnce(first.promise);
-    const { page, hook } = setup();
-    act(() => hook.result.current.pick(ref('0.12mm Fine @Test')));
-    await waitFor(() => expect(hook.result.current.busy).toBe(true));
-    act(() => hook.result.current.reset()); // Undo all while it runs
-    await act(async () => first.resolve({ values: { layer_height: '0.12' } }));
-    await waitFor(() => expect(hook.result.current.busy).toBe(false));
-    expect(hook.result.current.switched.refs).toEqual([]);
-    expect(page.replace).not.toHaveBeenCalled();
+  it('is one undo step: Undo brings back the preset and its values together, Redo the switch', async () => {
+    vi.spyOn(workspaceApi, 'previewSwitch').mockResolvedValueOnce({ values: FINE });
+    const h = setup();
+    act(() => h.result.current.presets.pick(ref('0.12mm Fine @Test'))); // nothing unsaved: no dialog
+    await waitFor(() => expect(h.result.current.page.switched.refs).toHaveLength(1));
+    expect([value(h, 'layer_height'), value(h, 'print_settings_id')]).toEqual(['0.12', '0.12mm Fine @Test']);
+    act(() => h.result.current.page.set(WALLS, '5')); // an edit on the switched preset: its own step
+    act(() => h.result.current.page.undo());
+    expect(h.result.current.page.draft).toEqual({});
+    expect(h.result.current.page.switched.refs).toHaveLength(1); // the edit only
+    act(() => h.result.current.page.undo());
+    expect(h.result.current.page.switched.refs).toEqual([]);
+    expect(value(h, 'layer_height')).toBe(SETTINGS.find((s) => s.key === 'layer_height')!.value); // the project's again
+    expect(value(h, 'print_settings_id')).toBe(SETTINGS.find((s) => s.key === 'print_settings_id')?.value);
+    act(() => h.result.current.page.redo());
+    expect(value(h, 'layer_height')).toBe('0.12');
+    act(() => h.result.current.page.redo());
+    expect(h.result.current.page.draft).toEqual({ wall_loops: '5' });
+  });
+
+  it('Undo all clears the switches and edits in one step, which Undo brings back', async () => {
+    vi.spyOn(workspaceApi, 'previewSwitch').mockResolvedValueOnce({ values: FINE });
+    const h = setup();
+    act(() => h.result.current.presets.pick(ref('0.12mm Fine @Test')));
+    await waitFor(() => expect(h.result.current.page.switched.refs).toHaveLength(1));
+    act(() => h.result.current.page.set(WALLS, '5'));
+    act(() => h.result.current.page.resetAll());
+    expect([h.result.current.page.switched.refs, h.result.current.page.draft]).toEqual([[], {}]);
+    act(() => h.result.current.page.undo());
+    expect(h.result.current.page.switched.refs).toHaveLength(1);
+    expect(h.result.current.page.draft).toEqual({ wall_loops: '5' });
+  });
+
+  it('drops an answer when the switches were undone meanwhile, or Undo all was used', async () => {
+    const preview = vi.spyOn(workspaceApi, 'previewSwitch').mockResolvedValueOnce({ values: FINE });
+    const h = setup();
+    act(() => h.result.current.presets.pick(ref('0.12mm Fine @Test')));
+    await waitFor(() => expect(h.result.current.page.switched.refs).toHaveLength(1));
+    const second = deferred();
+    preview.mockReturnValueOnce(second.promise);
+    act(() => h.result.current.presets.pick(ref('0.16mm Other @Test')));
+    await waitFor(() => expect(h.result.current.presets.busy).toBe(true));
+    act(() => h.result.current.page.undo()); // the first switch undone while the second's preview runs
+    await act(async () => second.resolve({ values: { layer_height: '0.16', print_settings_id: '0.16mm Other @Test' } }));
+    await waitFor(() => expect(h.result.current.presets.busy).toBe(false));
+    expect(h.result.current.page.switched.refs).toEqual([]); // not the stale [Fine, Other]
+
+    const third = deferred();
+    preview.mockReturnValueOnce(third.promise);
+    act(() => h.result.current.presets.pick(ref('0.16mm Other @Test')));
+    await waitFor(() => expect(h.result.current.presets.busy).toBe(true));
+    act(() => {
+      h.result.current.page.resetAll(); // Undo all, as the page does it
+      h.result.current.presets.reset();
+    });
+    await act(async () => third.resolve({ values: { layer_height: '0.16' } }));
+    await waitFor(() => expect(h.result.current.presets.busy).toBe(false));
+    expect(h.result.current.page.switched.refs).toEqual([]);
+    expect(h.result.current.presets.pending).toBeNull();
   });
 });
