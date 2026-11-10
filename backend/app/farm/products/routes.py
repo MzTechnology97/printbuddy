@@ -1006,6 +1006,10 @@ from backend.app.farm.products.assemblies import router as assemblies_router  # 
 
 router.include_router(assemblies_router)
 
+from backend.app.farm.products.sellerhub_import import router as sellerhub_import_router  # noqa: E402
+
+router.include_router(sellerhub_import_router)
+
 
 # ---------------------------------------------------------------- one-off import from Seller Hub
 

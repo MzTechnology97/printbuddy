@@ -418,6 +418,31 @@ export interface FarmBoardDetail {
   log: string[];
 }
 
+/** A Seller Hub listing (one per ASIN, or per named part) that no product owns yet. */
+export interface SellerHubListing {
+  key: string;
+  /** Name the product gets: Seller Hub's part name, else the Amazon title. */
+  name: string;
+  title: string;
+  skus: string[];
+  asins: string[];
+  image_url: string | null;
+}
+
+export interface SellerHubListings {
+  listings: SellerHubListing[];
+  /** Not proposed: inactive on Amazon, or marked "not printed" in Seller Hub. */
+  excluded_inactive: number;
+  ignored: number;
+}
+
+export interface SellerHubImportResult {
+  created: { key: string; project_id: number; name: string }[];
+  already_owned: string[];
+  not_found: string[];
+  covers_added: number;
+}
+
 export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
   const response = await fetch(`/api/v1/farm${path}`, {
@@ -436,6 +461,11 @@ export async function farmRequest<T>(path: string, init: RequestInit = {}): Prom
 export const farmApi = {
   getProducts: () => farmRequest<{ generated_at: string; products: FarmProduct[] }>('/products'),
   getOverview: () => farmRequest<FarmProductOverview[]>('/products/overview'),
+  getSellerHubListings: () => farmRequest<SellerHubListings>('/import/sellerhub/listings'),
+  importSellerHubListings: (keys: string[]) =>
+    farmRequest<SellerHubImportResult>('/import/sellerhub/listings', { method: 'POST', body: JSON.stringify({ keys }) }),
+  /** Amazon's photos pass through Printbuddy: the CSP blocks their CDN. */
+  sellerHubThumbnailUrl: (url: string) => `/api/v1/farm/import/sellerhub/thumbnail?url=${encodeURIComponent(url)}`,
   getComponents: () => farmRequest<FarmComponent[]>('/components'),
   createProduct: (data: FarmProductInput) =>
     farmRequest<{ project_id: number }>('/products', { method: 'POST', body: JSON.stringify(data) }),
