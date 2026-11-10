@@ -22,8 +22,24 @@ import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
 import { type LiveState, usePresetSwitch } from './presetSwitch';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
-import { useMoveGizmo, selectionBox } from './moveGizmo';
-import { applyPlacements, currentSpec, placementsToSave, positionOf, selectedItems, withMoved } from './placement';
+import { useMoveGizmo } from './moveGizmo';
+import { type Placed, type Spec, applyPlacements, currentSpec, moved, placementsToSave, positionOf, selectedItems } from './placement';
+import {
+  type Change,
+  type Coordinates,
+  about,
+  absoluteRotation,
+  boundingSphere,
+  boxOf,
+  changed,
+  inObjectAxes,
+  rotationAbout,
+  rotationOf,
+  rotationSync,
+  withLinearOf,
+  withoutRotation,
+} from './transforms';
+import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { type Selection, instancesOf } from './objects';
@@ -38,6 +54,8 @@ import {
   MainToolbar,
   type MenuItem,
   MoveWindow,
+  RotateWindow,
+  ScaleWindow,
   Navigator,
   ObjectInfo,
   PlateBar,
@@ -323,8 +341,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       ? [{ objectId: selection.id, instance: selection.instance ?? null, partId: selection.partId ?? null }]
       : [];
   const targetsKey = JSON.stringify(targets);
-  // OrcaSlicer's Move (GLGizmoMove and its window): the instances selected (one, or every instance of the objects
-  // selected; not a part), placed anew in the copy. Each drag, field or Drop is one undo step.
+  // OrcaSlicer's Move, Rotate and Scale (their gizmos and windows): the instances selected (one, or every instance of
+  // the objects selected; not a part), placed anew in the copy (transforms.ts). Each drag or field is one undo step.
   const moveObjects = selectedIds.length ? selectedIds : selection?.kind === 'object' && !selection.partId ? [selection.id] : [];
   const moveInstance = !selectedIds.length && selection?.kind === 'object' ? selection.instance : null;
   const moveKeys = useMemo(
@@ -334,39 +352,127 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   );
   const moveTip = useRef<[number, number, number]>([0, 0, 0]);
   const [dragTip, setDragTip] = useState<{ text: string; x: number; y: number } | null>(null);
-  const slicerBox = () => {
-    const box = view && selectionBox(view, moveKeys);
-    return box && { center: [box.getCenter(new THREE.Vector3()).x, box.getCenter(new THREE.Vector3()).z, box.getCenter(new THREE.Vector3()).y] as [number, number, number], low: box.min.y };
+  // GizmoObjectManipulation's coordinate system and Uniform scale (on, as Orca starts)
+  const [cs, setCs] = useState<Coordinates>('world');
+  const [uniform, setUniform] = useState(true);
+  const autoDrop = (objectId: string) => doc.objects.find((o) => o.id === objectId)?.auto_drop !== false;
+  const lead = view && moveKeys.length ? currentSpec(view, placed, moveKeys[0]) : null;
+  const single = moveKeys.length === 1;
+  const objectCs = cs === 'object' && single; // Object coordinates for one instance; several move on the bed's axes
+  /** A change shown while dragging (no bed rule yet, as Orca's drag) or made (``done``: one undo step). */
+  const transform = (change: Change, done: boolean) => {
+    if (!view) return;
+    const next = changed(view, placed, change, done ? autoDrop : () => false);
+    applyPlacements(view, next);
+    if (done) place(next);
   };
+  const move = (d: [number, number, number], done: boolean) =>
+    transform({ keys: moveKeys, apply: (spec) => moved(spec, objectCs && lead ? inObjectAxes(lead, d) : d), sync: 'none', drop: 'move' }, done);
+  const box = (keys = moveKeys, inCs: Coordinates = 'world', with_: Placed = placed) => (view ? boxOf(view, with_, keys, inCs) : null);
+  const center = (b: THREE.Box3 | null) => (b ? (b.getCenter(new THREE.Vector3()).toArray() as [number, number, number]) : null);
   const redrawGizmo = useMoveGizmo(view, tool === 'move' ? moveKeys : [], {
+    orient: () => (objectCs && lead ? rotationOf(lead) : undefined),
     onMove: (delta, done) => {
-      if (!view) return;
       moveTip.current = delta;
-      const next = withMoved(view, placed, moveKeys, delta);
-      applyPlacements(view, next);
-      if (done && delta.some((d) => d !== 0)) place(next);
+      if (done && !delta.some((d) => d !== 0)) return transform({ keys: [], apply: (s) => s, sync: 'none', drop: 'move' }, false);
+      move(delta, done);
     },
     onDrag: (axis, at) => {
       if (axis == null || !at) return setDragTip(null);
       // GLGizmoMove3D::get_tooltip: the box centre of one instance, else the move so far
-      const value = moveKeys.length === 1 ? (slicerBox()?.center[axis] ?? 0) : moveTip.current[axis];
+      const value = single ? (center(box())?.[axis] ?? 0) : moveTip.current[axis];
       setDragTip({ text: `${'XYZ'[axis]}: ${toLocaleDecimal(value.toFixed(2), i18n.language)}`, x: at.x, y: at.y });
     },
   });
+  // Rotate (World, as its window says): about the selection's bounding sphere's centre
+  const sphere = useMemo(
+    () => (view && tool === 'rotate' && moveKeys.length ? boundingSphere(view, placed, moveKeys) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the instances selected, by key
+    [view, tool, placed, moveKeys.join('|')],
+  );
+  const rotateBy = (axis: 0 | 1 | 2, degrees: number, done: boolean, pivot = sphere?.center) => {
+    if (!view || !pivot) return;
+    const turned = lead ? about(lead, rotationAbout(axis, degrees), pivot) : null;
+    const sync = lead && turned ? rotationSync('world', axis, lead, turned) : 'general';
+    transform({ keys: moveKeys, apply: (spec) => about(spec, rotationAbout(axis, degrees), pivot), sync, drop: 'transform' }, done);
+  };
+  const redrawRotate = useRotateGizmo(view, tool === 'rotate' && moveKeys.length > 0, {
+    frame: () => sphere,
+    onRotate: (axis, degrees, done, pivot) => rotateBy(axis, degrees, done, pivot),
+    onDrag: (text, at) => setDragTip(text && at ? { text: text.replace('.', i18n.language?.startsWith('it') ? ',' : '.'), x: at.x, y: at.y } : null),
+  });
+  // where the selection was when the Rotate tool opened (its first reset)
+  const opened = useRef<Placed>({});
+  useEffect(() => {
+    if (tool !== 'rotate' || !view) return;
+    opened.current = Object.fromEntries(moveKeys.map((k) => [k, currentSpec(view, placed, k)!]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- when the tool opens, or the selection changes
+  }, [tool, moveKeys.join('|')]);
+  // Scale: about the selection's box centre (Selection::scale_and_translate's dragging_center)
+  const scaleCs: Coordinates = objectCs ? 'object' : 'world';
+  const scaleBy = (relative: [number, number, number], offset: THREE.Vector3, done: boolean) => {
+    const b = box(moveKeys, scaleCs);
+    if (!b || !lead) return;
+    const c = b.getCenter(new THREE.Vector3());
+    const pivot = scaleCs === 'object' ? c.clone().applyMatrix4(rotationOf(lead)) : c;
+    const a = new THREE.Matrix4().makeTranslation(offset.x, offset.y, offset.z).multiply(new THREE.Matrix4().makeScale(...relative));
+    transform({ keys: moveKeys, apply: (spec) => about(spec, a, pivot, scaleCs), sync: 'general', drop: 'transform' }, done);
+  };
+  /** The Scale window's figures (update_settings_value): the size, and the scale against the instance unscaled. */
+  const scaleFigures = () => {
+    const now = box(moveKeys, scaleCs);
+    const size = now ? (now.getSize(new THREE.Vector3()).toArray() as [number, number, number]) : ([0, 0, 0] as [number, number, number]);
+    if (!single || !lead || !view) return { size, unscaled: size, scale: [100, 100, 100] as [number, number, number] };
+    const r = rotationOf(lead).setPosition(lead[9], lead[10], lead[11]);
+    const bare: Spec = [r.elements[0], r.elements[1], r.elements[2], r.elements[4], r.elements[5], r.elements[6], r.elements[8], r.elements[9], r.elements[10], lead[9], lead[10], lead[11]];
+    const ub = box(moveKeys, scaleCs, { ...placed, [moveKeys[0]]: bare });
+    const unscaled = ub ? (ub.getSize(new THREE.Vector3()).toArray() as [number, number, number]) : size;
+    return { size, unscaled, scale: size.map((v, i) => (unscaled[i] ? (100 * v) / unscaled[i] : 100)) as [number, number, number] };
+  };
+  const redrawScale = useScaleGizmo(view, tool === 'scale' && moveKeys.length > 0, {
+    frame: () => {
+      const b = box(moveKeys, scaleCs);
+      return b && lead ? { box: b, orient: scaleCs === 'object' ? rotationOf(lead) : new THREE.Matrix4() } : null;
+    },
+    onScale: (scale, offset, done) => scaleBy(scale, offset, done),
+    onDrag: (grabber, at) => {
+      if (grabber == null || !at) return setDragTip(null);
+      // GLGizmoScale3D::get_tooltip: the scale of one instance
+      const s = scaleFigures().scale;
+      const f = (v: number, n: number) => `${toLocaleDecimal(v.toFixed(n), i18n.language)}%`;
+      const text = grabber >= 6 ? s.map((v, i) => `${'XYZ'[i]}: ${f(v, 2)}`).join('\n') : `${'XYZ'[Math.floor(grabber / 2)]}: ${f(s[Math.floor(grabber / 2)], 4)}`;
+      setDragTip({ text, x: at.x, y: at.y });
+    },
+  });
+  /** change_scale_value / change_size_value: the scale wanted against the instance unscaled, as a scale from now. */
+  const scaleTo = (wanted: (fig: ReturnType<typeof scaleFigures>) => [number, number, number]) => {
+    const fig = scaleFigures();
+    const w = wanted(fig);
+    scaleBy(single ? (w.map((v, i) => (fig.size[i] ? (fig.unscaled[i] * v) / fig.size[i] : 1)) as [number, number, number]) : w, new THREE.Vector3(), true);
+  };
   useEffect(() => {
     if (!view) return;
     applyPlacements(view, placed);
     setStats(objectStats(view));
     redrawGizmo();
+    redrawRotate();
+    redrawScale();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- again when the placements or the scene change
-  }, [view, placed]);
-  const moveBy = (d: [number, number, number]) => view && place(withMoved(view, placed, moveKeys, d));
+  }, [view, placed, cs]);
   // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
-  const toolReady: Record<string, true | string> = !doc.editable
-    ? {}
-    : doc.cannot_place
-      ? { move: t('farm.workspace.move.tooLarge') }
-      : { move: moveKeys.length ? true : orcaText(layout, 'Please select at least one object.', i18n.language) };
+  const why = doc.cannot_place ? t('farm.workspace.move.tooLarge') : orcaText(layout, 'Please select at least one object.', i18n.language);
+  const ready: true | string = moveKeys.length ? true : why;
+  const toolReady: Record<string, true | string> = doc.editable ? { move: ready, rotate: ready, scale: ready } : {};
+  /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
+  const placementText = (spec: Spec) => {
+    const n = (v: number) => toLocaleDecimal(Number(v.toFixed(2)).toString(), i18n.language);
+    const parts = [positionOf(spec).map((v, i) => `${'XYZ'[i]} ${n(v)}`).join(' · ')];
+    const turn = absoluteRotation(spec);
+    if (turn.some((v) => v !== 0)) parts.push(`${tr('Rotate')} ${turn.map(n).join(' / ')}°`);
+    const scale = [0, 1, 2].map((c) => 100 * Math.hypot(spec[3 * c], spec[3 * c + 1], spec[3 * c + 2]));
+    if (scale.some((v) => Math.abs(v - 100) > 0.01)) parts.push(`${tr('NounScale')} ${scale.map(n).join(' / ')}%`);
+    return parts.join(' · ');
+  };
   useEffect(() => {
     if (view) highlight(view, JSON.parse(targetsKey) as Target[], canvas.outline);
   }, [view, targetsKey, canvas.outline, placed]);
@@ -678,6 +784,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     }
     else if (e.key === 'u' || e.key === 'U') toggleTool('measure');
     else if ((e.key === 'm' || e.key === 'M') && toolReady.move === true) toggleTool('move');
+    else if ((e.key === 'r' || e.key === 'R') && toolReady.rotate === true) toggleTool('rotate');
+    else if ((e.key === 's' || e.key === 'S') && toolReady.scale === true) toggleTool('scale');
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
       else deselect();
@@ -1009,21 +1117,64 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
               {tool === 'move' && view && moveKeys.length > 0 && (
                 <MoveWindow
                   layout={layout}
-                  position={
-                    moveKeys.length === 1
-                      ? positionOf(currentSpec(view, placed, moveKeys[0]) ?? [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-                      : (slicerBox()?.center ?? [0, 0, 0])
-                  }
-                  canDrop={Math.abs(slicerBox()?.low ?? 0) > 0.001}
-                  objectLater={t('farm.workspace.move.objectLater')}
+                  cs={objectCs ? 'object' : 'world'}
+                  onCs={setCs}
+                  position={single && lead ? positionOf(lead) : (center(box()) ?? [0, 0, 0])}
+                  canDrop={Math.abs(box()?.min.z ?? 0) > 0.001}
                   onPosition={(axis, value) => {
-                    const now = moveKeys.length === 1 ? positionOf(currentSpec(view, placed, moveKeys[0])!) : slicerBox()!.center;
                     const d: [number, number, number] = [0, 0, 0];
-                    d[axis] = value - now[axis];
-                    moveBy(d);
+                    // World: to the position typed; Object: by that much along the object's own axis ("Relative")
+                    d[axis] = objectCs ? value : value - (single && lead ? positionOf(lead) : (center(box()) ?? [0, 0, 0]))[axis];
+                    move(d, true);
                   }}
-                  onDrop={() => moveBy([0, 0, -(slicerBox()?.low ?? 0)])}
+                  onDrop={() =>
+                    transform({ keys: moveKeys, apply: (spec) => moved(spec, [0, 0, -(box()?.min.z ?? 0)]), sync: 'none', drop: 'move' }, true)
+                  }
                   onDone={() => toggleTool('move')}
+                />
+              )}
+              {tool === 'rotate' && view && moveKeys.length > 0 && (
+                <RotateWindow
+                  layout={layout}
+                  absolute={single && lead ? absoluteRotation(lead) : null}
+                  changed={moveKeys.some((k) => opened.current[k] && currentSpec(view, placed, k)!.slice(0, 9).some((v, i) => Math.abs(v - opened.current[k][i]) > 1e-9))}
+                  turned={single && lead ? absoluteRotation(lead).some((v) => v !== 0) : false}
+                  onRelative={(axis, degrees) => rotateBy(axis, degrees, true)}
+                  onAbsolute={(axis, degrees) => lead && rotateBy(axis, degrees - absoluteRotation(lead)[axis], true)}
+                  onResetRelative={() =>
+                    transform({ keys: moveKeys, apply: (spec, k) => (opened.current[k] ? withLinearOf(spec, opened.current[k]) : spec), sync: 'general', drop: 'transform' }, true)
+                  }
+                  onResetAbsolute={() => transform({ keys: moveKeys, apply: withoutRotation, sync: 'general', drop: 'transform' }, true)}
+                  onDone={() => toggleTool('rotate')}
+                />
+              )}
+              {tool === 'scale' && view && moveKeys.length > 0 && (
+                <ScaleWindow
+                  layout={layout}
+                  cs={scaleCs}
+                  onCs={setCs}
+                  objectCs={single}
+                  scale={scaleFigures().scale}
+                  size={scaleFigures().size}
+                  uniform={uniform}
+                  onUniform={setUniform}
+                  onScale={(axis, percent) =>
+                    scaleTo((fig) =>
+                      single
+                        ? (fig.scale.map((v, i) => (uniform || i === axis ? percent / 100 : v / 100)) as [number, number, number])
+                        : ([0, 1, 2].map((i) => (uniform || i === axis ? percent / 100 : 1)) as [number, number, number]),
+                    )
+                  }
+                  onSize={(axis, mm) =>
+                    scaleTo((fig) => {
+                      const ref = single ? fig.unscaled : fig.size;
+                      const k = mm / (ref[axis] || 1);
+                      const sizeNow = fig.size.map((v, i) => v / (ref[i] || 1));
+                      return (single ? sizeNow : [1, 1, 1]).map((v, i) => (uniform || i === axis ? k : v)) as [number, number, number];
+                    })
+                  }
+                  onReset={() => scaleTo(() => [1, 1, 1])}
+                  onDone={() => toggleTool('scale')}
                 />
               )}
               {dragTip && (
@@ -1154,7 +1305,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
               const many = (instances.get(id)?.length ?? 1) > 1;
               return {
                 section: many ? `${name} #${Number(instance) + 1}` : name,
-                name: positionOf(spec).map((v, i) => `${'XYZ'[i]} ${toLocaleDecimal(v.toFixed(2), i18n.language)}`).join(' · '),
+                name: placementText(spec),
               };
             }),
           ]}

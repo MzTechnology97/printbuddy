@@ -173,6 +173,8 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
                 "id": obj.get("id"),
                 "name": meta.get("name"),
                 "extruder": meta.get("extruder"),
+                # bbs_3mf's <object auto_drop>: Orca puts the object back on the bed after a move (on unless "0")
+                "auto_drop": obj.get("auto_drop", "1") != "0",
                 "parts": parts,
                 "overrides": overrides,
             }

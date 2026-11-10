@@ -99,7 +99,8 @@ export function orcaIcon(name: string | null | undefined): string | undefined {
 
 /** An OrcaSlicer string in the UI language: its Italian translation, else as OrcaSlicer writes it. */
 export function orcaText(layout: OrcaLayout, text: string, language: string | undefined): string {
-  return language?.startsWith('it') ? (layout.it[text] ?? text) : text;
+  const out = language?.startsWith('it') ? (layout.it[text] ?? text) : text;
+  return out.slice(out.indexOf('\u0004') + 1); // a contextual msgid ("Noun\u0004Scale") untranslated: the text alone
 }
 
 /** An OrcaSlicer format string in the UI language with its values put in (``%1%``, ``%1$d``, ``%d``), without

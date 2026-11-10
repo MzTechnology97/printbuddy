@@ -47,6 +47,8 @@ export interface WorkspaceObject {
   id: string | null;
   name: string | null;
   extruder: string | null;
+  /** Orca puts the object back on the bed after a move, rotation or scale (model_settings.config's auto_drop) */
+  auto_drop?: boolean;
   parts: { id: string | null; name: string | null; type: string | null }[];
   overrides: { key: string; value: string; part: string | null }[];
 }
