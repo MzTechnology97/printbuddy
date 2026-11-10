@@ -1,6 +1,6 @@
 // Fork (printfarm): the Preview legend's view types, colours and number formats, as OrcaSlicer v2.5.0 has them
 // (slic3r/GUI/GCodeViewer.cpp, libvgcode/src/ViewerImpl.cpp and include/ColorRange.hpp, libslic3r/Utils.hpp).
-import { MOVE, ROLE, ROLES, type Toolpaths } from './parse';
+import { MOVE, NO_PA, ROLE, ROLES, SCALE, type Toolpaths } from './parse';
 
 type RGB = [number, number, number];
 
@@ -114,20 +114,20 @@ export class ColorRange {
   }
 }
 
-/** The value a range view colours a move by. */
-export function valueOf(tp: Toolpaths, view: RangeView, i: number): number {
+/** The value a range view colours move ``i`` (on layer ``layer``) by. */
+export function valueOf(tp: Toolpaths, view: RangeView, i: number, layer: number): number {
   switch (view) {
-    case 'speed': return tp.feedrate[i];
+    case 'speed': return tp.feedrate[i] / SCALE.feedrate;
     case 'acceleration': return tp.acceleration[i];
-    case 'jerk': return tp.jerk[i];
-    case 'height': return roundToBin(tp.height[i]);
-    case 'width': return roundToBin(tp.width[i]);
-    case 'flow': return roundToBin(tp.feedrate[i] * tp.mm3PerMm[i]);
+    case 'jerk': return tp.jerk[i] / SCALE.jerk;
+    case 'height': return roundToBin(tp.height[i] / SCALE.height);
+    case 'width': return roundToBin(tp.width[i] / SCALE.width);
+    case 'flow': return roundToBin((tp.feedrate[i] / SCALE.feedrate) * (tp.flow[i] / SCALE.flow));
     case 'layerTime':
-    case 'layerTimeLog': return tp.layerTime[tp.layer[i]];
-    case 'fan': return roundToBin(tp.fan[i]);
-    case 'temperature': return roundToBin(tp.temperature[i]);
-    case 'pressureAdvance': return tp.pressureAdvance[i];
+    case 'layerTimeLog': return tp.layerTime[layer];
+    case 'fan': return roundToBin((tp.fan[i] * 100) / 255);
+    case 'temperature': return roundToBin(tp.temperature[i] / SCALE.temperature);
+    case 'pressureAdvance': return tp.pressureAdvance[i] / SCALE.pressureAdvance;
   }
 }
 
@@ -143,10 +143,10 @@ export function rangeOf(tp: Toolpaths, view: RangeView, visibleRoles: boolean[],
     const type = tp.type[i];
     if (type === MOVE.extrude) {
       if ((view === 'width' || view === 'flow') && tp.role[i] === ROLE.Custom && !visibleRoles[ROLE.Custom]) continue;
-      if (view === 'pressureAdvance' && tp.pressureAdvance[i] < 0) continue;
-      range.update(valueOf(tp, view, i));
+      if (view === 'pressureAdvance' && tp.pressureAdvance[i] === NO_PA) continue;
+      range.update(valueOf(tp, view, i, 0));
     } else if (motion && ((type === MOVE.travel && options.travel) || (type === MOVE.wipe && options.wipe))) {
-      range.update(valueOf(tp, view, i));
+      range.update(valueOf(tp, view, i, 0));
     }
   }
   return range;
@@ -233,18 +233,25 @@ export function presentRoles(tp: Toolpaths): number[] {
   return ROLES.map((_, i) => i).filter((i) => seen.has(i));
 }
 
-/** The colour of each move for a view type (ViewerImpl::get_vertex_color). */
-export function colorFunction(tp: Toolpaths, view: ViewType, range: ColorRange | null, colours: string[]): (i: number) => RGB {
+/** The colour of each move for a view type (ViewerImpl::get_vertex_color), written into ``out`` (RGBA per move). */
+export function paint(tp: Toolpaths, view: ViewType, range: ColorRange | null, colours: string[], out: Uint8Array) {
   const travel = OPTIONS[0].color, wipe = OPTIONS[3].color;
   const filament = colours.map(hexToRgb);
   const grey: RGB = [128, 128, 128];
   const motion = MOTION_VIEWS.includes(view);
-  return (i) => {
+  let layer = 0;
+  for (let i = 0; i < tp.count; i++) {
+    while (i >= tp.layerStart[layer + 1]) layer++;
     const type = tp.type[i];
-    if (!motion && type === MOVE.wipe) return wipe;
-    if (!motion && type === MOVE.travel) return travel;
-    if (view === 'feature') return ROLE_COLORS[tp.role[i]];
-    if (view === 'filament' || view === 'summary') return filament[tp.extruder[i]] ?? grey;
-    return range ? range.color(valueOf(tp, view as RangeView, i)) : grey;
-  };
+    let c: RGB;
+    if (!motion && type === MOVE.wipe) c = wipe;
+    else if (!motion && type === MOVE.travel) c = travel;
+    else if (view === 'feature') c = ROLE_COLORS[tp.role[i]];
+    else if (view === 'filament' || view === 'summary') c = filament[tp.extruder[i]] ?? grey;
+    else c = range ? range.color(valueOf(tp, view as RangeView, i, layer)) : grey;
+    out[4 * i] = c[0];
+    out[4 * i + 1] = c[1];
+    out[4 * i + 2] = c[2];
+    out[4 * i + 3] = 255;
+  }
 }

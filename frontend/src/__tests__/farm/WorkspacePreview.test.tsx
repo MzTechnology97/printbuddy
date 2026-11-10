@@ -6,15 +6,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, screen, within } from '@testing-library/react';
 import { render } from '../utils';
-import { MOVE, ROLE, parseDuration, parseGcode } from '../../farm/workspace/gcode/parse';
+import { GcodeParser, MOVE, ROLE, SCALE, TooLargeError, layerOf, parseDuration, parseGcode, type Toolpaths } from '../../farm/workspace/gcode/parse';
 import {
   ColorRange,
   RANGE_COLORS,
-  colorFunction,
   compactCount,
   compactWeight,
   defaultViewType,
   distance,
+  paint,
   percent,
   rangeOf,
   shortTime,
@@ -80,18 +80,30 @@ const GCODE = [
 describe('parseGcode', () => {
   const tp = parseGcode(GCODE);
   const of = (type: number) => [...tp.type].map((t, i) => (t === type ? i : -1)).filter((i) => i >= 0);
+  const at = (t: Toolpaths, i: number) => [t.pos[3 * i], t.pos[3 * i + 1], t.pos[3 * i + 2]];
 
   it('reads layers, roles, widths, heights, fan and temperature as GCodeProcessor does', () => {
     expect(tp.layerStart.length - 1).toBe(2);
     expect(tp.layerZ).toEqual([0.2, 0.4]);
     const walls = of(MOVE.extrude).filter((i) => tp.role[i] === ROLE['Outer wall']);
     expect(walls).toHaveLength(4);
-    expect(tp.width[walls[0]]).toBeCloseTo(0.42);
-    expect(tp.height[walls[0]]).toBeCloseTo(0.2);
-    expect(tp.fan[walls[0]]).toBeCloseTo(100); // M106 P1 is the part fan on Bambu printers, P2 is not
-    expect(tp.temperature[walls[0]]).toBe(215);
-    expect(tp.feedrate[walls[0]]).toBe(30);
-    expect(tp.layer[walls[0]]).toBe(0);
+    expect(tp.width[walls[0]] / SCALE.width).toBeCloseTo(0.42);
+    expect(tp.height[walls[0]] / SCALE.height).toBeCloseTo(0.2);
+    expect(tp.fan[walls[0]]).toBe(255); // M106 P1 is the part fan on Bambu printers, P2 is not
+    expect(tp.temperature[walls[0]] / SCALE.temperature).toBe(215);
+    expect(tp.feedrate[walls[0]] / SCALE.feedrate).toBe(30);
+    expect(layerOf(tp, walls[0])).toBe(0);
+    expect(tp.line[walls[0]]).toBe(GCODE.split('\n').indexOf('G1 X10 Y0 E0.5 F1800') + 1); // 1-based
+  });
+
+  it('reads the same in chunks of any size (lines split between chunks)', () => {
+    const p = new GcodeParser();
+    for (let i = 0; i < GCODE.length; i += 7) p.push(GCODE.slice(i, i + 7));
+    const chunked = p.finish();
+    expect(chunked.count).toBe(tp.count);
+    expect([...chunked.pos]).toEqual([...tp.pos]);
+    expect([...chunked.type]).toEqual([...tp.type]);
+    expect(chunked.stats).toEqual(tp.stats);
   });
 
   it('classifies travels, retractions, wipes and unretractions, and marks the closed outer wall as a seam', () => {
@@ -100,22 +112,22 @@ describe('parseGcode', () => {
     expect(of(MOVE.unretract)).toHaveLength(2); // after the wipe, and the flush
     const seams = of(MOVE.seam);
     expect(seams).toHaveLength(1);
-    expect([tp.x[seams[0]], tp.y[seams[0]]]).toEqual([0, 0]);
+    expect(at(tp, seams[0]).slice(0, 2)).toEqual([0, 0]);
+    expect(tp.type[seams[0] + 1]).toBe(MOVE.noop); // the path goes on from the nozzle, not from the marker
     expect(tp.stats.typeCount[MOVE.travel]).toBeGreaterThan(0);
   });
 
   it('splits an arc into chords and keeps its end point', () => {
-    const arc = of(MOVE.extrude).filter((i) => tp.line[i] === GCODE.split('\n').indexOf('G2 X30 Y20 I5 J0 E1'));
+    const arc = of(MOVE.extrude).filter((i) => tp.line[i] === GCODE.split('\n').indexOf('G2 X30 Y20 I5 J0 E1') + 1);
     expect(arc.length).toBeGreaterThan(5);
-    const last = arc[arc.length - 1];
-    expect([tp.x[last], tp.y[last]]).toEqual([30, 20]);
-    expect(Math.max(...arc.map((i) => tp.y[i]))).toBeGreaterThan(24.9); // G2 is clockwise: from the left point over the top
+    expect(at(tp, arc[arc.length - 1]).slice(0, 2)).toEqual([30, 20]);
+    expect(Math.max(...arc.map((i) => at(tp, i)[1]))).toBeGreaterThan(24.9); // G2 is clockwise: from the left point over the top
   });
 
-  it('counts filament per use, a filament change, and takes the slicer totals and times', () => {
+  it('counts filament per use, and takes the slicer totals and times', () => {
     const s = tp.stats;
-    expect(s.filamentChanges).toBe(1);
-    expect(s.extruderChanges).toBe(0); // one nozzle
+    expect(s.filamentChanges).toBe(0); // the first T loads a filament, it doesn't change one
+    expect(s.extruderChanges).toBe(0);
     expect(s.usedExtruders).toEqual([0, 1]);
     const area = Math.PI * 0.875 ** 2;
     expect(s.flushMm3[1]).toBeCloseTo(area * 10);
@@ -124,10 +136,52 @@ describe('parseGcode', () => {
     expect(s.cost).toEqual([0.01, 0.02]);
     expect(s.totalTime).toBe(600);
     expect(s.prepareTime).toBe(60);
-    const sum = [...tp.time].reduce((a, b) => a + b, 0);
-    expect(sum).toBeCloseTo(600, 3); // scaled to the slicer's estimate
+    // the start G-code takes the prepare time, the layers the model printing time
+    expect(tp.layerTime.reduce((a, b) => a + b, 0)).toBeCloseTo(540, 3);
+    expect(s.typeTime.reduce((a, b) => a + b, 0)).toBeCloseTo(600, 3);
     expect(tp.acceleration[of(MOVE.extrude).at(-1)!]).toBe(2000);
     expect(tp.config.filament_colour).toBe('#FF0000;#00FF00');
+  });
+
+  it('keeps the extruder in relative mode across G91 / G90 (only M82 / M83 change it)', () => {
+    const t = parseGcode(['M83', 'G1 X0 Y0 Z0.2 F600', 'G91', 'G1 Z0.4', 'G90', 'G1 X20 E0.5', 'G1 X40 E0.5'].join('\n'));
+    expect([...t.type].slice(-2)).toEqual([MOVE.extrude, MOVE.extrude]);
+  });
+
+  it('counts XY purges inside FLUSH_START / FLUSH_END as flushed, not model or tower', () => {
+    const t = parseGcode(['M83', 'T0', 'G1 X0 Y0 Z0.2', 'T1', '; FEATURE: Prime tower', '; FLUSH_START', 'G1 X5 E10 F300', '; FLUSH_END'].join('\n'));
+    expect(t.stats.flushMm3[1]).toBeCloseTo(Math.PI * 0.875 ** 2 * 10);
+    expect(t.stats.modelMm3[1] ?? 0).toBe(0);
+    expect(t.stats.towerMm3[1] ?? 0).toBe(0);
+  });
+
+  it('tells filament changes from nozzle switches on a two-nozzle printer (filament_map), as Orca does', () => {
+    const t = parseGcode(
+      ['; CONFIG_BLOCK_START', '; filament_map = 2,1,1', '; nozzle_diameter = 0.4,0.4', '; CONFIG_BLOCK_END', 'M83',
+        'T0', 'G1 X1 Y1 E1', 'T1', 'G1 X2 Y2 E1', 'T0', 'G1 X3 Y3 E1', 'T2', 'G1 X4 Y4 E1', 'T0', 'G1 X5 Y5 E1'].join('\n'),
+    );
+    // T0 loads nozzle 2; T1 switches to nozzle 1; T0 switches back; T2 switches to nozzle 1, which held filament 2
+    // (T1): a nozzle switch and a filament change; T0 switches back once more
+    expect(t.stats.extruderChanges).toBe(4);
+    expect(t.stats.filamentChanges).toBe(1);
+  });
+
+  it("reads Creality's T1A as filament 2, and leaves Bambu's T255 / T1000 alone", () => {
+    const t = parseGcode(['M83', 'T0A', 'G1 X1 Y1 E1', 'T255', 'T1000', 'T1A', 'G1 X2 Y2 E1'].join('\n'));
+    expect(t.stats.usedExtruders).toEqual([0, 1]);
+    expect(t.stats.filamentChanges).toBe(1);
+  });
+
+  it('starts the path again after G92 X/Y/Z, with no segment from the old position', () => {
+    const t = parseGcode(['M83', 'G1 X10 Y10 E1', 'G92 X0 Y0', 'G1 X1 Y0 E1'].join('\n'));
+    const last = t.count - 1;
+    expect(t.type[last - 1]).toBe(MOVE.noop);
+    expect(at(t, last - 1).slice(0, 2)).toEqual([0, 0]); // the last extrusion starts at the new origin
+  });
+
+  it('stops past its move limit', () => {
+    const p = new GcodeParser(3);
+    expect(() => p.push('G1 X1\nG1 X2\nG1 X3\nG1 X4\nG1 X5\n')).toThrow(TooLargeError);
   });
 
   it('reads durations as the header writes them', () => {
@@ -189,9 +243,10 @@ describe('legend', () => {
     expect(rangeOf(tp, 'speed', all, hidden).max).toBe(50);
     expect(rangeOf(tp, 'speed', all, { ...hidden, travel: true }).max).toBe(200);
     expect(rangeOf(tp, 'height', all, { ...hidden, travel: true }).rows().map((r) => r.value)).toEqual([0.2]);
-    const color = colorFunction(tp, 'feature', null, ['#FF0000']);
+    const colors = new Uint8Array(tp.count * 4);
+    paint(tp, 'feature', null, ['#FF0000'], colors);
     const travel = [...tp.type].indexOf(MOVE.travel, 2);
-    expect(color(travel)).toEqual([56, 72, 155]);
+    expect([...colors.slice(4 * travel, 4 * travel + 3)]).toEqual([56, 72, 155]);
   });
 });
 
@@ -241,7 +296,7 @@ describe('LegendPanel', () => {
     expect(within(legend).getByText('Support')).toBeInTheDocument();
     expect(within(legend).getByText('Flushed')).toBeInTheDocument();
     expect(within(legend).queryByText('Tower')).not.toBeInTheDocument();
-    expect(within(legend).getByText('Filament change times:').nextSibling?.textContent).toBe('1');
+    expect(within(legend).getByText('Filament change times:').nextSibling?.textContent).toBe('0');
     expect(within(legend).getByText('Cost:').nextSibling?.textContent).toBe('0.03');
   });
 
@@ -283,5 +338,10 @@ describe('sliders (IMSlider, GLCanvas3D::on_key)', () => {
     expect([s.hi, s.move]).toEqual([4, null]); // the layer before, at its last move
     s = reduce(s, { type: 'move', delta: 1, moves });
     expect([s.hi, s.move]).toEqual([5, 0]); // the layer after, at its first move
+  });
+
+  it('goes back to every layer for a new plate', () => {
+    const s = reduce(reduce(reduce(start, { type: 'oneLayer' }), { type: 'step', delta: -4 }), { type: 'reset' });
+    expect(s).toEqual(start);
   });
 });

@@ -13,6 +13,7 @@ export interface SliderState {
 }
 
 export type SliderAction =
+  | { type: 'reset' }
   | { type: 'set'; lo: number; hi: number }
   | { type: 'step'; delta: number }
   | { type: 'jump'; layer: number }
@@ -32,6 +33,8 @@ export function sliderReducer(layers: number) {
   };
   return (s: SliderState, a: SliderAction): SliderState => {
     switch (a.type) {
+      case 'reset':
+        return initialSliders(layers);
       case 'set':
         return set(s, a.lo, a.hi);
       case 'step':

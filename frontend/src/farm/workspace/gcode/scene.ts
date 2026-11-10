@@ -1,199 +1,210 @@
-// Fork (printfarm): the Preview's toolpaths in three.js. Extrusions are lit boxes (one instance per move, sized
-// by its width and height), travels and wipes lines, retractions and seams points. Everything is built once;
-// the layer/move sliders and the legend's show/hide only change shader uniforms (each vertex carries its move
-// index and role), and a new view type only rewrites the colours.
+// Fork (printfarm): the Preview's toolpaths in three.js. The parser's columns go to the GPU as they are, as
+// instanced attributes shared by every object: instance k is move k + 1, from the end of move k (its start) to
+// its own end. Extrusions are lit boxes built in the vertex shader from the move's ends, width and height;
+// travels and wipes are lines; retractions, unretractions and seams points. The sliders and show/hide only change
+// uniforms (each instance knows its move index, gl_InstanceID + 1, as an integer), and a new view type only
+// rewrites the colour buffer. The memory per move is the parser's columns plus 4 bytes of colour.
 import * as THREE from 'three';
 import { MOVE, type Toolpaths } from './parse';
 
 type RGB = [number, number, number];
+export type ShownOptions = Record<'travel' | 'wipe' | 'retract' | 'unretract' | 'seam', boolean>;
 
-/** Scene coordinates of a slicer point: y up, the bed's front edge (slicer y = 0) at z = bed depth. */
-export const toScene = (x: number, y: number, z: number, depth: number) => new THREE.Vector3(x, z, depth - y);
-
-const ALWAYS = 30; // role bit always set: moves that aren't extrusions
-
-interface Uniforms {
-  uLo: { value: number };
-  uHi: { value: number };
-  uRoles: { value: number };
+const COMMON = /* glsl */ `
+attribute vec3 aStart;
+attribute vec3 aEnd;
+attribute float aType;
+attribute float aRole;
+uniform int uLo;
+uniform int uHi;
+uniform int uRoles;
+uniform int uType;
+uniform float uDepth;
+bool hidden() {
+  int move = gl_InstanceID + 1;
+  // the legend's role switches hide extrusions only (travels and the rest keep the last role, not shown)
+  return move < uLo || move > uHi || int(aType + 0.5) != uType || (uType == 0 && ((uRoles >> int(aRole + 0.5)) & 1) == 0);
 }
+vec3 scenePos(vec3 p) { return vec3(p.x, p.z, uDepth - p.y); }
+`;
+const OFF = 'gl_Position = vec4(2.0, 2.0, 2.0, 1.0);';
 
-function ranged<T extends THREE.Material>(material: T, u: Uniforms): T {
-  material.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, u);
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float aMove;\nattribute float aRole;\nuniform float uLo;\nuniform float uHi;\nuniform int uRoles;')
-      .replace(
-        '#include <project_vertex>',
-        '#include <project_vertex>\nif (aMove < uLo || aMove > uHi || ((uRoles >> int(aRole)) & 1) == 0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
-      );
-  };
-  return material;
+const EXTRUSION_VERTEX = /* glsl */ `${COMMON}
+attribute float aW;
+attribute float aH;
+attribute vec4 aColor;
+varying vec3 vColor;
+varying vec3 vNormal;
+void main() {
+  if (hidden()) { ${OFF} return; }
+  vec3 a = scenePos(aStart);
+  vec3 b = scenePos(aEnd);
+  vec3 d = b - a;
+  float len = length(d);
+  vec3 dir = len > 0.0 ? d / len : vec3(1.0, 0.0, 0.0);
+  vec3 side = vec3(-dir.z, 0.0, dir.x);
+  side = length(side) > 1e-6 ? normalize(side) : vec3(0.0, 0.0, 1.0);
+  vec3 up = cross(side, dir);
+  float w = aW * 0.001;
+  float h = aH * 0.001;
+  // the box: along the move (overlapping the joints by half a width), below the nozzle, as wide as the line
+  vec3 p = a - dir * (w * 0.25) + dir * position.x * (len + w * 0.5) + up * (position.y - 1.0) * h + side * position.z * w;
+  vNormal = normalize(normalMatrix * (up * normal.y + side * normal.z));
+  vColor = aColor.rgb;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+}`;
+const EXTRUSION_FRAGMENT = /* glsl */ `
+varying vec3 vColor;
+varying vec3 vNormal;
+void main() {
+  float diffuse = max(dot(normalize(vNormal), normalize(vec3(0.3, 1.0, 0.6))), 0.0);
+  gl_FragColor = vec4(vColor * (0.45 + 0.6 * diffuse), 1.0);
+}`;
+const LINE_VERTEX = /* glsl */ `${COMMON}
+attribute vec4 aColor;
+varying vec3 vColor;
+void main() {
+  if (hidden()) { ${OFF} return; }
+  vColor = aColor.rgb;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(mix(scenePos(aStart), scenePos(aEnd), position.x), 1.0);
+}`;
+const LINE_FRAGMENT = /* glsl */ `
+varying vec3 vColor;
+void main() { gl_FragColor = vec4(vColor, 1.0); }`;
+const POINT_VERTEX = /* glsl */ `${COMMON}
+void main() {
+  if (hidden()) { ${OFF} return; }
+  gl_PointSize = 6.0;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(scenePos(aEnd), 1.0);
+}`;
+const POINT_FRAGMENT = /* glsl */ `
+uniform vec3 uColor;
+void main() { gl_FragColor = vec4(uColor, 1.0); }`;
+
+/** The four long faces of a box (the ends are hidden by the next segment): x along the move 0..1, y up 0..1
+ * (the top at the nozzle), z across -0.5..0.5, with flat normals. */
+function boxSides(): THREE.BufferGeometry {
+  const faces: [number[][], number[]][] = [
+    [[[0, 1, -0.5], [1, 1, -0.5], [1, 1, 0.5], [0, 1, 0.5]], [0, 1, 0]],
+    [[[0, 0, 0.5], [1, 0, 0.5], [1, 0, -0.5], [0, 0, -0.5]], [0, -1, 0]],
+    [[[0, 0, 0.5], [0, 1, 0.5], [1, 1, 0.5], [1, 0, 0.5]], [0, 0, 1]],
+    [[[1, 0, -0.5], [1, 1, -0.5], [0, 1, -0.5], [0, 0, -0.5]], [0, 0, -1]],
+  ];
+  const pos: number[] = [], nor: number[] = [], idx: number[] = [];
+  faces.forEach(([quad, n], f) => {
+    quad.forEach((v) => (pos.push(...v), nor.push(...n)));
+    idx.push(4 * f, 4 * f + 2, 4 * f + 1, 4 * f, 4 * f + 3, 4 * f + 2);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setIndex(idx);
+  return g;
 }
 
 export class ToolpathScene {
   readonly group = new THREE.Group();
   readonly marker: THREE.Mesh;
-  private readonly u: Uniforms = { uLo: { value: 0 }, uHi: { value: -1 }, uRoles: { value: 0 } };
-  private readonly extrusions: THREE.InstancedMesh;
-  /** Move index of each extrusion instance, and of each vertex of the other objects. */
-  private readonly extrusionMoves: Uint32Array;
-  private readonly lines: Record<'travel' | 'wipe', { object: THREE.LineSegments; moves: Uint32Array }>;
-  private readonly points: Record<'retract' | 'unretract' | 'seam', { object: THREE.Points; moves: Uint32Array }>;
-
+  /** RGBA per move, written by ``legend.paint``; call ``colorsChanged`` after. */
+  readonly colors: Uint8Array;
+  private readonly colorBuffer: THREE.InstancedInterleavedBuffer;
+  private readonly geometries: THREE.InstancedBufferGeometry[] = [];
+  private readonly objects: Record<'extrude' | 'travel' | 'wipe' | 'retract' | 'unretract' | 'seam', THREE.Mesh | THREE.LineSegments | THREE.Points>;
+  private readonly uniforms = {
+    uLo: { value: 0 },
+    uHi: { value: -1 },
+    uRoles: { value: 0 },
+    uDepth: { value: 0 },
+  };
   private readonly tp: Toolpaths;
   private readonly depth: number;
 
   constructor(tp: Toolpaths, depth: number) {
     this.tp = tp;
     this.depth = depth;
-    const { count, type } = tp;
-    const ext: number[] = [];
-    const travel: number[] = [];
-    const wipe: number[] = [];
-    const pts: Record<'retract' | 'unretract' | 'seam', number[]> = { retract: [], unretract: [], seam: [] };
-    for (let i = 1; i < count; i++) {
-      const t = type[i];
-      if (t === MOVE.extrude) ext.push(i);
-      else if (t === MOVE.travel) travel.push(i);
-      else if (t === MOVE.wipe) wipe.push(i);
-      else if (t === MOVE.retract) pts.retract.push(i);
-      else if (t === MOVE.unretract) pts.unretract.push(i);
-      else if (t === MOVE.seam) pts.seam.push(i);
+    this.uniforms.uDepth.value = depth;
+    this.colors = new Uint8Array(tp.count * 4);
+    const instances = Math.max(0, tp.count - 1);
+    // one move later than the start: instance k reads move k + 1's attributes
+    const shifted = (array: THREE.TypedArray, size: number, normalized = false) =>
+      new THREE.InterleavedBufferAttribute(new THREE.InstancedInterleavedBuffer(array, size, 1), size, size, normalized);
+    const posBuffer = new THREE.InstancedInterleavedBuffer(tp.pos, 3, 1);
+    this.colorBuffer = new THREE.InstancedInterleavedBuffer(this.colors, 4, 1);
+    const shared: Record<string, THREE.InterleavedBufferAttribute> = {
+      aStart: new THREE.InterleavedBufferAttribute(posBuffer, 3, 0),
+      aEnd: new THREE.InterleavedBufferAttribute(posBuffer, 3, 3),
+      aType: shifted(tp.type, 1),
+      aRole: shifted(tp.role, 1),
+      aW: shifted(tp.width, 1),
+      aH: shifted(tp.height, 1),
+      aColor: new THREE.InterleavedBufferAttribute(this.colorBuffer, 4, 4, true),
+    };
+    const geometry = (base: THREE.BufferGeometry, names: string[]) => {
+      const g = new THREE.InstancedBufferGeometry();
+      g.index = base.index;
+      for (const [k, v] of Object.entries(base.attributes)) g.setAttribute(k, v);
+      for (const k of names) g.setAttribute(k, shared[k]);
+      g.instanceCount = instances;
+      this.geometries.push(g);
+      return g;
+    };
+    const material = (vertexShader: string, fragmentShader: string, type: number, extra: Record<string, THREE.IUniform> = {}) =>
+      new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader,
+        uniforms: { ...this.uniforms, uType: { value: type }, ...extra },
+      });
+    const common = ['aStart', 'aEnd', 'aType', 'aRole'];
+    const line = new THREE.BufferGeometry();
+    line.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0], 3));
+    const point = new THREE.BufferGeometry();
+    point.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3));
+    const lines = (type: number) => new THREE.LineSegments(geometry(line, [...common, 'aColor']), material(LINE_VERTEX, LINE_FRAGMENT, type));
+    const points = (type: number, color: RGB) =>
+      new THREE.Points(geometry(point, common), material(POINT_VERTEX, POINT_FRAGMENT, type, { uColor: { value: new THREE.Color(...color.map((c) => c / 255)) } }));
+    this.objects = {
+      extrude: new THREE.Mesh(geometry(boxSides(), [...common, 'aW', 'aH', 'aColor']), material(EXTRUSION_VERTEX, EXTRUSION_FRAGMENT, MOVE.extrude)),
+      travel: lines(MOVE.travel),
+      wipe: lines(MOVE.wipe),
+      retract: points(MOVE.retract, [205, 34, 214]),
+      unretract: points(MOVE.unretract, [73, 173, 207]),
+      seam: points(MOVE.seam, [230, 230, 230]),
+    };
+    for (const o of Object.values(this.objects)) {
+      o.frustumCulled = false;
+      this.group.add(o);
     }
 
-    // Extrusions: a unit box per move, scaled to its length, height and width, sitting below the nozzle.
-    const box = new THREE.BoxGeometry(1, 1, 1);
-    const material = ranged(new THREE.MeshLambertMaterial(), this.u);
-    this.extrusions = new THREE.InstancedMesh(box, material, Math.max(ext.length, 1));
-    this.extrusions.count = ext.length;
-    this.extrusions.frustumCulled = false;
-    this.extrusionMoves = Uint32Array.from(ext);
-    const m = this.extrusions.instanceMatrix.array as Float32Array;
-    const aMove = new Float32Array(Math.max(ext.length, 1));
-    const aRole = new Float32Array(Math.max(ext.length, 1));
-    ext.forEach((i, k) => {
-      const ax = tp.x[i - 1], ay = tp.y[i - 1], az = tp.z[i - 1];
-      // scene axes: x, up (slicer z), depth - y
-      let dx = tp.x[i] - ax, dy = tp.z[i] - az, dz = -(tp.y[i] - ay);
-      const len = Math.hypot(dx, dy, dz) || 1e-6;
-      dx /= len; dy /= len; dz /= len;
-      // side vector (width): horizontal, perpendicular to the move; up = side × direction
-      let sx = -dz, sz = dx;
-      const sl = Math.hypot(sx, sz) || 1;
-      sx /= sl; sz /= sl;
-      const ux = -sz * dy, uy = sz * dx - sx * dz, uz = sx * dy;
-      const w = tp.width[i], h = tp.height[i];
-      const L = len + w * 0.5; // overlap the joints
-      const o = k * 16;
-      m[o] = dx * L; m[o + 1] = dy * L; m[o + 2] = dz * L; m[o + 3] = 0;
-      m[o + 4] = ux * h; m[o + 5] = uy * h; m[o + 6] = uz * h; m[o + 7] = 0;
-      m[o + 8] = sx * w; m[o + 9] = 0; m[o + 10] = sz * w; m[o + 11] = 0;
-      m[o + 12] = (ax + tp.x[i]) / 2;
-      m[o + 13] = (az + tp.z[i]) / 2 - h / 2;
-      m[o + 14] = depth - (ay + tp.y[i]) / 2;
-      m[o + 15] = 1;
-      aMove[k] = i;
-      aRole[k] = tp.role[i];
-    });
-    this.extrusions.instanceMatrix.needsUpdate = true;
-    box.setAttribute('aMove', new THREE.InstancedBufferAttribute(aMove, 1));
-    box.setAttribute('aRole', new THREE.InstancedBufferAttribute(aRole, 1));
-    this.extrusions.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(ext.length, 1) * 3), 3);
-    this.group.add(this.extrusions);
-
-    const line = (moves: number[]) => {
-      const pos = new Float32Array(moves.length * 6);
-      const am = new Float32Array(moves.length * 2);
-      moves.forEach((i, k) => {
-        pos.set([tp.x[i - 1], tp.z[i - 1], depth - tp.y[i - 1], tp.x[i], tp.z[i], depth - tp.y[i]], k * 6);
-        am[2 * k] = am[2 * k + 1] = i;
-      });
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(moves.length * 6), 3));
-      g.setAttribute('aMove', new THREE.BufferAttribute(am, 1));
-      g.setAttribute('aRole', new THREE.BufferAttribute(new Float32Array(moves.length * 2).fill(ALWAYS), 1));
-      const object = new THREE.LineSegments(g, ranged(new THREE.LineBasicMaterial({ vertexColors: true }), this.u));
-      object.frustumCulled = false;
-      this.group.add(object);
-      return { object, moves: Uint32Array.from(moves) };
-    };
-    this.lines = { travel: line(travel), wipe: line(wipe) };
-
-    const point = (moves: number[], color: RGB) => {
-      const pos = new Float32Array(moves.length * 3);
-      moves.forEach((i, k) => pos.set([tp.x[i], tp.z[i], depth - tp.y[i]], k * 3));
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      g.setAttribute('aMove', new THREE.BufferAttribute(Float32Array.from(moves), 1));
-      g.setAttribute('aRole', new THREE.BufferAttribute(new Float32Array(moves.length).fill(ALWAYS), 1));
-      const mat = ranged(new THREE.PointsMaterial({ size: 6, sizeAttenuation: false, color: new THREE.Color(...color.map((c) => c / 255)) }), this.u);
-      const object = new THREE.Points(g, mat);
-      object.frustumCulled = false;
-      this.group.add(object);
-      return { object, moves: Uint32Array.from(moves) };
-    };
-    this.points = {
-      retract: point(pts.retract, [205, 34, 214]),
-      unretract: point(pts.unretract, [73, 173, 207]),
-      seam: point(pts.seam, [230, 230, 230]),
-    };
-
     // The nozzle: a cone pointing down at the current move's end.
-    this.marker = new THREE.Mesh(new THREE.ConeGeometry(1.2, 4, 16).rotateX(Math.PI), new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
-    this.marker.geometry.translate(0, 2, 0);
+    const cone = new THREE.ConeGeometry(1.2, 4, 16).rotateX(Math.PI);
+    cone.translate(0, 2, 0);
+    this.marker = new THREE.Mesh(cone, new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
     this.group.add(this.marker);
   }
 
-  /** Colour every move with ``color`` (extrusions, travels and wipes; points keep their option colour). */
-  recolor(color: (i: number) => RGB) {
-    const c = this.extrusions.instanceColor!.array as Float32Array;
-    this.extrusionMoves.forEach((i, k) => {
-      const [r, g, b] = color(i);
-      c[3 * k] = r / 255; c[3 * k + 1] = g / 255; c[3 * k + 2] = b / 255;
-    });
-    this.extrusions.instanceColor!.needsUpdate = true;
-    for (const { object, moves } of Object.values(this.lines)) {
-      const attr = object.geometry.getAttribute('color') as THREE.BufferAttribute;
-      const a = attr.array as Float32Array;
-      moves.forEach((i, k) => {
-        const [r, g, b] = color(i);
-        a.set([r / 255, g / 255, b / 255, r / 255, g / 255, b / 255], k * 6);
-      });
-      attr.needsUpdate = true;
-    }
+  /** Upload the colours again after ``colors`` changed. */
+  colorsChanged() {
+    this.colorBuffer.needsUpdate = true;
   }
 
   /** Show moves ``lo``..``hi`` (move indices, inclusive), the roles in ``roles`` (bit per role) and the options. */
-  show(lo: number, hi: number, roles: number, options: Record<'travel' | 'wipe' | 'retract' | 'unretract' | 'seam', boolean>) {
-    this.u.uLo.value = lo;
-    this.u.uHi.value = hi;
-    this.u.uRoles.value = roles | (1 << ALWAYS);
-    this.lines.travel.object.visible = options.travel;
-    this.lines.wipe.object.visible = options.wipe;
-    this.points.retract.object.visible = options.retract;
-    this.points.unretract.object.visible = options.unretract;
-    this.points.seam.object.visible = options.seam;
+  show(lo: number, hi: number, roles: number, options: ShownOptions) {
+    this.uniforms.uLo.value = lo;
+    this.uniforms.uHi.value = hi;
+    this.uniforms.uRoles.value = roles;
+    // instances past the last move shown aren't drawn at all
+    const count = Math.max(0, Math.min(this.tp.count - 1, hi));
+    for (const g of this.geometries) g.instanceCount = count;
+    for (const k of ['travel', 'wipe', 'retract', 'unretract', 'seam'] as const) this.objects[k].visible = options[k];
     const at = Math.max(0, Math.min(hi, this.tp.count - 1));
-    this.marker.position.copy(toScene(this.tp.x[at], this.tp.y[at], this.tp.z[at], this.depth));
-  }
-
-  /** The model's extent, for framing the camera. */
-  box(): THREE.Box3 {
-    const box = new THREE.Box3();
-    const tp = this.tp;
-    for (const i of this.extrusionMoves) box.expandByPoint(new THREE.Vector3(tp.x[i], tp.z[i], this.depth - tp.y[i]));
-    return box;
+    const p = this.tp.pos;
+    this.marker.position.set(p[3 * at], p[3 * at + 2], this.depth - p[3 * at + 1]);
   }
 
   dispose() {
-    this.group.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      mesh.geometry?.dispose();
-      const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-      (Array.isArray(mat) ? mat : mat ? [mat] : []).forEach((m) => m.dispose());
-    });
-    this.extrusions.dispose();
+    for (const o of Object.values(this.objects)) (o.material as THREE.Material).dispose();
+    for (const g of this.geometries) g.dispose();
+    this.marker.geometry.dispose();
+    (this.marker.material as THREE.Material).dispose();
   }
 }

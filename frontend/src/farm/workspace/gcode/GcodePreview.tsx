@@ -10,10 +10,24 @@ import { getAuthToken } from '../../../api/client';
 import type { ViewerScene } from '../../../components/ModelViewer';
 import { VIEW_KEYS, setView } from '../viewTools';
 import { LegendPanel } from './LegendPanel';
-import { type OptionKey, type RangeView, type ViewType, VIEW_TYPES, colorFunction, defaultViewType, rangeOf, shortTime } from './legend';
-import { MOVE, ROLES, type Toolpaths, parseGcode } from './parse';
+import { type OptionKey, type RangeView, type ViewType, VIEW_TYPES, defaultViewType, paint, rangeOf, shortTime } from './legend';
+import { MOVE, ROLES, type Toolpaths } from './parse';
+import type { WorkerReply, WorkerRequest } from './parse.worker';
 import { ToolpathScene } from './scene';
 import { initialSliders, sliderReducer } from './sliders';
+
+export interface PreviewLabels {
+  loading: string;
+  failed: string;
+  tooLarge: string;
+  memory: string;
+  oneLayer: string;
+  upperLayer: string;
+  lowerLayer: string;
+  move: string;
+  /** "Layer 12, Z 2.40 mm" for screen readers. */
+  layerText: (layer: number, z: string) => string;
+}
 
 interface Props {
   url: string;
@@ -22,35 +36,82 @@ interface Props {
   /** An OrcaSlicer string in the UI language. */
   o: (text: string) => string;
   phaseTitle: (phase: number) => string;
-  labels: { loading: string; failed: string; oneLayer: string };
+  labels: PreviewLabels;
   /** Shown above the legend (the slice is of an older version of the 3MF, ...). */
   notice?: React.ReactNode;
 }
 
 const OPTION_DEFAULTS: Record<OptionKey, boolean> = { travel: false, retract: false, unretract: false, wipe: false, seam: true };
+/** The parsed columns may take this much (about 36 bytes a move): beyond it the plate is refused with a message
+ * rather than risking the tab. */
+const MAX_COLUMN_BYTES = 1_000_000_000;
+
+class PreviewError extends Error {
+  readonly reason: string;
+  constructor(reason: string, detail: string) {
+    super(detail);
+    this.reason = reason;
+  }
+}
 
 export function GcodePreview({ url, bed, colours, o, phaseTitle, labels, notice }: Props) {
-  // kept while the workspace is open, so going back and forth between Prepare and Preview doesn't read it again
+  const [progress, setProgress] = useState<{ read: number; total: number } | null>(null);
+  // read in a worker (streamed, off the page); kept for a minute so Prepare <-> Preview doesn't read it again
   const query = useQuery({
     queryKey: ['workspaceGcode', url],
-    queryFn: async () => {
-      const token = getAuthToken();
-      const r = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      // shortcut: parsed on the main thread (about 0.1 s per 1.5 MB); move to a worker if big plates stall the page
-      return parseGcode(await r.text());
-    },
+    queryFn: ({ signal }) =>
+      new Promise<Toolpaths>((resolve, reject) => {
+        const worker = new Worker(new URL('./parse.worker.ts', import.meta.url), { type: 'module' });
+        const stop = () => worker.terminate();
+        signal.addEventListener('abort', () => {
+          stop();
+          reject(new PreviewError('aborted', 'aborted'));
+        });
+        worker.onmessage = (e: MessageEvent<WorkerReply>) => {
+          const m = e.data;
+          if (m.kind === 'progress') setProgress({ read: m.read, total: m.total });
+          else {
+            stop();
+            if (m.kind === 'done') resolve(m.toolpaths);
+            else reject(new PreviewError(m.reason, m.detail));
+          }
+        };
+        worker.onerror = (e) => {
+          stop();
+          reject(new PreviewError('other', e.message || 'worker error'));
+        };
+        const request: WorkerRequest = { url: new URL(url, window.location.href).href, token: getAuthToken(), maxBytes: MAX_COLUMN_BYTES };
+        worker.postMessage(request);
+      }),
     staleTime: Infinity,
-    gcTime: 5 * 60_000,
+    gcTime: 60_000,
     retry: false,
   });
-  if (query.error) return <div className="h-full flex items-center justify-center text-red-400 text-sm">{labels.failed}: {query.error.message}</div>;
-  if (!query.data)
+  if (query.error) {
+    const reason = (query.error as PreviewError).reason;
+    const text = reason === 'tooLarge' ? labels.tooLarge : reason === 'memory' ? labels.memory : `${labels.failed}: ${query.error.message}`;
     return (
-      <div className="h-full flex items-center justify-center gap-2 text-bambu-gray text-sm">
-        <Loader2 className="w-5 h-5 animate-spin" /> {labels.loading}
+      <div className="h-full flex items-center justify-center p-4 text-center text-red-400 text-sm" role="alert">
+        {text}
       </div>
     );
+  }
+  if (!query.data) {
+    const pct = progress?.total ? Math.round((progress.read / progress.total) * 100) : null;
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-bambu-gray text-sm" role="status">
+        <span className="flex items-center gap-2">
+          <Loader2 className="w-5 h-5 animate-spin" /> {labels.loading}
+          {pct != null && ` ${pct}%`}
+        </span>
+        {pct != null && (
+          <span className="block w-48 h-1 rounded bg-bambu-dark-tertiary overflow-hidden">
+            <span className="block h-full bg-bambu-green" style={{ width: `${pct}%` }} />
+          </span>
+        )}
+      </div>
+    );
+  }
   return <Viewer tp={query.data} bed={bed} colours={colours} o={o} phaseTitle={phaseTitle} labels={labels} notice={notice} />;
 }
 
@@ -64,6 +125,8 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
   const [folded, setFolded] = useState(false);
   const [sl, dispatch] = useReducer(useMemo(() => sliderReducer(layers), [layers]), layers, initialSliders);
   const { lo, hi, oneLayer } = sl;
+  // a new plate's G-code: back to all its layers
+  useEffect(() => dispatch({ type: 'reset' }), [tp]);
   const [jump, setJump] = useState(false);
   const colours = useMemo(() => {
     const own = (tp.config.filament_colour ?? '').split(';').map((c) => c.trim()).filter(Boolean);
@@ -127,6 +190,7 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
       (plate.material as THREE.Material).dispose();
       grid.dispose();
       renderer.dispose();
+      renderer.forceContextLoss(); // free the GPU memory now, not when the browser gets round to it
       renderer.domElement.remove();
       setThree(null);
     };
@@ -139,7 +203,8 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
   );
   useEffect(() => {
     if (!three) return;
-    three.paths.recolor(colorFunction(tp, view, range, colours));
+    paint(tp, view, range, colours, three.paths.colors);
+    three.paths.colorsChanged();
     three.render();
   }, [three, tp, view, range, colours]);
 
@@ -163,7 +228,8 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
   // OrcaSlicer's preview keys (Shortcuts.cpp, GLCanvas3D::on_char / on_key) while the canvas or a slider has focus
   const onKey = (e: React.KeyboardEvent) => {
     const el = e.target as HTMLElement;
-    if (jump || el.closest('select, input, textarea, [role="dialog"], [role="menu"]')) return;
+    // the move slider (a range input) and the layer thumbs take Orca's keys too; text fields and menus don't
+    if (jump || el.closest('select, textarea, input:not([type="range"]), [role="dialog"], [role="menu"]')) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const n = e.shiftKey || ctrl ? 5 : 1;
     const zoom = (k: number) => {
@@ -240,7 +306,7 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
         onJump={() => setJump(true)}
         o={o}
         phaseTitle={phaseTitle}
-        oneLayerLabel={labels.oneLayer}
+        labels={labels}
         filaments={tp.stats.usedExtruders.length > 1 ? colours : []}
       />
       <div className="absolute left-2 right-16 bottom-2 flex items-center gap-2 text-xs text-bambu-gray-light">
@@ -251,13 +317,12 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
           value={Math.max(0, moveIndex)}
           disabled={moves.length === 0}
           onChange={(e) => setMove(Number(e.target.value))}
-          onKeyDown={(e) => e.stopPropagation()}
           onWheel={(e) => stepMove((e.deltaY < 0 ? 1 : -1) * (e.shiftKey || e.ctrlKey ? 5 : 1))}
-          aria-label="move"
+          aria-label={labels.move}
           className="flex-1 accent-bambu-green cursor-pointer disabled:opacity-40"
         />
         <span className="min-w-[64px] text-right tabular-nums" title="G-code">
-          {moves.length ? tp.line[cut] + 1 : ''}
+          {moves.length ? tp.line[cut] : ''}
         </span>
       </div>
       {jump && (
@@ -283,7 +348,7 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
  * labels with the layer number and its Z, the estimated time where the pointer hovers, the wheel, and the
  * right-click menu on the active thumb. */
 function LayerSlider({
-  tp, lo, hi, active, oneLayer, onActive, onChange, onStep, onOneLayer, onJump, o, phaseTitle, oneLayerLabel, filaments,
+  tp, lo, hi, active, oneLayer, onActive, onChange, onStep, onOneLayer, onJump, o, phaseTitle, labels, filaments,
 }: {
   tp: Toolpaths;
   lo: number;
@@ -297,7 +362,7 @@ function LayerSlider({
   onJump: () => void;
   o: (text: string) => string;
   phaseTitle: (phase: number) => string;
-  oneLayerLabel: string;
+  labels: PreviewLabels;
   filaments: string[];
 }) {
   const track = useRef<HTMLDivElement>(null);
@@ -313,7 +378,7 @@ function LayerSlider({
   const top = (v: number) => `${layers > 1 ? (1 - v / (layers - 1)) * 100 : 0}%`;
   const valueAt = (clientY: number) => {
     const r = track.current!.getBoundingClientRect();
-    const f = 1 - (clientY - r.top) / r.height;
+    const f = r.height > 0 ? 1 - (clientY - r.top) / r.height : 1; // a hidden track has no height
     return Math.round(Math.max(0, Math.min(1, f)) * (layers - 1));
   };
   const set = (which: 'lo' | 'hi', v: number) => {
@@ -335,10 +400,23 @@ function LayerSlider({
       key={which}
       role="slider"
       tabIndex={0}
-      aria-label={which === 'hi' ? 'layer' : 'lower layer'}
+      aria-label={which === 'hi' ? labels.upperLayer : labels.lowerLayer}
+      aria-orientation="vertical"
       aria-valuemin={1}
       aria-valuemax={layers}
       aria-valuenow={v + 1}
+      aria-valuetext={labels.layerText(v + 1, (tp.layerZ[v] ?? 0).toFixed(2))}
+      onFocus={() => onActive(which)}
+      onKeyDown={(e) => {
+        // the keys act on the thumb that has the focus (the arrows then go on to the preview's keys)
+        onActive(which);
+        // Home / End take this thumb to the first / last layer (elsewhere they move the move slider)
+        if (e.key !== 'Home' && e.key !== 'End') return;
+        e.preventDefault();
+        e.stopPropagation();
+        onActive(which);
+        set(which, e.key === 'Home' ? 0 : layers - 1);
+      }}
       onPointerDown={(e) => {
         e.stopPropagation();
         if (e.button !== 0) return;
@@ -396,7 +474,8 @@ function LayerSlider({
         type="button"
         onClick={onOneLayer}
         aria-pressed={oneLayer}
-        title={`${oneLayerLabel} [L]`}
+        title={`${labels.oneLayer} [L]`}
+        aria-label={labels.oneLayer}
         className={`mt-2 p-1 rounded ${oneLayer ? 'bg-bambu-green text-white' : 'bg-bambu-dark-secondary text-bambu-gray-light hover:text-white'}`}
       >
         <Square className="w-3.5 h-3.5" />

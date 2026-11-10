@@ -44,6 +44,12 @@ export function PreviewPane({ plate, output, bed, colours, layout, canSlice, onS
         loading: t('farm.workspace.previewPane.loading'),
         failed: t('farm.workspace.previewPane.failed'),
         oneLayer: t('farm.workspace.previewPane.oneLayer'),
+        tooLarge: t('farm.workspace.previewPane.tooLarge'),
+        memory: t('farm.workspace.previewPane.memory'),
+        upperLayer: t('farm.workspace.previewPane.upperLayer'),
+        lowerLayer: t('farm.workspace.previewPane.lowerLayer'),
+        move: t('farm.workspace.previewPane.move'),
+        layerText: (layer, z) => t('farm.workspace.previewPane.layerText', { layer, z }),
       }}
       notice={
         !output.current && (
