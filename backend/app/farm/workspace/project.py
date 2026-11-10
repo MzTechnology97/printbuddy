@@ -4,10 +4,10 @@ Everything here works on bytes in memory and never touches the library: the rout
 and save the copy. An archive is refused before anything is parsed when it is too big, has too
 many entries, inflates too much (ZIP bomb), or names an entry outside the archive (Zip Slip).
 
-The copy rewrites ``Metadata/project_settings.config`` only. Every other entry (geometry, plates,
-per-object settings, paint data, thumbnails, ``slice_info.config``, unknown metadata) is copied
-with its name, order, date, compression and bytes, and the result is checked entry by entry
-(CRC and size) before it is returned.
+The copy rewrites ``Metadata/project_settings.config``, and ``3D/3dmodel.model`` when instances are
+placed anew (placement.py). Every other entry (geometry, plates, per-object settings, paint data,
+thumbnails, ``slice_info.config``, unknown metadata) is copied with its name, order, date, compression
+and bytes, and the result is checked entry by entry (CRC and size) before it is returned.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ MAX_ENTRIES = 10_000
 MAX_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RATIO = 200  # inflation of one big entry beyond this is a ZIP bomb, not a mesh
 MAX_CONFIG_BYTES = 32 * 1024 * 1024  # project / model settings, read whole
+# 3D/3dmodel.model, read whole only to place instances anew (Orca keeps its meshes in it; only <build> is parsed)
+MAX_MODEL_BYTES = 256 * 1024 * 1024
 _COPY_CHUNK = 1024 * 1024
 
 # What the workspace can do with a file
@@ -91,17 +93,36 @@ def open_archive(data: bytes | Path) -> zipfile.ZipFile:
     return zf
 
 
-def _read_small(zf: zipfile.ZipFile, name: str) -> bytes | None:
+def _read_small(zf: zipfile.ZipFile, name: str, limit: int = MAX_CONFIG_BYTES) -> bytes | None:
     try:
         info = zf.getinfo(name)
     except KeyError:
         return None
-    if info.file_size > MAX_CONFIG_BYTES:
+    if info.file_size > limit:
         raise ArchiveError(f"{name} is too large")
     try:
         return zf.read(info)
     except _ENTRY_ERRORS as exc:
         raise ArchiveError(f"{name} cannot be read: {exc}") from exc
+
+
+def cannot_place(zf: zipfile.ZipFile) -> str | None:
+    """Why a copy of this archive can't place instances anew (None: it can), known before anything is moved."""
+    try:
+        info = zf.getinfo(MODEL_ENTRY)
+    except KeyError:
+        return f"it has no {MODEL_ENTRY}"
+    if info.file_size > MAX_MODEL_BYTES:
+        return f"its {MODEL_ENTRY} is larger than {MAX_MODEL_BYTES // (1024 * 1024)} MB"
+    return None
+
+
+def read_model(zf: zipfile.ZipFile) -> bytes:
+    """``3D/3dmodel.model`` to place instances in; ``ArchiveError`` when ``cannot_place`` says why not."""
+    why = cannot_place(zf)
+    if why:
+        raise ArchiveError(f"the objects can't be placed anew: {why}")
+    return _read_small(zf, MODEL_ENTRY, MAX_MODEL_BYTES) or b""
 
 
 def read_settings(zf: zipfile.ZipFile) -> dict | None:
@@ -196,15 +217,24 @@ def classify(filename: str, zf: zipfile.ZipFile, settings: dict | None) -> tuple
     return kind, slicer, meta.get("Application") or None
 
 
-def write_copy(data: bytes, settings: dict, dest: Path) -> None:
-    """Write to ``dest`` the archive with ``project_settings.config`` replaced by ``settings``, every other
-    entry unchanged, and check it reads back. ``ArchiveError`` for a damaged entry; ``dest`` is then partial."""
+def write_copy(data: bytes, settings: dict, dest: Path, replaced: dict[str, bytes] | None = None) -> None:
+    """Write to ``dest`` the archive with ``project_settings.config`` replaced by ``settings`` and each entry of
+    ``replaced`` (an entry the archive has) by its bytes, every other entry unchanged, and check it reads back.
+    ``ArchiveError`` for a damaged entry; ``dest`` is then partial."""
+    replaced = replaced or {}
     zin = open_archive(data)
+    if set(replaced) - set(zin.namelist()) or PROJECT_SETTINGS_ENTRY in replaced:
+        raise ArchiveError("the copy can only replace entries the archive has")
+    # settings with the same values keep their bytes (Bambu Studio's line breaks, say): a copy that only places
+    # instances changes nothing else
+    same_settings = read_settings(zin) == settings
     try:
         with zipfile.ZipFile(dest, "w") as zout:
             for info in zin.infolist():
-                if info.filename == PROJECT_SETTINGS_ENTRY:
+                if info.filename == PROJECT_SETTINGS_ENTRY and not same_settings:
                     zout.writestr(info, json.dumps(settings, indent=4, ensure_ascii=False).encode("utf-8"))
+                elif info.filename in replaced:
+                    zout.writestr(info, replaced[info.filename])
                 elif info.is_dir():
                     zout.writestr(info, b"")
                 else:
@@ -213,13 +243,14 @@ def write_copy(data: bytes, settings: dict, dest: Path) -> None:
                         zout.open(info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as dst,
                     ):
                         shutil.copyfileobj(src, dst, _COPY_CHUNK)
-        _check_copy(zin, dest, settings)
+        _check_copy(zin, dest, settings, replaced)
     except _ENTRY_ERRORS as exc:
         raise ArchiveError(f"an entry of the archive cannot be read: {exc}") from exc
 
 
-def _check_copy(original: zipfile.ZipFile, copy: Path, settings: dict) -> None:
-    """The copy reads back: same entries in the same order, same bytes (CRC) but the settings, which parse."""
+def _check_copy(original: zipfile.ZipFile, copy: Path, settings: dict, replaced: dict[str, bytes]) -> None:
+    """The copy reads back: same entries in the same order, same bytes (CRC) but the settings, which parse, and
+    the replaced entries, which hold what was written."""
     with open_archive(copy) as zc:
         if zc.testzip() is not None:
             raise ArchiveError("the copy failed its integrity check")
@@ -227,7 +258,10 @@ def _check_copy(original: zipfile.ZipFile, copy: Path, settings: dict) -> None:
         if [i.filename for i in before] != [i.filename for i in after]:
             raise ArchiveError("the copy does not hold the same entries")
         for a, b in zip(before, after, strict=True):
-            if a.filename != PROJECT_SETTINGS_ENTRY and (a.CRC, a.file_size) != (b.CRC, b.file_size):
+            if a.filename in replaced:
+                if zc.read(b) != replaced[a.filename]:
+                    raise ArchiveError(f"{a.filename} does not read back in the copy")
+            elif a.filename != PROJECT_SETTINGS_ENTRY and (a.CRC, a.file_size) != (b.CRC, b.file_size):
                 raise ArchiveError(f"{a.filename} changed in the copy")
         if read_settings(zc) != settings:
             raise ArchiveError("the settings of the copy do not read back")

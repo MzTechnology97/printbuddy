@@ -26,7 +26,7 @@ from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
-from backend.app.farm.workspace import project, settings as ws_settings
+from backend.app.farm.workspace import placement, project, settings as ws_settings
 from backend.app.farm.workspace.presets import PresetRef, router as presets_router, switch_target
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
@@ -46,6 +46,8 @@ class CopyRequest(BaseModel):
     filename: str | None = Field(default=None, max_length=200)
     # preset switches, applied in order before ``changes`` (which are against the switched values)
     presets: list[PresetRef] = Field(default_factory=list, max_length=66)
+    # instances placed anew (Move / Rotate / Scale): each one's new build item transform
+    transforms: list[placement.InstanceTransform] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
 
 
 async def _library_3mf(db: AsyncSession, file_id: int) -> LibraryFile:
@@ -82,6 +84,8 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         "slicer": slicer,
         "application": application,
         "editable": editable,
+        # why Move can't be saved in a copy of this file (None: it can), so the 3D view says so before a move
+        "cannot_place": project.cannot_place(zf) if editable else None,
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
@@ -173,7 +177,14 @@ def _copy_name(source: str, wanted: str | None) -> str:
     return name if name.lower().endswith(".3mf") else f"{name}.3mf"
 
 
-def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path, targets: list[dict]) -> list[dict]:
+def _build_copy(
+    lib_file: LibraryFile,
+    data: bytes,
+    changes: dict,
+    dest: Path,
+    targets: list[dict],
+    transforms: list[placement.InstanceTransform] = (),
+) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
         zf = project.open_archive(data)
@@ -188,13 +199,18 @@ def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path, t
             cfg, done = ws_settings.switch_preset(cfg, target, slicer)
             switched += done
         new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
-        applied = switched + applied
+        replaced, placed = {}, []
+        if transforms:
+            replaced[project.MODEL_ENTRY], placed = placement.place(project.read_model(zf), transforms)
+        applied = switched + applied + placed
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
-        project.write_copy(data, new_cfg, dest)
+        project.write_copy(data, new_cfg, dest, replaced)
         return applied
     except ws_settings.InvalidChange as exc:
         raise HTTPException(status_code=422, detail=f"Some values were refused: {exc}"[:1000]) from exc
+    except placement.InvalidPlacement as exc:
+        raise HTTPException(status_code=422, detail=f"The objects can't be placed so: {exc}"[:500]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -246,7 +262,7 @@ async def save_copy(
                 status_code=409, detail="The file changed since it was opened: reload it, then edit again"
             )
         try:
-            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp, targets)
+            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp, targets, body.transforms)
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
             source_info = (lib_file.file_metadata or {}).get("workspace") or {}

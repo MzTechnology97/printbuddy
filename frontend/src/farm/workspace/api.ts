@@ -70,6 +70,8 @@ export interface WorkspaceDocument {
   slicer: string;
   application: string | null;
   editable: boolean;
+  /** why a copy of this file can't hold objects moved (its model is too large to rewrite); null: it can */
+  cannot_place?: string | null;
   plates: WorkspacePlate[];
   objects: WorkspaceObject[];
   warnings: string[];
@@ -111,6 +113,13 @@ export interface PresetValues {
 }
 
 /** A preset to switch a section to (OrcaSlicer's preset combos): a user preset by id, a system one by name. */
+/** An instance placed anew: its build item's transform (3MF's 12 numbers), as the copy saves it. */
+export interface InstanceTransform {
+  object_id: string;
+  instance: number;
+  matrix: number[];
+}
+
 export interface PresetRef {
   section: 'process' | 'filament' | 'printer';
   /** the filament slot (from 0) */
@@ -164,9 +173,16 @@ export const workspaceApi = {
       body: JSON.stringify({ settings, presets }),
     }),
   get: (fileId: number) => farmRequest<WorkspaceDocument>(`/workspace/files/${fileId}`),
-  saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string, presets: PresetRef[] = []) =>
+  saveCopy: (
+    fileId: number,
+    baseSha256: string,
+    changes: Record<string, SettingValue>,
+    filename?: string,
+    presets: PresetRef[] = [],
+    transforms: InstanceTransform[] = [],
+  ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
-      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets }),
+      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets, transforms }),
     }),
 };

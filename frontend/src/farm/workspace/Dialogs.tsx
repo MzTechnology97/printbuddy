@@ -69,8 +69,8 @@ export function SaveCopyDialog({ filename, draft, settings, switches = [], inval
   return (
     <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={saving ? () => {} : onClose}>
       <ul className="p-4 space-y-1 overflow-y-auto text-sm">
-        {switches.map((s) => (
-          <li key={s.section}>
+        {switches.map((s, i) => (
+          <li key={i}>
             <span className="text-white">{s.section}</span> <span className="text-bambu-gray">→ {s.name}</span>
           </li>
         ))}

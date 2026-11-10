@@ -22,6 +22,8 @@ import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
 import { type LiveState, usePresetSwitch } from './presetSwitch';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
+import { useMoveGizmo, selectionBox } from './moveGizmo';
+import { applyPlacements, currentSpec, placementsToSave, positionOf, selectedItems, withMoved } from './placement';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { type Selection, instancesOf } from './objects';
@@ -35,6 +37,7 @@ import {
   Labels,
   MainToolbar,
   type MenuItem,
+  MoveWindow,
   Navigator,
   ObjectInfo,
   PlateBar,
@@ -180,7 +183,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   const doc = useMemo(() => ({ ...source, settings }), [source, settings]);
   const navigate = useNavigate();
@@ -188,7 +191,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const { showToast } = useToast();
   const { trackJob } = useSliceJobTracker();
   const fileId = doc.file.id;
-  const count = edits + switched.refs.length; // unsaved: the edits and the preset switches
+  const count = edits + switched.refs.length + Object.keys(placed).length; // unsaved: edits, preset switches, placements
   livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
@@ -320,9 +323,53 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       ? [{ objectId: selection.id, instance: selection.instance ?? null, partId: selection.partId ?? null }]
       : [];
   const targetsKey = JSON.stringify(targets);
+  // OrcaSlicer's Move (GLGizmoMove and its window): the instances selected (one, or every instance of the objects
+  // selected; not a part), placed anew in the copy. Each drag, field or Drop is one undo step.
+  const moveObjects = selectedIds.length ? selectedIds : selection?.kind === 'object' && !selection.partId ? [selection.id] : [];
+  const moveInstance = !selectedIds.length && selection?.kind === 'object' ? selection.instance : null;
+  const moveKeys = useMemo(
+    () => (doc.editable && !doc.cannot_place ? selectedItems(view, moveObjects, moveInstance) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the objects selected, by id
+    [view, doc.editable, doc.cannot_place, moveObjects.join('|'), moveInstance],
+  );
+  const moveTip = useRef<[number, number, number]>([0, 0, 0]);
+  const [dragTip, setDragTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const slicerBox = () => {
+    const box = view && selectionBox(view, moveKeys);
+    return box && { center: [box.getCenter(new THREE.Vector3()).x, box.getCenter(new THREE.Vector3()).z, box.getCenter(new THREE.Vector3()).y] as [number, number, number], low: box.min.y };
+  };
+  const redrawGizmo = useMoveGizmo(view, tool === 'move' ? moveKeys : [], {
+    onMove: (delta, done) => {
+      if (!view) return;
+      moveTip.current = delta;
+      const next = withMoved(view, placed, moveKeys, delta);
+      applyPlacements(view, next);
+      if (done && delta.some((d) => d !== 0)) place(next);
+    },
+    onDrag: (axis, at) => {
+      if (axis == null || !at) return setDragTip(null);
+      // GLGizmoMove3D::get_tooltip: the box centre of one instance, else the move so far
+      const value = moveKeys.length === 1 ? (slicerBox()?.center[axis] ?? 0) : moveTip.current[axis];
+      setDragTip({ text: `${'XYZ'[axis]}: ${toLocaleDecimal(value.toFixed(2), i18n.language)}`, x: at.x, y: at.y });
+    },
+  });
+  useEffect(() => {
+    if (!view) return;
+    applyPlacements(view, placed);
+    setStats(objectStats(view));
+    redrawGizmo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- again when the placements or the scene change
+  }, [view, placed]);
+  const moveBy = (d: [number, number, number]) => view && place(withMoved(view, placed, moveKeys, d));
+  // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
+  const toolReady: Record<string, true | string> = !doc.editable
+    ? {}
+    : doc.cannot_place
+      ? { move: t('farm.workspace.move.tooLarge') }
+      : { move: moveKeys.length ? true : orcaText(layout, 'Please select at least one object.', i18n.language) };
   useEffect(() => {
     if (view) highlight(view, JSON.parse(targetsKey) as Target[], canvas.outline);
-  }, [view, targetsKey, canvas.outline]);
+  }, [view, targetsKey, canvas.outline, placed]);
   useEffect(() => {
     if (view) drawPlates(view, canvas.focus ? 0 : doc.plates.length);
   }, [view, canvas.focus, doc.plates.length]);
@@ -630,6 +677,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       view.controls.update();
     }
     else if (e.key === 'u' || e.key === 'U') toggleTool('measure');
+    else if ((e.key === 'm' || e.key === 'M') && toolReady.move === true) toggleTool('move');
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
       else deselect();
@@ -668,7 +716,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   };
 
   const saveMutation = useMutation({
-    mutationFn: (name: string) => workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs),
+    mutationFn: (name: string) =>
+      workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs, placementsToSave(placed)),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
@@ -956,7 +1005,35 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 className="w-full h-full"
                 onScene={onScene}
               />
-              <MainToolbar layout={layout} active={tool} onTool={toggleTool} />
+              <MainToolbar layout={layout} active={tool} onTool={toggleTool} ready={toolReady} />
+              {tool === 'move' && view && moveKeys.length > 0 && (
+                <MoveWindow
+                  layout={layout}
+                  position={
+                    moveKeys.length === 1
+                      ? positionOf(currentSpec(view, placed, moveKeys[0]) ?? [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+                      : (slicerBox()?.center ?? [0, 0, 0])
+                  }
+                  canDrop={Math.abs(slicerBox()?.low ?? 0) > 0.001}
+                  objectLater={t('farm.workspace.move.objectLater')}
+                  onPosition={(axis, value) => {
+                    const now = moveKeys.length === 1 ? positionOf(currentSpec(view, placed, moveKeys[0])!) : slicerBox()!.center;
+                    const d: [number, number, number] = [0, 0, 0];
+                    d[axis] = value - now[axis];
+                    moveBy(d);
+                  }}
+                  onDrop={() => moveBy([0, 0, -(slicerBox()?.low ?? 0)])}
+                  onDone={() => toggleTool('move')}
+                />
+              )}
+              {dragTip && (
+                <div
+                  className="fixed z-50 pointer-events-none rounded bg-bambu-dark-secondary/95 border border-bambu-dark-tertiary px-1.5 py-0.5 text-[12px] text-white"
+                  style={{ left: dragTip.x + 14, top: dragTip.y + 14 }}
+                >
+                  {dragTip.text}
+                </div>
+              )}
               {tool === 'measure' && (
                 <div
                   className="absolute top-12 left-1/2 -translate-x-1/2 rounded bg-bambu-dark-secondary/95 border border-bambu-dark-tertiary px-3 py-1 text-[12px] text-white"
@@ -1065,10 +1142,22 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           filename={doc.file.filename}
           draft={draft}
           settings={byKey}
-          switches={switched.refs.map((r) => ({
-            section: tr(SECTION_TITLES[r.section]) + (r.section === 'filament' ? ` ${r.index + 1}` : ''),
-            name: projectPreset(doc.settings, r.section, r.index) ?? '—',
-          }))}
+          switches={[
+            ...switched.refs.map((r) => ({
+              section: tr(SECTION_TITLES[r.section]) + (r.section === 'filament' ? ` ${r.index + 1}` : ''),
+              name: projectPreset(doc.settings, r.section, r.index) ?? '—',
+            })),
+            // each instance placed anew: the object (and its instance when it has more) and where it goes now
+            ...Object.entries(placed).map(([key, spec]) => {
+              const [id, instance] = key.split(':');
+              const name = doc.objects.find((o) => o.id === id)?.name ?? id;
+              const many = (instances.get(id)?.length ?? 1) > 1;
+              return {
+                section: many ? `${name} #${Number(instance) + 1}` : name,
+                name: positionOf(spec).map((v, i) => `${'XYZ'[i]} ${toLocaleDecimal(v.toFixed(2), i18n.language)}`).join(' · '),
+              };
+            }),
+          ]}
           invalid={invalid}
           saving={saveMutation.isPending}
           error={saveMutation.isError ? saveMutation.error : null}

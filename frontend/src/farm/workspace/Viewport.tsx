@@ -91,6 +91,7 @@ function ToolButton({
   onClick,
   size = 'w-7 h-7',
   tip = 'below',
+  why = false,
 }: {
   icon: string;
   label: string;
@@ -100,9 +101,11 @@ function ToolButton({
   size?: string;
   /** null: no tooltip (its panel is open beside it) */
   tip?: keyof typeof TIP_PLACE | null;
+  /** the label already says why it is greyed */
+  why?: boolean;
 }) {
   const { t } = useTranslation();
-  const title = enabled ? label : `${label}: ${t('farm.workspace.gizmos.soon')}`;
+  const title = enabled || why ? label : `${label}: ${t('farm.workspace.gizmos.soon')}`;
   return (
     // a disabled button takes no pointer: its wrapper gets the hover and shows the tooltip
     <span className="relative inline-flex group/tip">
@@ -123,7 +126,18 @@ function ToolButton({
   );
 }
 
-export function MainToolbar({ layout, active, onTool }: { layout: OrcaLayout; active: string | null; onTool: (key: string) => void }) {
+export function MainToolbar({
+  layout,
+  active,
+  onTool,
+  ready = {},
+}: {
+  layout: OrcaLayout;
+  active: string | null;
+  onTool: (key: string) => void;
+  /** tools that work in this state (true), or why one can't now (its tooltip, as Orca's) */
+  ready?: Record<string, true | string>;
+}) {
   const { t } = useTranslation();
   const tr = useOrcaText(layout);
   return (
@@ -139,15 +153,117 @@ export function MainToolbar({ layout, active, onTool }: { layout: OrcaLayout; ac
             <ToolButton
               key={tool.key}
               icon={tool.icon}
-              label={`${tr(tool.label)}${tool.shortcut ? ` [${tool.shortcut}]` : ''}`}
-              enabled={WORKING_TOOLS.has(tool.key)}
-              active={WORKING_TOOLS.has(tool.key) ? active === tool.key : undefined}
+              label={
+                typeof ready[tool.key] === 'string'
+                  ? `${tr(tool.label)}:\n${ready[tool.key]}`
+                  : `${tr(tool.label)}${tool.shortcut ? ` [${tool.shortcut}]` : ''}`
+              }
+              enabled={WORKING_TOOLS.has(tool.key) || ready[tool.key] === true}
+              why={typeof ready[tool.key] === 'string'}
+              active={WORKING_TOOLS.has(tool.key) || tool.key in ready ? active === tool.key : undefined}
               onClick={() => onTool(tool.key)}
               size="w-9 h-9"
             />
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** One number field of a gizmo's window: committed on Enter or when it loses focus, as Orca's ImGui inputs. */
+function GizmoNumber({ label, value, onCommit, language }: { label: string; value: number; onCommit: (v: number) => void; language?: string }) {
+  const shown = toLocaleDecimal(value.toFixed(2), language);
+  const [text, setText] = useState(shown);
+  useEffect(() => setText(shown), [shown]);
+  const commit = () => {
+    const v = Number(text.replace(',', '.'));
+    if (Number.isFinite(v) && Math.abs(v - value) > 1e-6) onCommit(v);
+    else setText(shown);
+  };
+  return (
+    <label className="flex items-center gap-1">
+      <span className="w-3 text-bambu-gray">{label}</span>
+      <input
+        value={text}
+        inputMode="decimal"
+        aria-label={label}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') setText(shown);
+          e.stopPropagation(); // the canvas keys (M, Z, Del...) stay out of the field
+        }}
+        className="w-20 rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 py-0.5 text-right text-white"
+      />
+    </label>
+  );
+}
+
+/** OrcaSlicer's Move window (GizmoObjectManipulation::do_render_move_window): the coordinate system (World; Object
+ * comes with Rotate and Scale), the position, Drop and Done. */
+export function MoveWindow({
+  layout,
+  position,
+  canDrop,
+  objectLater,
+  onPosition,
+  onDrop,
+  onDone,
+}: {
+  layout: OrcaLayout;
+  position: [number, number, number];
+  canDrop: boolean;
+  /** why Object coordinates are greyed */
+  objectLater: string;
+  onPosition: (axis: 0 | 1 | 2, value: number) => void;
+  onDrop: () => void;
+  onDone: () => void;
+}) {
+  const { i18n } = useTranslation();
+  const tr = useOrcaText(layout);
+  return (
+    <div
+      className="absolute top-14 left-1/2 -translate-x-1/2 rounded-md border border-bambu-dark-tertiary bg-bambu-dark-secondary/95 p-2 text-[12px] text-white space-y-2"
+      role="dialog"
+      aria-label={tr('Move')}
+    >
+      <div className="flex items-center gap-2">
+        <select
+          className="rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 py-0.5"
+          title={tr('Coordinate system used for transform actions.')}
+          aria-label={tr('Coordinate system used for transform actions.')}
+          value="world"
+          onChange={() => {}}
+        >
+          <option value="world">{tr('World')}</option>
+          <option value="object" disabled title={objectLater}>
+            {tr('Object')}
+          </option>
+        </select>
+        <span className="text-bambu-gray">{tr('Position')}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+          <GizmoNumber key={axis} label={axis} value={position[i]} language={i18n.language} onCommit={(v) => onPosition(i as 0 | 1 | 2, v)} />
+        ))}
+        <span className="text-bambu-gray">{tr('mm')}</span>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          disabled={!canDrop}
+          title={tr('Move the selection along Z so that its lowest point touches the bed.')}
+          onClick={onDrop}
+          className="rounded border border-bambu-dark-tertiary px-2 py-0.5 hover:bg-bambu-dark-tertiary disabled:opacity-40"
+        >
+          {tr('Drop')}
+        </button>
+        <button type="button" onClick={onDone} className="rounded bg-bambu-green px-2 py-0.5 hover:bg-bambu-green/80">
+          {tr('Done')}
+        </button>
+      </div>
     </div>
   );
 }
