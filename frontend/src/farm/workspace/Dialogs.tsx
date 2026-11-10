@@ -53,6 +53,8 @@ interface SaveProps {
   filename: string;
   draft: Draft;
   settings: Map<string, WorkspaceSetting>;
+  /** The preset switches the copy gets: a section's title and the preset's name. */
+  switches?: { section: string; name: string }[];
   invalid: string[];
   saving: boolean;
   error: unknown;
@@ -60,13 +62,18 @@ interface SaveProps {
   onClose: () => void;
 }
 
-export function SaveCopyDialog({ filename, draft, settings, invalid, saving, error, onSave, onClose }: SaveProps) {
+export function SaveCopyDialog({ filename, draft, settings, switches = [], invalid, saving, error, onSave, onClose }: SaveProps) {
   const { t, i18n } = useTranslation();
   const [name, setName] = useState('');
   const inherit = t('farm.workspace.inherit');
   return (
     <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={saving ? () => {} : onClose}>
       <ul className="p-4 space-y-1 overflow-y-auto text-sm">
+        {switches.map((s) => (
+          <li key={s.section}>
+            <span className="text-white">{s.section}</span> <span className="text-bambu-gray">→ {s.name}</span>
+          </li>
+        ))}
         {Object.entries(draft).map(([key, value]) => {
           const s = settings.get(key)!;
           return (

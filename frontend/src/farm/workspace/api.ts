@@ -110,6 +110,34 @@ export interface PresetValues {
   values: Record<string, SettingValue>;
 }
 
+/** A preset to switch a section to (OrcaSlicer's preset combos): a user preset by id, a system one by name. */
+export interface PresetRef {
+  section: 'process' | 'filament' | 'printer';
+  /** the filament slot (from 0) */
+  index: number;
+  source: 'user' | 'system';
+  id?: number;
+  name?: string;
+}
+/** Why a preset isn't offered: a parent not cached, for other printers, only a compatibility condition (not
+ * evaluated), another printer model or nozzle. */
+export type SwitchReason = 'unresolved' | 'incompatible' | 'condition' | 'other_printer';
+export interface OfferedPreset {
+  source: 'user' | 'system';
+  name: string;
+  id?: number;
+  inherits?: string | null;
+  reason: SwitchReason | null;
+}
+/** The project's printer, as the offered presets are checked against it. */
+export interface PrinterIdentity {
+  printer: string;
+  printer_parent: string;
+  model: string;
+  variant: string;
+  nozzle: string;
+}
+
 export const workspaceApi = {
   presets: (section: 'process' | 'filament' | 'printer') =>
     farmRequest<{ section: string; user: PresetEntry[] }>(`/workspace/presets?section=${section}`),
@@ -118,10 +146,21 @@ export const workspaceApi = {
     farmRequest<PresetValues>(
       `/workspace/presets/values?section=${section}&source=${source}&${source === 'user' ? 'id' : 'name'}=${encodeURIComponent(String(ref))}`,
     ),
+  /** The presets a section can switch to on this printer, each with why it isn't offered. */
+  offered: (section: PresetRef['section'], printer: PrinterIdentity) =>
+    farmRequest<{ section: string; presets: OfferedPreset[] }>(
+      `/workspace/presets/offered?${new URLSearchParams({ section, ...printer }).toString()}`,
+    ),
+  /** The project's values after the switches (nothing saved): the values that change. */
+  previewSwitch: (settings: Record<string, SettingValue>, presets: PresetRef[]) =>
+    farmRequest<{ values: Record<string, SettingValue> }>('/workspace/presets/switch', {
+      method: 'POST',
+      body: JSON.stringify({ settings, presets }),
+    }),
   get: (fileId: number) => farmRequest<WorkspaceDocument>(`/workspace/files/${fileId}`),
-  saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string) =>
+  saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string, presets: PresetRef[] = []) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
-      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null }),
+      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets }),
     }),
 };

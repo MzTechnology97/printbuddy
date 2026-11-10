@@ -72,6 +72,50 @@ interface Props {
   onComparePresets?: () => void;
   /** OrcaSlicer strings for those buttons' tooltips. */
   presetTips?: { save: string; compare: string };
+  /** OrcaSlicer's preset combos: pick another preset for a section (a filament's slot), its list under ``at``. */
+  onPickPreset?: (section: 'process' | 'filament' | 'printer', filament: number, at: { x: number; y: number }) => void;
+  /** The combos' label (the screen reader's). */
+  pickLabel?: (name: string) => string;
+}
+
+/** A preset's name, as a combo when it can switch. */
+function PresetBox({
+  className,
+  name,
+  onPick,
+  label,
+  children,
+}: {
+  className: string;
+  name: string | null;
+  onPick?: (at: { x: number; y: number }) => void;
+  label?: string;
+  children: React.ReactNode;
+}) {
+  if (!onPick)
+    return (
+      <div className={className} title={name ?? undefined}>
+        {children}
+      </div>
+    );
+  return (
+    <button
+      type="button"
+      className={`${className} text-left hover:border-bambu-green/60`}
+      title={name ?? undefined}
+      aria-label={label}
+      aria-haspopup="menu"
+      onClick={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        onPick({ x: r.left, y: r.bottom + 2 });
+      }}
+    >
+      {children}
+      <span className="ml-auto text-bambu-gray text-[10px]" aria-hidden>
+        ▾
+      </span>
+    </button>
+  );
 }
 
 export function Sidebar({
@@ -94,6 +138,8 @@ export function Sidebar({
   onSavePreset,
   onComparePresets,
   presetTips,
+  onPickPreset,
+  pickLabel,
 }: Props) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>('simple');
@@ -113,10 +159,15 @@ export function Sidebar({
         )}
       </Header>
       <div className="flex gap-1.5 px-3 py-1.5">
-        <div className={`${box} flex-1 min-w-0 flex items-center gap-2 px-2 h-10`} title={presets.printer ?? undefined}>
+        <PresetBox
+          className={`${box} flex-1 min-w-0 flex items-center gap-2 px-2 h-10`}
+          name={presets.printer}
+          onPick={onPickPreset && ((at) => onPickPreset('printer', 0, at))}
+          label={pickLabel?.(presets.printer ?? '—')}
+        >
           <img src={orcaIcon('printer')} alt="" className="w-5 h-5 opacity-80" aria-hidden />
           <span className="text-[13px] text-white truncate">{presets.printer ?? '—'}</span>
-        </div>
+        </PresetBox>
         <div className={`${box} w-16 flex flex-col justify-center px-2 h-10`}>
           <span className="text-[10px] text-bambu-gray">{t('farm.workspace.variant')}</span>
           <span className="text-[13px] text-white">{nozzle ?? '—'}</span>
@@ -129,10 +180,15 @@ export function Sidebar({
         {colours.map((c, i) => (
           <li key={i} className="flex items-center gap-1.5">
             <Chip colour={c} n={i + 1} />
-            <span className={`${box} flex-1 min-w-0 flex items-center gap-2 px-2 h-7 text-[13px] text-white`}>
+            <PresetBox
+              className={`${box} flex-1 min-w-0 flex items-center gap-2 px-2 h-7 text-[13px] text-white`}
+              name={names[i] || null}
+              onPick={onPickPreset && ((at) => onPickPreset('filament', i, at))}
+              label={pickLabel?.(names[i] || types[i] || '—')}
+            >
               <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0 border border-white/30" style={{ backgroundColor: c }} />
               <span className="truncate">{names[i] || types[i] || '—'}</span>
-            </span>
+            </PresetBox>
             {hasSettings && (
               <EditButton
                 label={t('farm.workspace.editFilament', { n: i + 1 })}
@@ -215,9 +271,14 @@ export function Sidebar({
               develop={develop}
               header={
                 <div className="flex items-center gap-1">
-                  <div className={`${box} flex-1 min-w-0 flex items-center px-2 h-7 text-[13px] text-white`} title={presets.process ?? undefined}>
+                  <PresetBox
+                    className={`${box} flex-1 min-w-0 flex items-center px-2 h-7 text-[13px] text-white`}
+                    name={presets.process}
+                    onPick={onPickPreset && ((at) => onPickPreset('process', 0, at))}
+                    label={pickLabel?.(presets.process ?? '—')}
+                  >
                     <span className="truncate">{presets.process ?? '—'}</span>
-                  </div>
+                  </PresetBox>
                   {onSavePreset && (
                     <button type="button" onClick={onSavePreset} title={presetTips?.save} aria-label={presetTips?.save} className="p-0.5 rounded hover:bg-white/10">
                       <img src={orcaIcon('save')} alt="" className="w-4 h-4" aria-hidden />

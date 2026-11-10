@@ -140,6 +140,7 @@ export function useSettingsDraft(settings: WorkspaceSetting[]) {
   );
   const reset = useCallback((key: string) => dispatch({ type: 'edit', edit: (d) => withoutKey(d, key), key: null, at: Date.now() }), []);
   const resetAll = useCallback(() => dispatch({ type: 'edit', edit: () => ({}), key: null, at: Date.now() }), []);
+  const replace = useCallback((next: Draft) => dispatch({ type: 'edit', edit: () => next, key: null, at: Date.now() }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
   const redo = useCallback(() => dispatch({ type: 'redo' }), []);
   const invalid = useMemo(
@@ -153,7 +154,7 @@ export function useSettingsDraft(settings: WorkspaceSetting[]) {
     [draft, byKey],
   );
   return {
-    draft, set, reset, resetAll, invalid, count: Object.keys(draft).length,
+    draft, set, reset, resetAll, replace, invalid, count: Object.keys(draft).length,
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };
 }

@@ -9,8 +9,8 @@ import type { WorkspaceSetting } from '../../farm/workspace/api';
 import { workspaceApi } from '../../farm/workspace/api';
 import { api } from '../../api/client';
 import type { OrcaLayout } from '../../farm/workspace/orcaLayout';
-import { ComparePresetsDialog, SavePresetDialog } from '../../farm/workspace/PresetDialogs';
-import { checkPresetName, presetDiff, sectionValues, suggestedName, userPresetSetting } from '../../farm/workspace/presetTools';
+import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from '../../farm/workspace/PresetDialogs';
+import { checkPresetName, draftAfterSwitch, presetDiff, sectionValues, suggestedName, unsavedKeys, userPresetSetting, withSwitched } from '../../farm/workspace/presetTools';
 
 const setting = (key: string, section: WorkspaceSetting['section'], value: WorkspaceSetting['value'], over: Partial<WorkspaceSetting> = {}): WorkspaceSetting => ({
   key, label: key, section, type: 'string', value, editable: true, readonly_reason: null, differs_from_system: false, overrides: [], ...over,
@@ -122,5 +122,55 @@ describe('ComparePresetsDialog', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Layer height' }));
     fireEvent.click(screen.getByRole('button', { name: 'Transfer' }));
     expect(onTransfer).toHaveBeenCalledWith(expect.objectContaining({ key: 'layer_height' }), '0.12');
+  });
+});
+
+describe('preset switch (the preset combos)', () => {
+  const WITH_DIFF = [...SETTINGS, setting('different_settings_to_system', null, ['wall_loops', '', 'nozzle_temperature', ''], { editable: false, readonly_reason: 'identity' })];
+  const value = (list: WorkspaceSetting[], key: string) => list.find((s) => s.key === key)?.value;
+
+  it('shows the switched values, and their state against the new preset', () => {
+    const after = withSwitched(WITH_DIFF, { layer_height: '0.12', print_settings_id: '0.12mm Fine @Test', different_settings_to_system: ['', '', 'nozzle_temperature', ''] });
+    expect(value(after, 'layer_height')).toBe('0.12');
+    expect(after.find((s) => s.key === 'wall_loops')?.differs_from_system).toBe(false);
+    expect(after.find((s) => s.key === 'nozzle_temperature')?.differs_from_system).toBe(true);
+    expect(withSwitched(WITH_DIFF, {})).toBe(WITH_DIFF);
+  });
+
+  it("what a switch leaves behind: the section's unsaved edits and the project's own changes, a filament's slot only", () => {
+    expect(unsavedKeys(WITH_DIFF, { layer_height: '0.1' }, 'process')).toEqual(['layer_height', 'wall_loops']);
+    // slot 1's switch: slot 0's edit isn't left behind, the project's own change of slot 1 (nozzle_temperature) is
+    expect(unsavedKeys(WITH_DIFF, { nozzle_temperature: ['215', '240'] }, 'filament', 1)).toEqual(['nozzle_temperature']);
+    expect(unsavedKeys(WITH_DIFF, {}, 'filament', 0)).toEqual([]);
+    expect(unsavedKeys(WITH_DIFF, {}, 'printer')).toEqual([]);
+  });
+
+  it('Transfer keeps those values over the new preset; Discard drops them', () => {
+    const after = withSwitched(WITH_DIFF, { layer_height: '0.12', wall_loops: '2' });
+    const keys = ['layer_height', 'wall_loops'];
+    expect(draftAfterSwitch(WITH_DIFF, after, { layer_height: '0.1' }, keys, 'process', 0, true)).toEqual({ layer_height: '0.1', wall_loops: '3' });
+    expect(draftAfterSwitch(WITH_DIFF, after, { layer_height: '0.1' }, keys, 'process', 0, false)).toEqual({});
+  });
+
+  it("a filament's switch: its slot takes the new preset's value, the other slots keep their edits", () => {
+    const after = withSwitched(WITH_DIFF, { nozzle_temperature: ['210', '250'], filament_settings_id: ['PLA @Test', 'PETG HF @Test'] });
+    const draft = { nozzle_temperature: ['215', '245'] };
+    expect(draftAfterSwitch(WITH_DIFF, after, draft, ['nozzle_temperature'], 'filament', 1, false)).toEqual({ nozzle_temperature: ['215', '250'] });
+    expect(draftAfterSwitch(WITH_DIFF, after, draft, ['nozzle_temperature'], 'filament', 1, true)).toEqual({ nozzle_temperature: ['215', '245'] });
+    // an edit of another slot only: still switched in this slot
+    expect(draftAfterSwitch(WITH_DIFF, after, { nozzle_temperature: ['215', '240'] }, [], 'filament', 1, true)).toEqual({ nozzle_temperature: ['215', '250'] });
+  });
+
+  it('the unsaved-changes dialog lists them, with Transfer, Discard and Cancel', () => {
+    const transfer = vi.fn(), discard = vi.fn(), close = vi.fn();
+    render(<UnsavedChangesDialog layout={LAYOUT} preset="0.20mm Standard @Test" keys={['layer_height', 'wall_loops']} onTransfer={transfer} onDiscard={discard} onClose={close} />);
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Layer height')).toBeInTheDocument();
+    expect(within(dialog).getAllByText('Layer height:')).toHaveLength(2); // under its group
+    expect(within(dialog).getByText('Preset "0.20mm Standard @Test" contains the following unsaved changes:')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Transfer' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect([transfer, discard, close].map((f) => f.mock.calls.length)).toEqual([1, 1, 1]);
   });
 });

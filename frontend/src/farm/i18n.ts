@@ -554,8 +554,19 @@ const en = {
       notFound: 'this preset could not be read',
       saveFailed: 'The preset could not be saved',
       saved: 'Preset "{{name}}" saved in the local presets',
-      insideProjectLater: 'comes with switching presets in the workspace',
+      insideProjectLater: "renaming the project's own preset comes in a later phase",
       missingParent: 'Its parent preset "{{name}}" could not be read: only the values the preset sets itself are compared.',
+      switch: {
+        pick: 'Switch preset: {{name}}',
+        loading: 'Reading the presets…',
+        failed: 'The presets could not be read',
+        none: 'No other preset for this printer',
+        unresolved: 'Not offered: a preset it inherits from is not in the local profile cache',
+        incompatible: 'Not offered: it is for other printers',
+        condition: 'Not offered: its compatibility condition is not checked here yet',
+        otherPrinter:
+          'Another printer model or nozzle: comes in a later phase (it changes the machine G-code, the bed and which farm printers match)',
+      },
     },
     previewPane: {
       none: 'Plate {{index}} is not sliced yet.',
@@ -1248,8 +1259,19 @@ const it: typeof en = {
       notFound: 'impossibile leggere questo profilo',
       saveFailed: 'Impossibile salvare il profilo',
       saved: 'Profilo "{{name}}" salvato nei profili locali',
-      insideProjectLater: "arriva con il cambio di profilo nell'area di lavoro",
+      insideProjectLater: 'rinominare il profilo del progetto arriva in una fase successiva',
       missingParent: 'Impossibile leggere il profilo padre "{{name}}": si confrontano solo i valori che il profilo imposta.',
+      switch: {
+        pick: 'Cambia profilo: {{name}}',
+        loading: 'Lettura dei profili…',
+        failed: 'Impossibile leggere i profili',
+        none: 'Nessun altro profilo per questa stampante',
+        unresolved: 'Non disponibile: un profilo da cui eredita non è nella cache locale dei profili',
+        incompatible: 'Non disponibile: è per altre stampanti',
+        condition: 'Non disponibile: la sua condizione di compatibilità non è ancora verificata qui',
+        otherPrinter:
+          "Altro modello di stampante o ugello: arriva in una fase successiva (cambia il G-code macchina, il piano e quali stampanti della farm corrispondono)",
+      },
     },
     previewPane: {
       none: 'Il piatto {{index}} non è ancora elaborato.',

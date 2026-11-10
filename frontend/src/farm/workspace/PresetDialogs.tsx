@@ -24,6 +24,56 @@ function useOrca(layout: OrcaLayout) {
   };
 }
 
+/** OrcaSlicer's UnsavedChangesDialog on a preset switch: the changes the switch would leave behind, kept over the
+ * new preset (Transfer) or dropped (Discard). */
+export function UnsavedChangesDialog({
+  layout,
+  preset,
+  keys,
+  onTransfer,
+  onDiscard,
+  onClose,
+}: {
+  layout: OrcaLayout;
+  preset: string;
+  keys: string[];
+  onTransfer: () => void;
+  onDiscard: () => void;
+  onClose: () => void;
+}) {
+  const { o, f } = useOrca(layout);
+  return (
+    <Dialog title={o('Transfer or discard changes')} intro={f('Preset "%1%" contains the following unsaved changes:', preset)} onClose={onClose}>
+      <ul className="p-4 space-y-1 overflow-y-auto text-sm text-white">
+        {keys.map((k) => {
+          // under its group, as the dialog's tree (a bare "Type" or "Enable" says little)
+          const group = Object.values(layout.pages)
+            .flat()
+            .flatMap((page) => page.groups)
+            .find((g) => g.keys.includes(k))?.title;
+          return (
+            <li key={k}>
+              {group && <span className="text-bambu-gray">{o(group)}: </span>}
+              {o(layout.options[k]?.label ?? k)}
+            </li>
+          );
+        })}
+      </ul>
+      <div className="p-4 border-t border-bambu-dark-tertiary flex justify-end gap-2">
+        <Button variant="secondary" onClick={onClose}>
+          {o('Cancel')}
+        </Button>
+        <Button variant="secondary" onClick={onDiscard}>
+          {o('Discard')}
+        </Button>
+        <Button onClick={onTransfer} title={o('Transfer the selected options to the newly selected preset.')}>
+          {o('Transfer')}
+        </Button>
+      </div>
+    </Dialog>
+  );
+}
+
 interface SaveProps {
   layout: OrcaLayout;
   section: Section;

@@ -92,6 +92,70 @@ export function userPresetSetting(
 export const SECTION_TITLES: Record<Section, string> = { printer: 'Printer', process: 'Process', filament: 'Filament' };
 const ID_KEYS: Record<Section, string> = { process: 'print_settings_id', filament: 'filament_settings_id', printer: 'printer_settings_id' };
 
+/** ``different_settings_to_system``: the keys each preset changes, [process, filaments..., printer]. */
+function systemDiff(settings: WorkspaceSetting[]): string[][] {
+  const v = settings.find((s) => s.key === 'different_settings_to_system')?.value;
+  return Array.isArray(v) ? v.map((d) => d.split(';').filter(Boolean)) : [];
+}
+const slotOf = (slots: unknown[], section: Section, filament: number) =>
+  section === 'process' ? 0 : section === 'printer' ? slots.length - 1 : 1 + filament;
+
+/** The settings with a preset switch's values over them (the server's preview of settings.switch_preset);
+ * ``differs_from_system`` follows the switched ``different_settings_to_system``. */
+export function withSwitched(settings: WorkspaceSetting[], values: Record<string, SettingValue>): WorkspaceSetting[] {
+  if (!Object.keys(values).length) return settings;
+  const switched = settings.map((s) => (s.key in values ? { ...s, value: values[s.key] } : s));
+  if (!('different_settings_to_system' in values)) return switched;
+  const slots = systemDiff(switched);
+  return switched.map((s) => {
+    if (!s.section || !slots.length) return s;
+    const mine = s.section === 'process' ? slots.slice(0, 1) : s.section === 'printer' ? slots.slice(-1) : slots.slice(1, -1);
+    return { ...s, differs_from_system: mine.some((keys) => keys.includes(s.key)) };
+  });
+}
+
+/** What switching a section (a filament's slot) leaves behind, OrcaSlicer's UnsavedChangesDialog: its unsaved
+ * edits and the project's own changes from its preset (``different_settings_to_system``). */
+export function unsavedKeys(settings: WorkspaceSetting[], draft: Draft, section: Section, filament = 0): string[] {
+  const slots = systemDiff(settings);
+  const own = new Set(slots[slotOf(slots, section, filament)] ?? []);
+  const edited = (s: WorkspaceSetting) =>
+    s.key in draft && (section !== 'filament' || !Array.isArray(s.value) || norm(element(draft[s.key], filament)) !== norm(element(s.value, filament)));
+  return settings.filter((s) => s.section === section && s.editable && (own.has(s.key) || edited(s))).map((s) => s.key);
+}
+
+/** The unsaved edits after a switch (``before`` / ``after``: the settings without and with it). Transfer keeps the
+ * values of ``keys`` over the new preset's; Discard drops them. A filament's switch touches its slot only: the
+ * other slots keep their edits, and its slot of every other edit takes the new preset's value. */
+export function draftAfterSwitch(
+  before: WorkspaceSetting[],
+  after: WorkspaceSetting[],
+  draft: Draft,
+  keys: string[],
+  section: Section,
+  filament: number,
+  transfer: boolean,
+): Draft {
+  const was = new Map(before.map((s) => [s.key, s]));
+  const now = new Map(after.map((s) => [s.key, s]));
+  const out: Draft = { ...draft };
+  const touched = new Set([...keys, ...Object.keys(draft).filter((k) => now.get(k)?.section === section)]);
+  for (const key of touched) {
+    const base = now.get(key)?.value;
+    const old = key in draft ? draft[key] : was.get(key)?.value;
+    if (base === undefined || old === undefined) continue;
+    const keep = transfer && keys.includes(key);
+    let value: SettingValue | undefined;
+    if (section === 'filament' && Array.isArray(base)) {
+      const rest = Array.isArray(draft[key]) ? (draft[key] as string[]) : base;
+      value = base.map((v, i) => (i === filament ? (keep ? String(element(old, i) ?? v) : v) : (rest[i] ?? v)));
+    } else value = keep ? old : undefined;
+    if (value === undefined || norm(value) === norm(base)) delete out[key];
+    else out[key] = value;
+  }
+  return out;
+}
+
 /** The project's preset name of a section (its element for a filament). */
 export function projectPreset(settings: WorkspaceSetting[], section: Section, filament = 0): string | null {
   const v = settings.find((s) => s.key === ID_KEYS[section])?.value;

@@ -403,3 +403,117 @@ def apply_changes(settings: dict, changes: dict, slicer: str = "orcaslicer") -> 
     if sections is not None and applied:
         result["different_settings_to_system"] = sections
     return result, applied
+
+
+SETTINGS_ID = {"process": "print_settings_id", "filament": "filament_settings_id", "printer": "printer_settings_id"}
+# what a printer preset switch must keep: the model and nozzle the copy's machine G-code, bed and farm queue go with
+SAME_PRINTER = ("printer_model", "printer_variant", "nozzle_diameter")
+
+
+def switch_refusal(target: dict, settings: dict) -> str | None:
+    """Why ``target`` (a resolved preset, see ``presets.switch_target``) can't replace its section of the project.
+
+    A process or filament preset must name the project's printer (or its system parent) in
+    ``compatible_printers``; a printer preset must be for the same model and nozzle variant.
+    """
+    values = target["values"]
+    if target["section"] == "printer":
+        if any(_elements(values.get(k)) != _elements(settings.get(k)) for k in SAME_PRINTER):
+            return "other_printer"
+        return None
+    printers = {settings.get("printer_settings_id"), *((_elements(settings.get("inherits_group")) or [""])[-1:])} - {""}
+    listed = _elements(values.get("compatible_printers")) or []
+    if listed:
+        return None if printers & set(listed) else "incompatible"
+    # shortcut: compatible_printers_condition isn't evaluated, so a preset that has only a condition isn't offered;
+    # evaluate Orca's expression when generic presets are wanted
+    if values.get("compatible_printers_condition"):
+        return "condition"
+    return None
+
+
+def switch_preset(settings: dict, target: dict, slicer: str = "orcaslicer") -> tuple[dict, list[dict]]:
+    """``settings`` with one section switched to ``target`` (OrcaSlicer's preset combo in the sidebar).
+
+    Every key of the section the preset holds takes the preset's value (a filament's: that slot only), and the
+    identity changes with it, together: ``*_settings_id``, the section's ``inherits_group`` and
+    ``different_settings_to_system`` entries (the parent and the keys that differ from it, empty for a system
+    preset), ``filament_ids`` and the compatibility lists, as PresetBundle::full_fff_config writes them. Refused
+    whole (``InvalidChange``) rather than half applied: a preset whose values don't fit the project's layout (per
+    extruder / per variant lists of another length), another printer model, an unreadable identity.
+    """
+    section, index = target["section"], int(target.get("index") or 0)
+    sections = _system_sections(settings)
+    if sections is None:
+        raise InvalidChange({"different_settings_to_system": "unreadable: the switch can't be recorded"})
+    if reason := switch_refusal(target, settings):
+        raise InvalidChange({SETTINGS_ID[section]: f"not offered ({reason})"})
+    variants = _elements(target["values"].get("filament_extruder_variant")) or []
+    if section == "filament" and len(variants) > len(_elements(target["values"].get("filament_diameter")) or [""]):
+        # shortcut: a multi-variant filament (one value per nozzle type) isn't resolved to the printer's variant here
+        # (update_values_to_printer_extruders); do it when such presets are wanted
+        raise InvalidChange({"filament_settings_id": "not offered (multi-variant filament)"})
+    filaments = len(sections) - 2
+    if section == "filament" and not 0 <= index < filaments:
+        raise InvalidChange({"filament_settings_id": "no such filament"})
+    slot = {"process": 0, "printer": len(sections) - 1}.get(section, 1 + index)
+    known = options(slicer)
+    result = dict(settings)
+    put = result.__setitem__
+    errors: dict[str, str] = {}
+
+    # shortcut: a key no preset of the chain holds keeps the project's value, where OrcaSlicer would take its built-in
+    # default (PrintConfig.cpp); the defaults aren't in slicer_options yet. Add them there to close the gap.
+    for key, new in target["values"].items():
+        option = known.get(key)
+        if key in IDENTITY or not option or option.get("section") != section or key not in settings:
+            continue
+        old, news = settings[key], _elements(new)
+        if section == "filament":
+            # one value per filament, its preset's first (ConfigOptionVector::set in full_fff_config)
+            if not isinstance(old, list) or len(old) != filaments or not news:
+                errors[key] = "per-variant values: not switched here"
+                continue
+            put(key, [*old[:index], str(news[0]), *old[index + 1 :]])
+        elif isinstance(old, list) != isinstance(new, list) or (isinstance(old, list) and len(old) != len(new)):
+            errors[key] = "another per-extruder layout"
+        else:
+            put(key, [str(v) for v in new] if isinstance(new, list) else str(new))
+    if errors:
+        raise InvalidChange(errors)
+
+    sid = SETTINGS_ID[section]
+    if section == "filament":
+        put(sid, [*settings[sid][:index], target["name"], *settings[sid][index + 1 :]])
+        ids = settings.get("filament_ids")
+        if isinstance(ids, list) and len(ids) == filaments and target.get("filament_id"):
+            put("filament_ids", [*ids[:index], target["filament_id"], *ids[index + 1 :]])
+    else:
+        put(sid, target["name"])
+    if section == "process" and "print_compatible_printers" in settings:
+        put("print_compatible_printers", [str(v) for v in _elements(target["values"].get("compatible_printers")) or []])
+    groups = settings.get("inherits_group")
+    groups = list(groups) if isinstance(groups, list) else [""] * len(sections)  # left out when all are empty
+    if len(groups) != len(sections):
+        raise InvalidChange({"inherits_group": "unreadable: the switch can't be recorded"})
+    groups[slot] = target.get("inherits") or ""
+    if "inherits_group" in settings or any(groups):
+        put("inherits_group", groups)
+    diff = list(sections)
+    differs = (
+        k for k in target.get("differs") or [] if k not in IDENTITY and (known.get(k) or {}).get("section") == section
+    )
+    diff[slot] = ";".join(differs)
+    put("different_settings_to_system", diff)
+    # the conditions Orca keeps beside the names: [process, filaments...] for printers, [filaments...] for processes
+    groups_at = {
+        "compatible_machine_expression_group": ("compatible_printers_condition", None if section == "printer" else slot)
+    }
+    if section == "filament":
+        groups_at["compatible_process_expression_group"] = ("compatible_prints_condition", index)
+    for key, (condition, where) in groups_at.items():
+        group = settings.get(key)
+        if where is not None and isinstance(group, list) and where < len(group):
+            put(key, [*group[:where], str(target["values"].get(condition) or ""), *group[where + 1 :]])
+    applied = [{"key": k, "before": settings.get(k), "after": v} for k, v in result.items() if settings.get(k) != v]
+    return result, applied

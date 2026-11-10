@@ -16,10 +16,10 @@ import { PrintModal } from '../../components/PrintModal';
 import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
-import { type WorkspaceDocument, workspaceApi } from './api';
+import { type OfferedPreset, type PresetRef, type SettingValue, type SwitchReason, type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
-import { ComparePresetsDialog, SavePresetDialog } from './PresetDialogs';
-import { SECTION_TITLES } from './presetTools';
+import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
+import { SECTION_TITLES, draftAfterSwitch, projectPreset, unsavedKeys, withSwitched } from './presetTools';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
@@ -172,14 +172,19 @@ export function WorkspacePage() {
   return <Workspace key={docQuery.data.file.id} doc={docQuery.data} layout={layoutQuery.data} />;
 }
 
-function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout }) {
+function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: OrcaLayout }) {
   const { t, i18n } = useTranslation();
+  // OrcaSlicer's preset combos: the switches made, in order, and the project's values with them (the server's
+  // preview, the same switch the saved copy gets); the page shows the switched project
+  const [switched, setSwitched] = useState<{ refs: PresetRef[]; values: Record<string, SettingValue> }>({ refs: [], values: {} });
+  const doc = useMemo(() => ({ ...source, settings: withSwitched(source.settings, switched.values) }), [source, switched.values]);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const { trackJob } = useSliceJobTracker();
   const fileId = doc.file.id;
-  const { draft, set, reset, resetAll, invalid, count, undo, redo, canUndo, canRedo } = useSettingsDraft(doc.settings);
+  const { draft, set, reset, resetAll, replace, invalid, count: edits, undo, redo, canUndo, canRedo } = useSettingsDraft(doc.settings);
+  const count = edits + switched.refs.length; // unsaved: the edits and the preset switches
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
   // focus mode (on at first, as OrcaSlicer) shows one plate, the first to begin with; off: null, every plate
@@ -214,6 +219,11 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   // OrcaSlicer's Save preset (of a section, a filament's for the filament window) and Compare presets
   const [savePreset, setSavePreset] = useState<{ section: 'process' | 'filament' | 'printer'; filament: number } | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [picker, setPicker] = useState<{ section: PresetRef['section']; filament: number; at: { x: number; y: number } } | null>(null);
+  // a switch waiting on the unsaved-changes dialog
+  const [pending, setPending] = useState<{ ref: PresetRef; refs: PresetRef[]; values: Record<string, SettingValue>; keys: string[] } | null>(
+    null,
+  );
 
   const projectQuery = useQuery({
     queryKey: ['farmProjectSettings', fileId],
@@ -228,9 +238,72 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   }, [doc.settings]);
   const byKey = useMemo(() => new Map(doc.settings.map((s) => [s.key, s])), [doc.settings]);
   const bed = useMemo(() => bedOf(doc), [doc]);
+  const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
-    printer: project?.printer_preset ?? (byKey.get('printer_settings_id')?.value as string | undefined) ?? null,
-    process: project?.process_preset ?? (byKey.get('print_settings_id')?.value as string | undefined) ?? null,
+    printer: (isSwitched('printer') ? null : project?.printer_preset) ?? (byKey.get('printer_settings_id')?.value as string | undefined) ?? null,
+    process: (isSwitched('process') ? null : project?.process_preset) ?? (byKey.get('print_settings_id')?.value as string | undefined) ?? null,
+  };
+  const identity = useMemo(() => {
+    const one = (key: string) => {
+      const v = source.settings.find((s) => s.key === key)?.value;
+      return (Array.isArray(v) ? v.join(',') : v) ?? '';
+    };
+    const parents = source.settings.find((s) => s.key === 'inherits_group')?.value;
+    return {
+      printer: one('printer_settings_id'),
+      printer_parent: Array.isArray(parents) ? (parents[parents.length - 1] ?? '') : '',
+      model: one('printer_model'),
+      variant: one('printer_variant'),
+      nozzle: one('nozzle_diameter'),
+    };
+  }, [source.settings]);
+  const offered = useQuery({
+    queryKey: ['workspaceOffered', picker?.section, identity],
+    queryFn: () => workspaceApi.offered(picker!.section, identity),
+    enabled: picker != null,
+  });
+  const preview = useMutation({
+    mutationFn: (refs: PresetRef[]) =>
+      workspaceApi.previewSwitch(Object.fromEntries(source.settings.map((s) => [s.key, s.value])), refs),
+  });
+  const commitSwitch = (next: { ref: PresetRef; refs: PresetRef[]; values: Record<string, SettingValue>; keys: string[] }, transfer: boolean) => {
+    const after = withSwitched(source.settings, next.values);
+    replace(draftAfterSwitch(doc.settings, after, draft, next.keys, next.ref.section, next.ref.index, transfer));
+    setSwitched({ refs: next.refs, values: next.values });
+    setPending(null);
+  };
+  const pickPreset = (entry: OfferedPreset) => {
+    if (!picker) return;
+    const ref: PresetRef = { section: picker.section, index: picker.filament, source: entry.source, id: entry.id, name: entry.id == null ? entry.name : undefined };
+    const refs = [...switched.refs.filter((r) => r.section !== ref.section || r.index !== ref.index), ref];
+    preview.mutate(refs, {
+      onSuccess: ({ values }) => {
+        const next = { ref, refs, values, keys: unsavedKeys(doc.settings, draft, ref.section, ref.index) };
+        if (next.keys.length) setPending(next);
+        else commitSwitch(next, false);
+      },
+      onError: (e) => showToast(e instanceof Error ? e.message : String(e), 'error'),
+    });
+  };
+  const switchReasons: Record<SwitchReason, string> = {
+    unresolved: t('farm.workspace.presets.switch.unresolved'),
+    incompatible: t('farm.workspace.presets.switch.incompatible'),
+    condition: t('farm.workspace.presets.switch.condition'),
+    other_printer: t('farm.workspace.presets.switch.otherPrinter'),
+  };
+  const pickerItems = (): MenuItem[] => {
+    if (offered.isError) return [{ label: t('farm.workspace.presets.switch.failed'), hint: t('farm.workspace.presets.switch.failed') }];
+    if (!offered.data) return [{ label: t('farm.workspace.presets.switch.loading'), hint: t('farm.workspace.presets.switch.loading') }];
+    const current = picker ? projectPreset(doc.settings, picker.section, picker.filament) : null;
+    const entry = (p: OfferedPreset, i: number, list: OfferedPreset[]): MenuItem => ({
+      label: p.name,
+      checked: p.name === current,
+      separator: i > 0 && list[i - 1].source !== p.source,
+      hint: p.reason ? switchReasons[p.reason] : undefined,
+      onClick: p.reason ? undefined : () => pickPreset(p),
+    });
+    const items = offered.data.presets.map(entry);
+    return items.length ? items : [{ label: t('farm.workspace.presets.switch.none'), hint: t('farm.workspace.presets.switch.none') }];
   };
 
   // --- 3D view: selection, menus, tools (they only look; see Viewport.tsx) ---
@@ -614,7 +687,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   };
 
   const saveMutation = useMutation({
-    mutationFn: (name: string) => workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined),
+    mutationFn: (name: string) => workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
@@ -755,7 +828,10 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
     quit: close,
     undo,
     redo,
-    resetAll,
+    resetAll: () => {
+      resetAll();
+      setSwitched({ refs: [], values: {} });
+    },
     selectAll: () => {
       const ids = [...stats.keys()];
       setSelectedIds(ids);
@@ -883,6 +959,8 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
             onSavePreset={doc.kind === 'project' ? () => setSavePreset({ section: 'process', filament: 0 }) : undefined}
             onComparePresets={() => setCompareOpen(true)}
             presetTips={presetTips('process')}
+            onPickPreset={doc.editable ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
+            pickLabel={(name) => t('farm.workspace.presets.switch.pick', { name })}
           />
         </aside>
         <main className={`${pane === 'view' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-w-0 relative`}>
@@ -1006,6 +1084,10 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
           filename={doc.file.filename}
           draft={draft}
           settings={byKey}
+          switches={switched.refs.map((r) => ({
+            section: tr(SECTION_TITLES[r.section]) + (r.section === 'filament' ? ` ${r.index + 1}` : ''),
+            name: projectPreset(doc.settings, r.section, r.index) ?? '—',
+          }))}
           invalid={invalid}
           saving={saveMutation.isPending}
           error={saveMutation.isError ? saveMutation.error : null}
@@ -1014,6 +1096,17 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
         />
       )}
       {menu && <ContextMenu items={menu.items} at={menu.at} onClose={() => setMenu(null)} />}
+      {picker && <ContextMenu key={offered.status} items={pickerItems()} at={picker.at} onClose={() => setPicker(null)} />}
+      {pending && (
+        <UnsavedChangesDialog
+          layout={layout}
+          preset={projectPreset(doc.settings, pending.ref.section, pending.ref.index) ?? '—'}
+          keys={pending.keys}
+          onTransfer={() => commitSwitch(pending, true)}
+          onDiscard={() => commitSwitch(pending, false)}
+          onClose={() => setPending(null)}
+        />
+      )}
       {shortcutsOpen && (
         <ShortcutsDialog
           layout={layout}

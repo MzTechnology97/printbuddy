@@ -510,6 +510,10 @@ UI_STRINGS = [
     "Printer",
     "Process",
     "Filament",
+    "Discard",
+    "Transfer or discard changes",
+    'Preset "%1%" contains the following unsaved changes:',
+    "Transfer the selected options to the newly selected preset.",
 ]
 # A plate's own settings: the key in model_settings.config -> the option it sets (bbs_3mf.cpp)
 PLATE_KEYS = {

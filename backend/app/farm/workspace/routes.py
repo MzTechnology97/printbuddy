@@ -27,7 +27,7 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
 from backend.app.farm.workspace import project, settings as ws_settings
-from backend.app.farm.workspace.presets import router as presets_router
+from backend.app.farm.workspace.presets import PresetRef, router as presets_router, switch_target
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
 
@@ -44,6 +44,8 @@ class CopyRequest(BaseModel):
     base_sha256: str = Field(min_length=64, max_length=64)
     changes: dict[str, Value | list[Value]]
     filename: str | None = Field(default=None, max_length=200)
+    # preset switches, applied in order before ``changes`` (which are against the switched values)
+    presets: list[PresetRef] = Field(default_factory=list, max_length=66)
 
 
 async def _library_3mf(db: AsyncSession, file_id: int) -> LibraryFile:
@@ -171,7 +173,7 @@ def _copy_name(source: str, wanted: str | None) -> str:
     return name if name.lower().endswith(".3mf") else f"{name}.3mf"
 
 
-def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path) -> list[dict]:
+def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path, targets: list[dict]) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
         zf = project.open_archive(data)
@@ -181,7 +183,12 @@ def _build_copy(lib_file: LibraryFile, data: bytes, changes: dict, dest: Path) -
             raise HTTPException(status_code=400, detail=f"This file can only be inspected ({kind})")
         if project.read_structure(zf, cfg)["warnings"]:
             raise HTTPException(status_code=400, detail="This file can only be inspected (unreadable model settings)")
+        switched = []
+        for target in targets:
+            cfg, done = ws_settings.switch_preset(cfg, target, slicer)
+            switched += done
         new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
+        applied = switched + applied
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
         project.write_copy(data, new_cfg, dest)
@@ -228,6 +235,7 @@ async def save_copy(
         raise HTTPException(status_code=422, detail=f"Too many changes at once (at most {MAX_CHANGES})")
     lib_file = await _library_3mf(db, file_id)
     filename = _copy_name(lib_file.filename, body.filename)
+    targets = [await switch_target(db, ref) for ref in body.presets]
     folder = await db.get(LibraryFolder, lib_file.folder_id) if lib_file.folder_id else None
     tmp = lib.get_library_files_dir() / f".{uuid.uuid4().hex}.3mf.part"
     path = thumbnail = None
@@ -238,7 +246,7 @@ async def save_copy(
                 status_code=409, detail="The file changed since it was opened: reload it, then edit again"
             )
         try:
-            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp)
+            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp, targets)
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
             source_info = (lib_file.file_metadata or {}).get("workspace") or {}
