@@ -538,6 +538,17 @@ const en = {
       hint: 'Measure: click two points on the objects (Esc to leave)',
       distance: 'Distance: {{value}} mm',
     },
+    topbar: {
+      menu: 'Menu',
+      phase: 'coming in phase {{phase}}',
+      later: 'not in the browser workspace yet',
+      download3mf: 'Download the 3MF',
+      exportFailed: 'The G-code could not be downloaded',
+      sliceOptions: 'Slice options',
+      printOptions: 'Print options',
+      sliceFirst: 'Slice the plate first',
+      slicingNoReload: 'Slicing: the page is not reloaded until it is done',
+    },
     previewPane: {
       none: 'Plate {{index}} is not sliced yet.',
       stale: 'Sliced from an older version of this 3MF',
@@ -1212,6 +1223,17 @@ const it: typeof en = {
     measure: {
       hint: 'Misura: clicca due punti sugli oggetti (Esc per uscire)',
       distance: 'Distanza: {{value}} mm',
+    },
+    topbar: {
+      menu: 'Menu',
+      phase: 'in arrivo nella fase {{phase}}',
+      later: "non ancora nell'area di lavoro del browser",
+      download3mf: 'Scarica il 3MF',
+      exportFailed: 'Impossibile scaricare il G-code',
+      sliceOptions: 'Opzioni di elaborazione',
+      printOptions: 'Opzioni di stampa',
+      sliceFirst: 'Prima elabora il piatto',
+      slicingNoReload: 'Elaborazione in corso: la pagina non si ricarica finché non termina',
     },
     previewPane: {
       none: 'Il piatto {{index}} non è ancora elaborato.',

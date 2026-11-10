@@ -8,8 +8,8 @@ import * as THREE from 'three';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Box, Cog, Download, Loader2, Printer, Save, X } from 'lucide-react';
-import { api } from '../../api/client';
+import { AlertTriangle, Loader2 } from 'lucide-react';
+import { api, getAuthToken } from '../../api/client';
 import { Button } from '../../components/Button';
 import { ModelViewer, type ViewerScene } from '../../components/ModelViewer';
 import { PrintModal } from '../../components/PrintModal';
@@ -19,11 +19,13 @@ import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
+import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { type Selection, instancesOf } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
+import { TopBar } from './TopBar';
 import {
   CanvasButtons,
   ContextMenu,
@@ -175,7 +177,7 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const { showToast } = useToast();
   const { trackJob } = useSliceJobTracker();
   const fileId = doc.file.id;
-  const { draft, set, reset, resetAll, invalid, count } = useSettingsDraft(doc.settings);
+  const { draft, set, reset, resetAll, invalid, count, undo, redo, canUndo, canRedo } = useSettingsDraft(doc.settings);
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
   // focus mode (on at first, as OrcaSlicer) shows one plate, the first to begin with; off: null, every plate
@@ -515,6 +517,24 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
       setShortcutsOpen(true);
       return;
     }
+    // the top bar's keys (Shortcuts.cpp), anywhere but in a text field: undo / redo, save, slice, export, print
+    if (ctrl && !e.altKey) {
+      const action = topBarShortcut(e.key, e.shiftKey, {
+        undo: canUndo ? undo : undefined,
+        redo: canRedo ? redo : undefined,
+        save: canSave ? () => setSaveOpen(true) : undefined,
+        slice: sliceRun,
+        print: printRun,
+        exportSliced: printActions.exportSliced,
+        slicing: busy,
+      });
+      if (action) {
+        e.preventDefault(); // only when the key does something here: else it stays the browser's
+        if (action === 'slicing') showToast(t('farm.workspace.topbar.slicingNoReload'), 'info');
+        else action();
+        return;
+      }
+    }
     if (mode !== 'prepare' || !view) return;
     if (!onCanvas && e.key !== 'Escape') return;
     const handled = () => e.preventDefault();
@@ -625,69 +645,174 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const canSlice = sliceable && count === 0 && !slicing;
   const sliceTitle = count ? t('farm.workspace.slice.saveFirst') : !sliceable ? t('farm.workspace.slice.notSliceable') : undefined;
   const percent = job?.progress?.total_percent;
-  const exportFile = () =>
-    mode === 'preview' && output
-      ? api.downloadLibraryFile(output.library_file_id)
-      : api.downloadLibraryFile(fileId, doc.file.filename);
+  const canSave = doc.editable && count > 0;
+
+  // Slice ▾: the plate shown, or every plate one after the other ("Slice all")
+  const [sliceMode, setSliceMode] = useState<'plate' | 'all'>('plate');
+  const [sliceAll, setSliceAll] = useState<{ at: number; total: number } | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => void (alive.current = false), []);
+  const runSliceAll = async () => {
+    const plates = doc.plates.map((p) => p.index);
+    for (let i = 0; i < plates.length && alive.current; i++) {
+      setSliceAll({ at: i, total: plates.length });
+      setSelectedPlate(plates[i]);
+      try {
+        const started = await farmProjectApi.slice(fileId, plates[i]);
+        trackJob(started.job_id, 'libraryFile', doc.file.filename);
+        setSliceJob({ id: started.job_id, plate: plates[i] });
+        setMode('preview');
+        for (;;) {
+          const state = await api.getSliceJob(started.job_id);
+          if (state.status === 'completed' || state.status === 'failed') break;
+          await new Promise((r) => setTimeout(r, 1500));
+          if (!alive.current) return;
+        }
+      } catch {
+        break; // the failure shows as for one plate
+      }
+    }
+    setSliceAll(null);
+    queryClient.invalidateQueries({ queryKey: ['farmWorkspace', fileId] });
+  };
+  const busy = slicing || sliceAll != null;
+  const sliceRun = canSlice && !busy ? (sliceMode === 'all' ? () => void runSliceAll() : () => sliceMutation.mutate()) : undefined;
+
+  // Print ▾: what the Print button does, remembered as OrcaSlicer does ("remember_print_select")
+  const [printAction, setPrintAction] = useState<PrintAction>(() => {
+    try {
+      const saved = localStorage.getItem('pb.workspace.printAction') as PrintAction | null;
+      return saved && PRINT_ACTIONS.includes(saved) && !PRINT_LATER[saved] ? saved : 'printPlate';
+    } catch {
+      return 'printPlate';
+    }
+  });
+  const choosePrint = (a: PrintAction) => {
+    setPrintAction(a);
+    try {
+      localStorage.setItem('pb.workspace.printAction', a);
+    } catch {
+      // private window: not remembered
+    }
+  };
+  const exportGcode = async (id: number) => {
+    const token = getAuthToken();
+    const r = await fetch(api.getLibraryFileGcodeUrl(id), { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!r.ok) return showToast(t('farm.workspace.topbar.exportFailed'), 'error');
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${doc.file.filename.replace(/\.(gcode\.)?3mf$/i, '')}${plate != null ? ` - plate ${plate}` : ''}.gcode`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const sliced1 = output?.current ? output.library_file_id : null;
+  const printActions: Record<PrintAction, (() => void) | undefined> = {
+    printPlate: sliced1 != null ? () => setPrintOpen(true) : undefined,
+    printAll: undefined,
+    exportSliced: sliced1 != null ? () => void api.downloadLibraryFile(sliced1) : undefined,
+    exportAllSliced: undefined,
+    exportGcode: sliced1 != null ? () => void exportGcode(sliced1) : undefined,
+  };
+  const printRun = printActions[printAction];
+  const hints = { phase: (n: number) => t('farm.workspace.topbar.phase', { phase: n }), later: t('farm.workspace.topbar.later') };
+  const trm = (text: string) => stripMnemonic(tr(text));
+  const trc = (context: string, text: string) => {
+    const v = tr(`${context}\u0004${text}`);
+    return v.includes('\u0004') ? stripMnemonic(text) : stripMnemonic(v);
+  };
+  const menuState = {
+    canUndo,
+    canRedo,
+    canSave,
+    dirty: count > 0,
+    hasSlice: sliced1 != null,
+    prepare: mode === 'prepare' && !!view,
+    perspective: canvas.perspective,
+    navigator: canvas.navigator,
+    grid: canvas.grid,
+    labels: canvas.labels,
+    collision,
+    overhangs: canvas.overhangs,
+    outline: canvas.outline,
+  };
+  const menuActions = {
+    open: () => (!count || window.confirm(t('farm.workspace.unsavedConfirm'))) && navigate('/files'),
+    save: () => setSaveOpen(true),
+    download3mf: () => void api.downloadLibraryFile(fileId, doc.file.filename),
+    exportSliced: () => printActions.exportSliced?.(),
+    exportGcode: () => printActions.exportGcode?.(),
+    quit: close,
+    undo,
+    redo,
+    resetAll,
+    selectAll: () => {
+      const ids = [...stats.keys()];
+      setSelectedIds(ids);
+      if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
+    },
+    deselectAll: () => deselect(),
+    view: (preset: Parameters<typeof setView>[1]) => view && setView(view, preset),
+    perspective: (on: boolean) => setCanvas((c) => ({ ...c, perspective: on })),
+    toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') =>
+      option === 'collision' ? setCollision((c) => !c) : setCanvas((c) => ({ ...c, [option]: !c[option] })),
+    shortcuts: () => setShortcutsOpen(true),
+  };
 
   return (
     <div className="h-screen flex flex-col bg-bambu-dark text-white" style={SLICER_DARK}>
       {/* Top bar, as the clients: the file, Prepare / Preview, then save, slice, print, export */}
-      <header className="flex flex-wrap items-center gap-2 px-3 py-2 bg-bambu-dark-secondary border-b border-bambu-dark-tertiary">
-        <div className="flex items-center gap-2 min-w-0 w-full sm:w-auto sm:flex-1">
-          <Button variant="ghost" size="sm" onClick={close} aria-label={t('farm.workspace.close')}>
-            <X className="w-4 h-4" />
-          </Button>
-          <Box className="w-4 h-4 text-bambu-green flex-shrink-0" />
-          <div className="min-w-0">
-            <h1 className="text-sm font-semibold truncate" title={doc.file.filename}>
-              {doc.file.filename}
-            </h1>
-            <p className="text-[11px] text-bambu-gray truncate">
-              {SLICER_NAMES[doc.slicer] ?? doc.slicer}
-              {doc.copy_of && ` · ${t('farm.workspace.copyOf', { name: doc.copy_of.copy_of_filename })}`}
-            </p>
-          </div>
-        </div>
-        <div className="flex rounded-lg bg-bambu-dark p-0.5" role="tablist" aria-label={t('farm.workspace.title')}>
-          {(['prepare', 'preview'] as Mode[]).map((m) => (
-            <button
-              key={m}
-              role="tab"
-              aria-selected={mode === m}
-              onClick={() => setMode(m)}
-              className={`px-4 py-1.5 rounded-md text-sm ${mode === m ? 'bg-bambu-green text-white' : 'text-bambu-gray-light hover:text-white'}`}
-            >
-              {t(`farm.workspace.${m}`)}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap sm:flex-1 sm:justify-end">
-          {count > 0 && (
-            <Button variant="ghost" size="sm" onClick={resetAll}>
-              {t('farm.workspace.resetAll')}
-            </Button>
-          )}
-          <Button variant="secondary" size="sm" onClick={() => setSaveOpen(true)} disabled={!doc.editable || count === 0}>
-            <Save className="w-4 h-4" />
-            {t('farm.workspace.save.button')}
-            {count > 0 && ` (${count})`}
-          </Button>
-          <Button size="sm" onClick={() => sliceMutation.mutate()} disabled={!canSlice} title={sliceTitle}>
-            {slicing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cog className="w-4 h-4" />}
-            {slicing && percent != null ? `${Math.round(percent)}%` : t('farm.workspace.slicePlate')}
-            {plate != null && doc.plates.length > 1 && !slicing && ` ${plate}`}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => setPrintOpen(true)} disabled={!output?.current}>
-            <Printer className="w-4 h-4" />
-            {t('farm.workspace.slice.print')}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={exportFile} title={t(`farm.workspace.export.${mode}`)}>
-            <Download className="w-4 h-4" />
-            {t('farm.workspace.export.button')}
-          </Button>
-        </div>
-      </header>
+      <TopBar
+        title={doc.file.filename}
+        subtitle={(SLICER_NAMES[doc.slicer] ?? doc.slicer) + (doc.copy_of ? ` · ${t('farm.workspace.copyOf', { name: doc.copy_of.copy_of_filename })}` : '')}
+        dirty={count > 0}
+        file={fileMenu(trm, hints, menuState, menuActions, { download3mf: t('farm.workspace.topbar.download3mf') })}
+        main={mainMenu(trm, trc, hints, menuState, menuActions, { resetAll: t('farm.workspace.resetAll') })}
+        labels={{
+          close: t('farm.workspace.close'),
+          file: trm('File'),
+          menu: t('farm.workspace.topbar.menu'),
+          save: trm('Save Project'),
+          undo: trm('Undo'),
+          redo: trm('Redo'),
+          tabs: t('farm.workspace.title'),
+        }}
+        onClose={close}
+        onSave={canSave ? () => setSaveOpen(true) : undefined}
+        onUndo={canUndo ? undo : undefined}
+        onRedo={canRedo ? redo : undefined}
+        modes={(['prepare', 'preview'] as Mode[]).map((m) => ({ key: m, label: t(`farm.workspace.${m}`) }))}
+        mode={mode}
+        onMode={(m) => setMode(m as Mode)}
+        slice={{
+          label: busy
+            ? `${sliceAll ? `${sliceAll.at + 1}/${sliceAll.total} · ` : ''}${percent != null ? `${Math.round(percent)}%` : ''}`
+            : trm(sliceMode === 'all' ? 'Slice all' : 'Slice plate') + (sliceMode === 'plate' && plate != null && doc.plates.length > 1 ? ` ${plate}` : ''),
+          run: sliceRun,
+          busy,
+          title: sliceTitle,
+          more: t('farm.workspace.topbar.sliceOptions'),
+          options: [
+            { label: trm('Slice all'), checked: sliceMode === 'all', onClick: doc.plates.length > 1 ? () => setSliceMode('all') : undefined },
+            { label: trm('Slice plate'), checked: sliceMode === 'plate', onClick: () => setSliceMode('plate') },
+          ],
+        }}
+        print={{
+          label: trm(PRINT_LABELS[printAction]),
+          run: printRun,
+          title: printRun ? undefined : t('farm.workspace.topbar.sliceFirst'),
+          more: t('farm.workspace.topbar.printOptions'),
+          options: PRINT_ACTIONS.map((a) => {
+            const later = PRINT_LATER[a];
+            return {
+              label: trm(PRINT_LABELS[a]),
+              checked: printAction === a,
+              onClick: later ? undefined : () => choosePrint(a),
+              hint: later === 'later' ? hints.later : later ? hints.phase(later) : undefined,
+            };
+          }),
+        }}
+      />
 
       {(doc.kind !== 'project' || doc.warnings.length > 0 || doc.file.watched || job?.status === 'failed' || sliceMutation.isError) && (
         <div className="px-3 py-1.5 text-xs border-b border-bambu-dark-tertiary space-y-0.5" role="status">

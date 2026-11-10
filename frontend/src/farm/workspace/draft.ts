@@ -1,6 +1,6 @@
 // Fork (printfarm): the workspace's unsaved changes. Pure functions, so they're tested apart from the UI.
 // The backend checks every value again (farm/workspace/settings.py); this only spares a round trip.
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useReducer } from 'react';
 import type { SettingValue, WorkspaceSetting } from './api';
 
 export const NIL = 'nil';
@@ -97,12 +97,51 @@ export function withoutKey(draft: Draft, key: string): Draft {
   return next;
 }
 
+/** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
+export interface DraftHistory {
+  draft: Draft;
+  past: Draft[];
+  future: Draft[];
+  /** The setting the last edit changed and when: typing in one field is one step, not one per key. */
+  last: { key: string; at: number } | null;
+}
+export type DraftAction =
+  | { type: 'edit'; edit: (d: Draft) => Draft; key: string | null; at: number }
+  | { type: 'undo' }
+  | { type: 'redo' };
+/** Edits of the same setting closer than this make one undo step. */
+export const COALESCE_MS = 1000;
+const HISTORY = 100;
+
+export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
+  if (a.type === 'undo') {
+    if (!h.past.length) return h;
+    return { draft: h.past[h.past.length - 1], past: h.past.slice(0, -1), future: [h.draft, ...h.future], last: null };
+  }
+  if (a.type === 'redo') {
+    if (!h.future.length) return h;
+    return { draft: h.future[0], past: [...h.past, h.draft], future: h.future.slice(1), last: null };
+  }
+  const next = a.edit(h.draft);
+  if (JSON.stringify(next) === JSON.stringify(h.draft)) return h;
+  const same = a.key != null && h.last?.key === a.key && a.at - h.last.at < COALESCE_MS;
+  const past = same ? h.past : [...h.past, h.draft].slice(-HISTORY);
+  return { draft: next, past, future: [], last: a.key == null ? null : { key: a.key, at: a.at } };
+}
+
 export function useSettingsDraft(settings: WorkspaceSetting[]) {
-  const [draft, setDraft] = useState<Draft>({});
+  const [history, dispatch] = useReducer(draftHistory, { draft: {}, past: [], future: [], last: null });
+  const draft = history.draft;
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
-  const set = useCallback((setting: WorkspaceSetting, value: SettingValue) => setDraft((d) => withValue(d, setting, value)), []);
-  const reset = useCallback((key: string) => setDraft((d) => withoutKey(d, key)), []);
-  const resetAll = useCallback(() => setDraft({}), []);
+  const set = useCallback(
+    (setting: WorkspaceSetting, value: SettingValue) =>
+      dispatch({ type: 'edit', edit: (d) => withValue(d, setting, value), key: setting.key, at: Date.now() }),
+    [],
+  );
+  const reset = useCallback((key: string) => dispatch({ type: 'edit', edit: (d) => withoutKey(d, key), key: null, at: Date.now() }), []);
+  const resetAll = useCallback(() => dispatch({ type: 'edit', edit: () => ({}), key: null, at: Date.now() }), []);
+  const undo = useCallback(() => dispatch({ type: 'undo' }), []);
+  const redo = useCallback(() => dispatch({ type: 'redo' }), []);
   const invalid = useMemo(
     () =>
       Object.entries(draft)
@@ -113,5 +152,8 @@ export function useSettingsDraft(settings: WorkspaceSetting[]) {
         .map(([key]) => key),
     [draft, byKey],
   );
-  return { draft, set, reset, resetAll, invalid, count: Object.keys(draft).length };
+  return {
+    draft, set, reset, resetAll, invalid, count: Object.keys(draft).length,
+    undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
+  };
 }
