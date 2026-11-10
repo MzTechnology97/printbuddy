@@ -24,8 +24,12 @@ export function selectionBox(view: ViewerScene, keys: string[]): THREE.Box3 | nu
   view.model.updateMatrixWorld(true);
   const fromWorld = view.model.matrixWorld.clone().invert();
   for (const item of items(view)) {
-    if (!keys.includes(keyOf(item))) continue;
+    // a target is an instance (objectId:instance) or a part of it (objectId:instance/partId)
+    const mine = keys.filter((k) => k.split('/')[0] === keyOf(item));
+    if (!mine.length) continue;
+    const parts = mine.some((k) => !k.includes('/')) ? null : new Set(mine.map((k) => k.split('/')[1]));
     item.traverse((o) => {
+      if (parts && !parts.has(String(o.parent?.userData.partId))) return;
       if (!(o instanceof THREE.Mesh)) return;
       const pos = (o.geometry as THREE.BufferGeometry).getAttribute('position');
       toModel.copy(fromWorld).multiply(o.matrixWorld);

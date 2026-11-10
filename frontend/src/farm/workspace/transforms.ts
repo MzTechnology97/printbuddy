@@ -5,9 +5,11 @@
 // slicer's coordinates (mm), as placement.fromSpec reads 3MF's numbers.
 import * as THREE from 'three';
 import type { ViewerScene } from '../../components/ModelViewer';
-import { type Placed, type Spec, fileSpec, fromSpec, itemKey, toSpec } from './placement';
+import { IDENTITY, type Placed, type Spec, fileSpec, fromSpec, itemKey, toSpec } from './placement';
 
-export type Coordinates = 'world' | 'object';
+/** World: the bed's axes; Object: the instance's own; Part: a part's own (GizmoObjectManipulation's World, Instance,
+ * Local). */
+export type Coordinates = 'world' | 'object' | 'part';
 type Vec = [number, number, number];
 
 /** Model.hpp SINKING_Z_THRESHOLD */
@@ -15,74 +17,143 @@ const SINKING = -0.001;
 
 const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
 const keyOf = (item: THREE.Object3D) => itemKey(String(item.userData.objectId), Number(item.userData.instance ?? 0));
+/** An item's part groups (ModelViewer: one per component, ``userData.partId`` its id in model_settings.config). */
+const partsOf = (item: THREE.Object3D) => item.children.filter((c) => c.userData.partId !== undefined);
 
-/** The item's vertices where the file puts them, in the slicer's coordinates (kept on the item: the mesh doesn't move). */
-function filePoints(item: THREE.Object3D): Float32Array {
-  if (item.userData.points) return item.userData.points as Float32Array;
-  const out: number[] = [];
-  const toItem = new THREE.Matrix4();
-  const v = new THREE.Vector3();
-  item.updateMatrixWorld(true);
-  const fromItem = item.matrixWorld.clone().invert();
-  item.traverse((o) => {
+/** A part's placement key: shared by all the object's instances, as Orca's ModelVolume is. */
+export const partKey = (objectId: string, partId: string) => `${objectId}/${partId}`;
+export const isPartKey = (key: string) => key.includes('/');
+/** What a tool works on: an instance (``objectId:instance``) or a part in it (``objectId:instance/partId``). */
+export const targetKey = (objectId: string, instance: number, partId?: string | null) => itemKey(objectId, instance) + (partId ? `/${partId}` : '');
+const splitTarget = (target: string) => {
+  const [inst, part] = target.split('/');
+  return { inst, part: part ?? null };
+};
+
+/** A part's vertices where the file puts them, in the slicer's coordinates, kept on its group (the mesh never moves). */
+function filePoints(group: THREE.Object3D): Float32Array {
+  if (group.userData.points) return group.userData.points as Float32Array;
+  group.updateMatrixWorld(true);
+  const fromGroup = group.matrixWorld.clone().invert();
+  const toGroup = new THREE.Matrix4();
+  const chunks: Float32Array[] = [];
+  group.traverse((o) => {
     if (!(o instanceof THREE.Mesh)) return;
     const pos = (o.geometry as THREE.BufferGeometry).getAttribute('position');
-    toItem.copy(fromItem).multiply(o.matrixWorld);
+    const e = toGroup.copy(fromGroup).multiply(o.matrixWorld).elements;
+    const out = new Float32Array(pos.count * 3);
     for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i).applyMatrix4(toItem);
-      out.push(v.x, v.z, v.y); // the viewer's Y-up frame back to the slicer's
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      out[3 * i] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      out[3 * i + 1] = e[2] * x + e[6] * y + e[10] * z + e[14]; // the viewer's Z is the slicer's Y
+      out[3 * i + 2] = e[1] * x + e[5] * y + e[9] * z + e[13];
     }
+    chunks.push(out);
   });
-  const points = new Float32Array(out);
-  item.userData.points = points;
+  const points = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    points.set(c, at);
+    at += c.length;
+  }
+  group.userData.points = points;
   return points;
 }
 
-/** Visit the item's vertices under ``spec`` (slicer coordinates). */
-function eachPoint(item: THREE.Object3D, spec: Spec, visit: (x: number, y: number, z: number) => void) {
-  const m = fromSpec(spec).multiply(fromSpec(fileSpec(item)).invert()).elements;
-  const p = filePoints(item);
-  for (let i = 0; i < p.length; i += 3) {
-    const x = p[i], y = p[i + 1], z = p[i + 2];
-    visit(m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]);
+/** The part's file transform (its component's), and its transform now. */
+export const partFileSpec = (group: THREE.Object3D): Spec => (group.userData.transform as Spec | undefined) ?? IDENTITY;
+const partSpec = (item: THREE.Object3D, group: THREE.Object3D, placed: Placed): Spec =>
+  (group.userData.partId ? placed[partKey(String(item.userData.objectId), String(group.userData.partId))] : undefined) ?? partFileSpec(group);
+
+/** From where the file puts a part to where it is: M·C·C₀⁻¹·M₀⁻¹ (M the instance's transform, C the part's). */
+export function partMatrix(item: THREE.Object3D, group: THREE.Object3D, placed: Placed, instance: Spec = placed[keyOf(item)] ?? fileSpec(item)): THREE.Matrix4 {
+  return fromSpec(instance)
+    .multiply(fromSpec(partSpec(item, group, placed)))
+    .multiply(fromSpec(partFileSpec(group)).invert())
+    .multiply(fromSpec(fileSpec(item)).invert());
+}
+
+/** Each part of the item (or the one named) with its vertices and the matrix that places them now. */
+function eachPart(item: THREE.Object3D, placed: Placed, part: string | null, visit: (points: Float32Array, m: number[]) => void, instance?: Spec) {
+  for (const group of partsOf(item)) {
+    if (part != null && String(group.userData.partId) !== part) continue;
+    visit(filePoints(group), partMatrix(item, group, placed, instance).elements);
   }
 }
 
-function minZ(item: THREE.Object3D, spec: Spec): number {
+function minZ(item: THREE.Object3D, placed: Placed, instance?: Spec): number {
   let low = Infinity;
-  eachPoint(item, spec, (_x, _y, z) => (low = Math.min(low, z)));
+  eachPart(item, placed, null, (p, m) => {
+    for (let i = 0; i < p.length; i += 3) {
+      const z = m[2] * p[i] + m[6] * p[i + 1] + m[10] * p[i + 2] + m[14];
+      if (z < low) low = z;
+    }
+  }, instance);
   return low;
 }
 
-/** The instances' box in the slicer's axes, or in the first one's own (rotated) axes for Object coordinates. */
-export function boxOf(view: ViewerScene, placed: Placed, keys: string[], cs: Coordinates = 'world'): THREE.Box3 | null {
-  const box = new THREE.Box3();
-  const v = new THREE.Vector3();
-  const first = items(view).find((i) => keys.includes(keyOf(i)));
-  const into = cs === 'object' && first ? rotationOf(placed[keyOf(first)] ?? fileSpec(first)).invert() : null;
-  for (const item of items(view)) {
-    if (!keys.includes(keyOf(item))) continue;
-    eachPoint(item, placed[keyOf(item)] ?? fileSpec(item), (x, y, z) => {
-      v.set(x, y, z);
-      if (into) v.applyMatrix4(into);
-      box.expandByPoint(v);
-    });
+/** The targets' (instances' or a part's) points in the slicer's coordinates (turned by ``into``), in one flat array. */
+function targetPoints(view: ViewerScene, placed: Placed, targets: string[], into?: THREE.Matrix4): Float32Array {
+  const parts: { p: Float32Array; m: number[] }[] = [];
+  for (const item of items(view))
+    for (const t of targets) {
+      const { inst, part } = splitTarget(t);
+      if (inst !== keyOf(item)) continue;
+      eachPart(item, placed, part, (p, m) => parts.push({ p, m: into ? into.clone().multiply(new THREE.Matrix4().fromArray(m)).elements : m }));
+    }
+  const out = new Float32Array(parts.reduce((n, x) => n + x.p.length, 0)); // 0.1 µm at a metre: plenty, half the memory
+  let at = 0;
+  for (const { p, m } of parts) {
+    for (let i = 0; i < p.length; i += 3) {
+      const x = p[i], y = p[i + 1], z = p[i + 2];
+      out[at++] = m[0] * x + m[4] * y + m[8] * z + m[12];
+      out[at++] = m[1] * x + m[5] * y + m[9] * z + m[13];
+      out[at++] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    }
   }
-  return box.isEmpty() ? null : box;
+  return out;
+}
+
+/** The targets' box in the slicer's axes, or (Object coordinates) in the first target's own rotated axes. */
+export function boxOf(view: ViewerScene, placed: Placed, targets: string[], cs: Coordinates = 'world', frame?: THREE.Matrix4): THREE.Box3 | null {
+  // the axes: the first target's own (an instance's, a part's), or ``frame`` (a part's instance's, for Object)
+  const into = cs !== 'world' ? (frame?.clone() ?? frameOf(view, placed, targets[0])).invert() : undefined;
+  const p = targetPoints(view, placed, targets, into);
+  if (!p.length) return null;
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+    if (z < z0) z0 = z;
+    if (z > z1) z1 = z;
+  }
+  return new THREE.Box3(new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y1, z1));
+}
+
+/** The rotation of a target's own axes: the instance's, or for a part the instance's and the part's together. */
+export function frameOf(view: ViewerScene, placed: Placed, target: string | undefined): THREE.Matrix4 {
+  if (!target) return new THREE.Matrix4();
+  const { inst, part } = splitTarget(target);
+  const item = items(view).find((i) => keyOf(i) === inst);
+  if (!item) return new THREE.Matrix4();
+  const m = fromSpec(placed[inst] ?? fileSpec(item));
+  const group = part != null ? partsOf(item).find((g) => String(g.userData.partId) === part) : undefined;
+  if (group) m.multiply(fromSpec(partSpec(item, group, placed)));
+  return rotationOf(toSpec(m));
 }
 
 type Sphere = { center: THREE.Vector3; radius: number };
 
-/** The selection's bounding sphere: Selection::get_bounding_sphere's (CGAL's minimum sphere), the rotation's pivot. */
-export function boundingSphere(view: ViewerScene, placed: Placed, keys: string[]): Sphere | null {
-  const pts: THREE.Vector3[] = [];
-  for (const item of items(view))
-    if (keys.includes(keyOf(item))) eachPoint(item, placed[keyOf(item)] ?? fileSpec(item), (x, y, z) => pts.push(new THREE.Vector3(x, y, z)));
-  return pts.length ? minSphere(pts) : null;
+/** The targets' bounding sphere: Selection::get_bounding_sphere's (CGAL's minimum sphere), the rotation's pivot. */
+export function boundingSphere(view: ViewerScene, placed: Placed, targets: string[]): Sphere | null {
+  const p = targetPoints(view, placed, targets);
+  return p.length ? minSphereOf(p) : null;
 }
 
 const EPS = 1e-7;
-const inside = (s: Sphere, p: THREE.Vector3) => p.distanceTo(s.center) <= s.radius * (1 + 1e-9) + EPS;
 
 function sphereOf(ps: THREE.Vector3[]): Sphere {
   if (ps.length === 1) return { center: ps[0].clone(), radius: 0 };
@@ -118,31 +189,53 @@ function widest(ps: THREE.Vector3[]): Sphere {
   return best;
 }
 
-/** Welzl's minimum enclosing sphere, iteratively (no recursion depth), on the points in a fixed shuffled order. */
-export function minSphere(points: THREE.Vector3[]): Sphere {
-  const p = [...points];
+/** Welzl's minimum enclosing sphere on a flat xyz array: iterative (no recursion depth), the points in a fixed
+ * shuffled order, the inside test on plain numbers; only the few boundary spheres build vectors. */
+export function minSphereOf(p: ArrayLike<number>): Sphere {
+  const n = Math.floor(p.length / 3);
+  const order = new Uint32Array(n);
+  for (let i = 0; i < n; i++) order[i] = i;
   let seed = 1;
-  for (let i = p.length - 1; i > 0; i--) {
+  for (let i = n - 1; i > 0; i--) {
     seed = (seed * 16807) % 2147483647;
     const j = seed % (i + 1);
-    [p[i], p[j]] = [p[j], p[i]];
+    const t = order[i];
+    order[i] = order[j];
+    order[j] = t;
   }
-  let s = sphereOf([p[0]]);
-  for (let i = 1; i < p.length; i++) {
-    if (inside(s, p[i])) continue;
-    s = sphereOf([p[i]]);
+  const at = (k: number) => new THREE.Vector3(p[3 * order[k]], p[3 * order[k] + 1], p[3 * order[k] + 2]);
+  let cx = 0, cy = 0, cz = 0, r = 0, r2 = 0;
+  const set = (s: Sphere) => {
+    cx = s.center.x;
+    cy = s.center.y;
+    cz = s.center.z;
+    r = s.radius;
+    r2 = r * r * (1 + 2e-9) + EPS;
+  };
+  const outside = (k: number) => {
+    const i = 3 * order[k];
+    const dx = p[i] - cx, dy = p[i + 1] - cy, dz = p[i + 2] - cz;
+    return dx * dx + dy * dy + dz * dz > r2;
+  };
+  set(sphereOf([at(0)]));
+  for (let i = 1; i < n; i++) {
+    if (!outside(i)) continue;
+    set(sphereOf([at(i)]));
     for (let j = 0; j < i; j++) {
-      if (inside(s, p[j])) continue;
-      s = sphereOf([p[i], p[j]]);
+      if (!outside(j)) continue;
+      set(sphereOf([at(i), at(j)]));
       for (let k = 0; k < j; k++) {
-        if (inside(s, p[k])) continue;
-        s = sphereOf([p[i], p[j], p[k]]);
-        for (let l = 0; l < k; l++) if (!inside(s, p[l])) s = sphereOf([p[i], p[j], p[k], p[l]]);
+        if (!outside(k)) continue;
+        set(sphereOf([at(i), at(j), at(k)]));
+        for (let l = 0; l < k; l++) if (outside(l)) set(sphereOf([at(i), at(j), at(k), at(l)]));
       }
     }
   }
-  return s;
+  return { center: new THREE.Vector3(cx, cy, cz), radius: r };
 }
+
+/** The same on points (tests). */
+export const minSphere = (points: THREE.Vector3[]) => minSphereOf(points.flatMap((v) => [v.x, v.y, v.z]));
 
 /** The rotation of a transform: its polar decomposition's (Eigen's computeRotationScaling, as Orca's
  * Transformation::get_rotation_matrix), so the shear a scale in World coordinates leaves is not taken for one. */
@@ -160,9 +253,9 @@ export function rotationOf(spec: Spec): THREE.Matrix4 {
 
 /** M' = T(p)·A·T(-p)·M: A about the point p in the slicer's axes (Selection::transform_instance_relative, World);
  * in Object coordinates A is taken in the instance's own axes (R·A·R⁻¹, R its rotation). */
-export function about(spec: Spec, a: THREE.Matrix4, p: THREE.Vector3, cs: Coordinates = 'world'): Spec {
-  const r = rotationOf(spec);
-  const inAxes = cs === 'object' ? r.clone().multiply(a).multiply(r.clone().invert()) : a;
+export function about(spec: Spec, a: THREE.Matrix4, p: THREE.Vector3, cs: Coordinates = 'world', frame?: THREE.Matrix4): Spec {
+  const r = frame ?? rotationOf(spec); // the axes A is taken in: the instance's, or for a part the one asked for
+  const inAxes = cs !== 'world' ? r.clone().multiply(a).multiply(r.clone().invert()) : a;
   const t = new THREE.Matrix4().makeTranslation(p.x, p.y, p.z);
   const back = new THREE.Matrix4().makeTranslation(-p.x, -p.y, -p.z);
   return toSpec(t.multiply(inAxes).multiply(back).multiply(fromSpec(spec)));
@@ -247,8 +340,8 @@ export function changed(view: ViewerScene, placed: Placed, change: Change, autoD
   for (const item of all) {
     const key = keyOf(item);
     if (!next[key] || !autoDrop(String(item.userData.objectId))) continue;
-    const shift = minZ(item, next[key]);
-    const sinkingBefore = minZ(item, spec(item)) < SINKING;
+    const shift = minZ(item, placed, next[key]);
+    const sinkingBefore = minZ(item, placed) < SINKING;
     const drop = change.drop === 'move' ? shift > SINKING : !sinkingBefore || shift > SINKING;
     if (drop && Math.abs(shift) > 1e-9) next[key] = [...next[key].slice(0, 11), Number((next[key][11] - shift).toFixed(9))];
   }
@@ -261,6 +354,56 @@ export function changed(view: ViewerScene, placed: Placed, change: Change, autoD
     else out[key] = next[key];
   }
   return out;
+}
+
+/** A part's change (Selection::transform_volume_relative): ``apply`` takes and gives the part's transform in the slicer's
+ * coordinates as one instance shows it (W = M·C); the part's own becomes C' = M⁻¹·W', the same in every instance (they
+ * share the part, as Orca's ModelVolume). Then each instance of the object back on the bed (do_move / do_rotate /
+ * do_scale with auto_drop), as for an instance's change. */
+export function changedPart(
+  view: ViewerScene,
+  placed: Placed,
+  target: string,
+  apply: (world: Spec) => Spec,
+  drop: 'move' | 'transform',
+  autoDrop: (objectId: string) => boolean,
+): Placed {
+  const { inst, part } = splitTarget(target);
+  const item = items(view).find((i) => keyOf(i) === inst);
+  const group = item && part != null ? partsOf(item).find((g) => String(g.userData.partId) === part) : undefined;
+  if (!item || !group || part == null) return placed;
+  const objectId = String(item.userData.objectId);
+  const m = fromSpec(placed[inst] ?? fileSpec(item));
+  const world = toSpec(m.clone().multiply(fromSpec(partSpec(item, group, placed))));
+  const own = toSpec(m.clone().invert().multiply(fromSpec(apply(world))));
+  const next = { ...placed };
+  const key = partKey(objectId, part);
+  const file = partFileSpec(group);
+  if (own.every((x, i) => Math.abs(x - file[i]) < 1e-9)) delete next[key];
+  else next[key] = own;
+  for (const other of items(view)) {
+    if (String(other.userData.objectId) !== objectId || !autoDrop(objectId)) continue;
+    const k = keyOf(other);
+    const shift = minZ(other, next);
+    const sinkingBefore = minZ(other, placed) < SINKING;
+    if (!(drop === 'move' ? shift > SINKING : !sinkingBefore || shift > SINKING) || Math.abs(shift) <= 1e-9) continue;
+    const spec = next[k] ?? fileSpec(other);
+    const lowered = [...spec.slice(0, 11), Number((spec[11] - shift).toFixed(9))];
+    const fileItem = fileSpec(other);
+    if (lowered.every((x, i) => Math.abs(x - fileItem[i]) < 1e-9)) delete next[k];
+    else next[k] = lowered;
+  }
+  return next;
+}
+
+/** A part's transform as an instance shows it (W = M·C), and its own (C, in the instance's axes). */
+export function partWorld(view: ViewerScene, placed: Placed, target: string): { world: Spec; own: Spec } | null {
+  const { inst, part } = splitTarget(target);
+  const item = items(view).find((i) => keyOf(i) === inst);
+  const group = item && part != null ? partsOf(item).find((g) => String(g.userData.partId) === part) : undefined;
+  if (!item || !group) return null;
+  const own = partSpec(item, group, placed);
+  return { world: toSpec(fromSpec(placed[inst] ?? fileSpec(item)).multiply(fromSpec(own))), own };
 }
 
 /** A rotation in World coordinates about X or Y, or one in Object coordinates that tilts the object, turns the other

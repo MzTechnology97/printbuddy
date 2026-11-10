@@ -23,7 +23,19 @@ import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
 import { type LiveState, usePresetSwitch } from './presetSwitch';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
 import { useMoveGizmo } from './moveGizmo';
-import { type Placed, type Spec, applyPlacements, currentSpec, moved, placementsToSave, positionOf, selectedItems } from './placement';
+import {
+  IDENTITY,
+  type Placed,
+  type Spec,
+  applyPlacements,
+  currentSpec,
+  fromSpec,
+  moved,
+  placementsToSave,
+  positionOf,
+  selectedItems,
+  toSpec,
+} from './placement';
 import {
   type Change,
   type Coordinates,
@@ -32,7 +44,10 @@ import {
   boundingSphere,
   boxOf,
   changed,
+  changedPart,
   inObjectAxes,
+  partWorld,
+  targetKey,
   rotationAbout,
   rotationOf,
   rotationSync,
@@ -342,7 +357,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       : [];
   const targetsKey = JSON.stringify(targets);
   // OrcaSlicer's Move, Rotate and Scale (their gizmos and windows): the instances selected (one, or every instance of
-  // the objects selected; not a part), placed anew in the copy (transforms.ts). Each drag or field is one undo step.
+  // the objects selected), or a part (Alt+click), placed anew in the copy (transforms.ts). Each drag or field is one
+  // undo step.
   const moveObjects = selectedIds.length ? selectedIds : selection?.kind === 'object' && !selection.partId ? [selection.id] : [];
   const moveInstance = !selectedIds.length && selection?.kind === 'object' ? selection.instance : null;
   const moveKeys = useMemo(
@@ -356,22 +372,37 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const [cs, setCs] = useState<Coordinates>('world');
   const [uniform, setUniform] = useState(true);
   const autoDrop = (objectId: string) => doc.objects.find((o) => o.id === objectId)?.auto_drop !== false;
-  const lead = view && moveKeys.length ? currentSpec(view, placed, moveKeys[0]) : null;
-  const single = moveKeys.length === 1;
-  const objectCs = cs === 'object' && single; // Object coordinates for one instance; several move on the bed's axes
+  // a part (one instance shows it; every instance has it, as Orca's ModelVolume): the tools work on its transform
+  // as that instance shows it (M·C), and the copy saves its own (C)
+  const partTarget =
+    doc.editable && !doc.cannot_place && view && !selectedIds.length && selection?.kind === 'object' && selection.partId
+      ? targetKey(selection.id, selection.instance ?? 0, selection.partId)
+      : null;
+  const part = view && partTarget ? partWorld(view, placed, partTarget) : null;
+  const partInstance = view && partTarget ? currentSpec(view, placed, partTarget.split('/')[0]) : null;
+  const tkeys = partTarget && part ? [partTarget] : moveKeys; // what the tools, gizmos and boxes work on
+  const lead = part ? part.world : view && moveKeys.length ? currentSpec(view, placed, moveKeys[0]) : null;
+  const single = tkeys.length === 1;
+  const objectCs = cs !== 'world' && single; // Object coordinates for one instance (or part); several on the bed's axes
+  const axes = part ? partInstance : lead; // the Object axes: the instance's (a part's too, as Orca's Instance)
+  const partFrame = part && partInstance && cs === 'object' ? rotationOf(partInstance) : undefined;
   /** A change shown while dragging (no bed rule yet, as Orca's drag) or made (``done``: one undo step). */
   const transform = (change: Change, done: boolean) => {
     if (!view) return;
-    const next = changed(view, placed, change, done ? autoDrop : () => false);
+    const drop = done ? autoDrop : () => false;
+    const next = partTarget && part
+      ? changedPart(view, placed, partTarget, (w) => change.apply(w, partTarget), change.drop, drop)
+      : changed(view, placed, change, drop);
     applyPlacements(view, next);
     if (done) place(next);
   };
   const move = (d: [number, number, number], done: boolean) =>
-    transform({ keys: moveKeys, apply: (spec) => moved(spec, objectCs && lead ? inObjectAxes(lead, d) : d), sync: 'none', drop: 'move' }, done);
-  const box = (keys = moveKeys, inCs: Coordinates = 'world', with_: Placed = placed) => (view ? boxOf(view, with_, keys, inCs) : null);
+    transform({ keys: moveKeys, apply: (spec) => moved(spec, objectCs && axes ? inObjectAxes(axes, d) : d), sync: 'none', drop: 'move' }, done);
+  const box = (keys = tkeys, inCs: Coordinates = 'world', with_: Placed = placed, frame?: THREE.Matrix4) =>
+    view ? boxOf(view, with_, keys, inCs, frame) : null;
   const center = (b: THREE.Box3 | null) => (b ? (b.getCenter(new THREE.Vector3()).toArray() as [number, number, number]) : null);
-  const redrawGizmo = useMoveGizmo(view, tool === 'move' ? moveKeys : [], {
-    orient: () => (objectCs && lead ? rotationOf(lead) : undefined),
+  const redrawGizmo = useMoveGizmo(view, tool === 'move' ? tkeys : [], {
+    orient: () => (objectCs && axes ? rotationOf(axes) : undefined),
     onMove: (delta, done) => {
       moveTip.current = delta;
       if (done && !delta.some((d) => d !== 0)) return transform({ keys: [], apply: (s) => s, sync: 'none', drop: 'move' }, false);
@@ -386,9 +417,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   });
   // Rotate (World, as its window says): about the selection's bounding sphere's centre
   const sphere = useMemo(
-    () => (view && tool === 'rotate' && moveKeys.length ? boundingSphere(view, placed, moveKeys) : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the instances selected, by key
-    [view, tool, placed, moveKeys.join('|')],
+    () => (view && tool === 'rotate' && tkeys.length ? boundingSphere(view, placed, tkeys) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the instances (or part) selected, by key
+    [view, tool, placed, tkeys.join('|')],
   );
   const rotateBy = (axis: 0 | 1 | 2, degrees: number, done: boolean, pivot = sphere?.center) => {
     if (!view || !pivot) return;
@@ -396,7 +427,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const sync = lead && turned ? rotationSync('world', axis, lead, turned) : 'general';
     transform({ keys: moveKeys, apply: (spec) => about(spec, rotationAbout(axis, degrees), pivot), sync, drop: 'transform' }, done);
   };
-  const redrawRotate = useRotateGizmo(view, tool === 'rotate' && moveKeys.length > 0, {
+  const redrawRotate = useRotateGizmo(view, tool === 'rotate' && tkeys.length > 0, {
     frame: () => sphere,
     onRotate: (axis, degrees, done, pivot) => rotateBy(axis, degrees, done, pivot),
     onDrag: (text, at) => setDragTip(text && at ? { text: text.replace('.', i18n.language?.startsWith('it') ? ',' : '.'), x: at.x, y: at.y } : null),
@@ -405,23 +436,30 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const opened = useRef<Placed>({});
   useEffect(() => {
     if (tool !== 'rotate' || !view) return;
-    opened.current = Object.fromEntries(moveKeys.map((k) => [k, currentSpec(view, placed, k)!]));
+    opened.current = partTarget && part ? { [partTarget]: part.own } : Object.fromEntries(moveKeys.map((k) => [k, currentSpec(view, placed, k)!]));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- when the tool opens, or the selection changes
-  }, [tool, moveKeys.join('|')]);
+  }, [tool, tkeys.join('|')]);
+  /** A part's own transform changed (in the instance's axes), as the instance shows it then. */
+  const asShown = (own: Spec): Spec => toSpec(fromSpec(partInstance ?? IDENTITY).multiply(fromSpec(own)));
   // Scale: about the selection's box centre (Selection::scale_and_translate's dragging_center)
-  const scaleCs: Coordinates = objectCs ? 'object' : 'world';
+  const scaleCs: Coordinates = !objectCs ? 'world' : part ? cs : 'object';
   const scaleBy = (relative: [number, number, number], offset: THREE.Vector3, done: boolean) => {
-    const b = box(moveKeys, scaleCs);
+    const b = box(tkeys, scaleCs, placed, partFrame);
     if (!b || !lead) return;
     const c = b.getCenter(new THREE.Vector3());
-    const pivot = scaleCs === 'object' ? c.clone().applyMatrix4(rotationOf(lead)) : c;
+    const pivot = scaleCs !== 'world' ? c.clone().applyMatrix4(partFrame ?? rotationOf(lead)) : c;
     const a = new THREE.Matrix4().makeTranslation(offset.x, offset.y, offset.z).multiply(new THREE.Matrix4().makeScale(...relative));
-    transform({ keys: moveKeys, apply: (spec) => about(spec, a, pivot, scaleCs), sync: 'general', drop: 'transform' }, done);
+    transform({ keys: moveKeys, apply: (spec) => about(spec, a, pivot, scaleCs, partFrame), sync: 'general', drop: 'transform' }, done);
   };
   /** The Scale window's figures (update_settings_value): the size, and the scale against the instance unscaled. */
   const scaleFigures = () => {
-    const now = box(moveKeys, scaleCs);
+    const now = box(tkeys, scaleCs, placed, partFrame);
     const size = now ? (now.getSize(new THREE.Vector3()).toArray() as [number, number, number]) : ([0, 0, 0] as [number, number, number]);
+    if (part) {
+      // a part (update_settings_value, single volume): its own scale in Part coordinates, 100% in the others
+      const own = scaleCs === 'part' ? ([0, 1, 2].map((c) => 100 * Math.hypot(part.own[3 * c], part.own[3 * c + 1], part.own[3 * c + 2])) as [number, number, number]) : null;
+      return { size, unscaled: size, scale: own ?? ([100, 100, 100] as [number, number, number]) };
+    }
     if (!single || !lead || !view) return { size, unscaled: size, scale: [100, 100, 100] as [number, number, number] };
     const r = rotationOf(lead).setPosition(lead[9], lead[10], lead[11]);
     const bare: Spec = [r.elements[0], r.elements[1], r.elements[2], r.elements[4], r.elements[5], r.elements[6], r.elements[8], r.elements[9], r.elements[10], lead[9], lead[10], lead[11]];
@@ -429,10 +467,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const unscaled = ub ? (ub.getSize(new THREE.Vector3()).toArray() as [number, number, number]) : size;
     return { size, unscaled, scale: size.map((v, i) => (unscaled[i] ? (100 * v) / unscaled[i] : 100)) as [number, number, number] };
   };
-  const redrawScale = useScaleGizmo(view, tool === 'scale' && moveKeys.length > 0, {
+  const redrawScale = useScaleGizmo(view, tool === 'scale' && tkeys.length > 0, {
     frame: () => {
-      const b = box(moveKeys, scaleCs);
-      return b && lead ? { box: b, orient: scaleCs === 'object' ? rotationOf(lead) : new THREE.Matrix4() } : null;
+      const b = box(tkeys, scaleCs, placed, partFrame);
+      return b && lead ? { box: b, orient: scaleCs !== 'world' ? (partFrame ?? rotationOf(lead)) : new THREE.Matrix4() } : null;
     },
     onScale: (scale, offset, done) => scaleBy(scale, offset, done),
     onDrag: (grabber, at) => {
@@ -448,8 +486,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const scaleTo = (wanted: (fig: ReturnType<typeof scaleFigures>) => [number, number, number]) => {
     const fig = scaleFigures();
     const w = wanted(fig);
-    scaleBy(single ? (w.map((v, i) => (fig.size[i] ? (fig.unscaled[i] * v) / fig.size[i] : 1)) as [number, number, number]) : w, new THREE.Vector3(), true);
+    scaleBy(single && !part ? (w.map((v, i) => (fig.size[i] ? (fig.unscaled[i] * v) / fig.size[i] : 1)) as [number, number, number]) : w, new THREE.Vector3(), true);
   };
+  /** A part's scale or size typed (change_scale_value / change_size_value on a volume): by that much from now. */
+  const partScale = (axis: 0 | 1 | 2, factor: number) =>
+    scaleTo(() => [0, 1, 2].map((i) => (uniform || i === axis ? factor : 1)) as [number, number, number]);
   useEffect(() => {
     if (!view) return;
     applyPlacements(view, placed);
@@ -461,7 +502,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   }, [view, placed, cs]);
   // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
   const why = doc.cannot_place ? t('farm.workspace.move.tooLarge') : orcaText(layout, 'Please select at least one object.', i18n.language);
-  const ready: true | string = moveKeys.length ? true : why;
+  const ready: true | string = tkeys.length ? true : why;
   const toolReady: Record<string, true | string> = doc.editable ? { move: ready, rotate: ready, scale: ready } : {};
   /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
   const placementText = (spec: Spec) => {
@@ -825,7 +866,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
 
   const saveMutation = useMutation({
     mutationFn: (name: string) =>
-      workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs, placementsToSave(placed)),
+      workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs, placementsToSave(placed).transforms, placementsToSave(placed).parts),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
@@ -1114,66 +1155,88 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 onScene={onScene}
               />
               <MainToolbar layout={layout} active={tool} onTool={toggleTool} ready={toolReady} />
-              {tool === 'move' && view && moveKeys.length > 0 && (
+              {tool === 'move' && view && tkeys.length > 0 && (
                 <MoveWindow
                   layout={layout}
                   cs={objectCs ? 'object' : 'world'}
+                  relative={objectCs && !part}
                   onCs={setCs}
-                  position={single && lead ? positionOf(lead) : (center(box()) ?? [0, 0, 0])}
+                  position={part && objectCs ? positionOf(part.own) : single && lead ? positionOf(lead) : (center(box()) ?? [0, 0, 0])}
                   canDrop={Math.abs(box()?.min.z ?? 0) > 0.001}
                   onPosition={(axis, value) => {
+                    if (part && objectCs) {
+                      // a part in Object coordinates: its place in the object, typed
+                      const own = [...part.own];
+                      own[9 + axis] = value;
+                      return transform({ keys: [], apply: () => asShown(own), sync: 'none', drop: 'move' }, true);
+                    }
                     const d: [number, number, number] = [0, 0, 0];
                     // World: to the position typed; Object: by that much along the object's own axis ("Relative")
                     d[axis] = objectCs ? value : value - (single && lead ? positionOf(lead) : (center(box()) ?? [0, 0, 0]))[axis];
                     move(d, true);
                   }}
-                  onDrop={() =>
-                    transform({ keys: moveKeys, apply: (spec) => moved(spec, [0, 0, -(box()?.min.z ?? 0)]), sync: 'none', drop: 'move' }, true)
-                  }
+                  onDrop={() => {
+                    // Selection::drop: the selection (an instance, or a part) down by its lowest point
+                    const low = box()?.min.z ?? 0;
+                    transform({ keys: moveKeys, apply: (spec) => moved(spec, [0, 0, -low]), sync: 'none', drop: 'move' }, true);
+                  }}
                   onDone={() => toggleTool('move')}
                 />
               )}
-              {tool === 'rotate' && view && moveKeys.length > 0 && (
+              {tool === 'rotate' && view && tkeys.length > 0 && (
                 <RotateWindow
                   layout={layout}
-                  absolute={single && lead ? absoluteRotation(lead) : null}
-                  changed={moveKeys.some((k) => opened.current[k] && currentSpec(view, placed, k)!.slice(0, 9).some((v, i) => Math.abs(v - opened.current[k][i]) > 1e-9))}
-                  turned={single && lead ? absoluteRotation(lead).some((v) => v !== 0) : false}
+                  // a part: its own rotation (get_volume_transformation), else the instance's
+                  absolute={part ? absoluteRotation(part.own) : single && lead ? absoluteRotation(lead) : null}
+                  changed={tkeys.some((k) => {
+                    const now = part ? part.own : currentSpec(view, placed, k);
+                    return !!opened.current[k] && !!now && now.slice(0, 9).some((v, i) => Math.abs(v - opened.current[k][i]) > 1e-9);
+                  })}
+                  turned={absoluteRotation(part ? part.own : (lead ?? IDENTITY)).some((v) => v !== 0) && single}
                   onRelative={(axis, degrees) => rotateBy(axis, degrees, true)}
-                  onAbsolute={(axis, degrees) => lead && rotateBy(axis, degrees - absoluteRotation(lead)[axis], true)}
+                  onAbsolute={(axis, degrees) => lead && rotateBy(axis, degrees - absoluteRotation(part ? part.own : lead)[axis], true)}
                   onResetRelative={() =>
-                    transform({ keys: moveKeys, apply: (spec, k) => (opened.current[k] ? withLinearOf(spec, opened.current[k]) : spec), sync: 'general', drop: 'transform' }, true)
+                    part && partTarget
+                      ? transform({ keys: [], apply: () => asShown(withLinearOf(part.own, opened.current[partTarget] ?? part.own)), sync: 'general', drop: 'transform' }, true)
+                      : transform({ keys: moveKeys, apply: (spec, k) => (opened.current[k] ? withLinearOf(spec, opened.current[k]) : spec), sync: 'general', drop: 'transform' }, true)
                   }
-                  onResetAbsolute={() => transform({ keys: moveKeys, apply: withoutRotation, sync: 'general', drop: 'transform' }, true)}
+                  onResetAbsolute={() =>
+                    transform({ keys: moveKeys, apply: part ? () => asShown(withoutRotation(part.own)) : withoutRotation, sync: 'general', drop: 'transform' }, true)
+                  }
                   onDone={() => toggleTool('rotate')}
                 />
               )}
-              {tool === 'scale' && view && moveKeys.length > 0 && (
+              {tool === 'scale' && view && tkeys.length > 0 && (
                 <ScaleWindow
                   layout={layout}
                   cs={scaleCs}
                   onCs={setCs}
                   objectCs={single}
+                  partCs={!!part}
                   scale={scaleFigures().scale}
                   size={scaleFigures().size}
                   uniform={uniform}
                   onUniform={setUniform}
                   onScale={(axis, percent) =>
-                    scaleTo((fig) =>
+                    part ? partScale(axis, percent / (scaleFigures().scale[axis] || 100)) : scaleTo((fig) =>
                       single
                         ? (fig.scale.map((v, i) => (uniform || i === axis ? percent / 100 : v / 100)) as [number, number, number])
                         : ([0, 1, 2].map((i) => (uniform || i === axis ? percent / 100 : 1)) as [number, number, number]),
                     )
                   }
                   onSize={(axis, mm) =>
-                    scaleTo((fig) => {
+                    part ? partScale(axis, mm / (scaleFigures().size[axis] || 1)) : scaleTo((fig) => {
                       const ref = single ? fig.unscaled : fig.size;
                       const k = mm / (ref[axis] || 1);
                       const sizeNow = fig.size.map((v, i) => v / (ref[i] || 1));
                       return (single ? sizeNow : [1, 1, 1]).map((v, i) => (uniform || i === axis ? k : v)) as [number, number, number];
                     })
                   }
-                  onReset={() => scaleTo(() => [1, 1, 1])}
+                  onReset={() =>
+                    part
+                      ? scaleTo((fig) => fig.scale.map((v) => 100 / (v || 100)) as [number, number, number])
+                      : scaleTo(() => [1, 1, 1])
+                  }
                   onDone={() => toggleTool('scale')}
                 />
               )}
@@ -1300,6 +1363,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             })),
             // each instance placed anew: the object (and its instance when it has more) and where it goes now
             ...Object.entries(placed).map(([key, spec]) => {
+              if (key.includes('/')) {
+                const [id, partId] = key.split('/');
+                const obj = doc.objects.find((o) => o.id === id);
+                return { section: `${obj?.name ?? id} › ${obj?.parts.find((p) => p.id === partId)?.name ?? partId}`, name: placementText(spec) };
+              }
               const [id, instance] = key.split(':');
               const name = doc.objects.find((o) => o.id === id)?.name ?? id;
               const many = (instances.get(id)?.length ?? 1) > 1;

@@ -496,6 +496,7 @@ UI_STRINGS = [
     "Size",
     "Uniform scale",
     "Reset scale",
+    "Part",
     # Save preset and Compare presets (SavePresetDialog.cpp, UnsavedChangesDialog.cpp, Tab.cpp, ParamsPanel.cpp)
     "Save preset",
     "Save %s as",

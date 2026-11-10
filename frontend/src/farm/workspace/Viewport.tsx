@@ -214,7 +214,7 @@ function GizmoNumber({
   );
 }
 
-type Cs = 'world' | 'object';
+type Cs = 'world' | 'object' | 'part';
 type Vec3T = [number, number, number];
 
 function GizmoWindow({ label, children }: { label: string; children: ReactNode }) {
@@ -230,7 +230,20 @@ function GizmoWindow({ label, children }: { label: string; children: ReactNode }
 }
 
 /** The coordinate system combo (World / Object; Part comes with the parts). */
-function CoordinatesCombo({ layout, value, onChange, object = true }: { layout: OrcaLayout; value: Cs; onChange: (cs: Cs) => void; object?: boolean }) {
+function CoordinatesCombo({
+  layout,
+  value,
+  onChange,
+  object = true,
+  part = false,
+}: {
+  layout: OrcaLayout;
+  value: Cs;
+  onChange: (cs: Cs) => void;
+  object?: boolean;
+  /** a part selected: its own axes too (Orca's Part, in the Scale window) */
+  part?: boolean;
+}) {
   const tr = useOrcaText(layout);
   return (
     <select
@@ -242,6 +255,7 @@ function CoordinatesCombo({ layout, value, onChange, object = true }: { layout: 
     >
       <option value="world">{tr('World')}</option>
       {object && <option value="object">{tr('Object')}</option>}
+      {part && <option value="part">{tr('Part')}</option>}
     </select>
   );
 }
@@ -299,6 +313,7 @@ export function MoveWindow({
   layout,
   position,
   cs = 'world',
+  relative = cs === 'object',
   onCs,
   canDrop,
   onPosition,
@@ -308,6 +323,8 @@ export function MoveWindow({
   layout: OrcaLayout;
   position: Vec3T;
   cs?: Cs;
+  /** Object coordinates for an instance: a move from 0 ("Relative"); for a part, its place in the object */
+  relative?: boolean;
   onCs?: (cs: Cs) => void;
   canDrop: boolean;
   onPosition: (axis: 0 | 1 | 2, value: number) => void;
@@ -318,7 +335,7 @@ export function MoveWindow({
   return (
     <GizmoWindow label={tr('Move')}>
       <CoordinatesCombo layout={layout} value={cs} onChange={(v) => onCs?.(v)} />
-      <Row caption={tr(cs === 'object' ? 'Relative' : 'Position')} values={cs === 'object' ? [0, 0, 0] : position} unit={tr('mm')} onCommit={onPosition} />
+      <Row caption={tr(relative ? 'Relative' : 'Position')} values={relative ? [0, 0, 0] : position} unit={tr('mm')} onCommit={onPosition} />
       <Done
         layout={layout}
         onDone={onDone}
@@ -398,6 +415,7 @@ export function ScaleWindow({
   cs,
   onCs,
   objectCs,
+  partCs = false,
   scale,
   size,
   uniform,
@@ -412,6 +430,8 @@ export function ScaleWindow({
   onCs: (cs: Cs) => void;
   /** Object coordinates offered (not for several objects) */
   objectCs: boolean;
+  /** Part coordinates offered (a part selected) */
+  partCs?: boolean;
   scale: Vec3T;
   size: Vec3T;
   uniform: boolean;
@@ -425,7 +445,7 @@ export function ScaleWindow({
   const scaled = scale.some((v) => Math.abs(v - 100) > 0.1);
   return (
     <GizmoWindow label={tr('Scale')}>
-      <CoordinatesCombo layout={layout} value={cs} onChange={onCs} object={objectCs} />
+      <CoordinatesCombo layout={layout} value={cs} onChange={onCs} object={objectCs} part={partCs} />
       <Row
         caption={tr('Noun\u0004Scale')}
         values={scale}
