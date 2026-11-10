@@ -148,6 +148,8 @@ class FarmProduct(Base):
     # Groups of parts assembled together before the product (see ``assemblies``):
     # [{"key", "name", "per_unit", "parts": [{"component_code", "quantity"}]}].
     assemblies: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Imported from a Seller Hub listing (``sellerhub_import``): "to complete" until it has components.
+    sellerhub_imported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -155,7 +157,14 @@ class FarmProduct(Base):
 add_columns("projects", {"cover_source_url": "VARCHAR(2048)"})
 add_columns(
     "farm_products",
-    {"variants": "JSON", "kind": "VARCHAR(10)", "disabled_at": "DATETIME", "not_part": "JSON", "assemblies": "JSON"},
+    {
+        "variants": "JSON",
+        "kind": "VARCHAR(10)",
+        "disabled_at": "DATETIME",
+        "not_part": "JSON",
+        "assemblies": "JSON",
+        "sellerhub_imported_at": "DATETIME",
+    },
 )
 
 

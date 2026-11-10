@@ -174,3 +174,72 @@ async def test_thumbnail_only_from_amazon_and_small(async_client, fetched):
     for url in ["http://169.254.169.254/latest/meta-data", "https://example.com/images/I/FAKE.jpg", IMG + "x.gif"]:
         assert (await async_client.get(f"{API}/import/sellerhub/thumbnail", params={"url": url})).status_code == 400
     assert len(fetched) == 1
+
+
+async def run_covers():
+    """One hourly photo run (``database.async_session`` is the test database here)."""
+    from backend.app.core import database
+    from backend.app.farm.products import sellerhub_import
+
+    async with database.async_session() as db:
+        return await sellerhub_import.sync_plan_covers(db)
+
+
+@pytest.mark.asyncio
+async def test_ignore_leaves_a_listing_out_of_the_window_but_in_the_panel(async_client, hub):
+    assert [r["dismissed"] for r in (await listings(async_client))["listings"]] == [False, False, False]
+    r = await async_client.post(f"{API}/import/sellerhub/listings/ignore", json={"keys": ["asin:B0FAKE0002"]})
+    assert r.status_code == 200, r.text
+    rows = {r["key"]: r["dismissed"] for r in (await listings(async_client))["listings"]}
+    assert rows == {"asin:B0FAKE0001": False, "asin:B0FAKE0002": True, "parte:coppia": False}
+    assert await products(async_client) == {}
+    assert (await async_client.post(f"{API}/import/sellerhub/listings/ignore", json={"keys": []})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_listing_can_still_be_added_and_imports_are_to_complete(async_client, hub, fetched):
+    await async_client.post(f"{API}/import/sellerhub/listings/ignore", json={"keys": ["asin:B0FAKE0002"]})
+    r = await async_client.post(f"{API}/import/sellerhub/listings", json={"keys": ["asin:B0FAKE0002"]})
+    assert [c["name"] for c in r.json()["created"]] == ["Gancio di prova"]
+    await async_client.post(f"{API}/products", json={"name": "A mano", "skus": ["TEST-HAND"]})
+    made = await products(async_client)
+    assert (made["Gancio di prova"]["to_complete"], made["A mano"]["to_complete"]) == (True, False)
+    assert "asin:B0FAKE0002" not in [r["key"] for r in (await listings(async_client))["listings"]]
+
+
+@pytest.mark.asyncio
+async def test_the_photo_found_later_arrives_on_the_next_hourly_run(async_client, hub, fetched):
+    await async_client.post(f"{API}/import/sellerhub/listings", json={"keys": ["asin:B0FAKE0002"]})
+    assert fetched == []  # no photo on Seller Hub yet
+    hub["plan"]["parts"][1]["skus"][0]["image_url"] = IMG + "FAKEIMG02.jpg"
+    assert (await run_covers())["added"] == 1
+    assert fetched == [IMG + "FAKEIMG02.jpg"]
+    # The listing's photo changes: the cover set by the import follows it; then nothing more to do.
+    hub["plan"]["parts"][1]["skus"][0]["image_url"] = IMG + "FAKEIMG2B.jpg"
+    assert (await run_covers())["replaced"] == 1
+    assert (await run_covers())["unchanged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hourly_photos_never_touch_a_cover_uploaded_by_hand(async_client, hub, fetched, db_session):
+    from backend.app.models.project import Project
+
+    r = await async_client.post(f"{API}/products", json={"name": "Foto mia", "skus": ["TEST-A1"]})
+    project = await db_session.get(Project, r.json()["project_id"])
+    project.cover_image_filename, project.cover_source_url = "mine.jpg", None
+    await db_session.commit()
+    assert (await run_covers())["manual"] == 1
+    assert fetched == []
+    await db_session.refresh(project)
+    assert project.cover_image_filename == "mine.jpg"
+
+
+@pytest.mark.asyncio
+async def test_hourly_photos_with_seller_hub_down_or_not_set_change_nothing(async_client, hub, fetched):
+    await async_client.post(f"{API}/import/sellerhub/listings", json={"keys": ["asin:B0FAKE0002"]})
+    hub["plan"]["parts"][1]["skus"][0]["image_url"] = IMG + "FAKEIMG02.jpg"
+    hub["down"] = True
+    assert await run_covers() is None
+    await async_client.put(f"{API}/plan/settings", json={"url": ""})
+    assert await run_covers() is None
+    assert fetched == []

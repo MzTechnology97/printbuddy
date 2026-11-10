@@ -24,6 +24,8 @@ export interface FarmProduct {
   updated_at: string;
   kind?: FarmProductKind;
   disabled?: boolean;
+  /** Created by the hourly Seller Hub import and still without components. */
+  to_complete?: boolean;
   parts: FarmPart[];
   variants?: FarmVariant[];
 }
@@ -427,6 +429,8 @@ export interface SellerHubListing {
   skus: string[];
   asins: string[];
   image_url: string | null;
+  /** "Ignore" was pressed on it: the new-products window leaves it out, the import panel keeps it. */
+  dismissed: boolean;
 }
 
 export interface SellerHubListings {
@@ -442,6 +446,7 @@ export interface SellerHubImportResult {
   not_found: string[];
   covers_added: number;
 }
+
 
 export async function farmRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getAuthToken();
@@ -465,6 +470,8 @@ export const farmApi = {
   importSellerHubListings: (keys: string[]) =>
     farmRequest<SellerHubImportResult>('/import/sellerhub/listings', { method: 'POST', body: JSON.stringify({ keys }) }),
   /** Amazon's photos pass through Printbuddy: the CSP blocks their CDN. */
+  ignoreSellerHubListings: (keys: string[]) =>
+    farmRequest<{ dismissed: number }>('/import/sellerhub/listings/ignore', { method: 'POST', body: JSON.stringify({ keys }) }),
   sellerHubThumbnailUrl: (url: string) => `/api/v1/farm/import/sellerhub/thumbnail?url=${encodeURIComponent(url)}`,
   getComponents: () => farmRequest<FarmComponent[]>('/components'),
   createProduct: (data: FarmProductInput) =>

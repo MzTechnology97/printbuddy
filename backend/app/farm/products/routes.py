@@ -270,6 +270,8 @@ async def list_products(db: AsyncSession = Depends(get_db)) -> dict:
                 "asins": product.asins or [],
                 "kind": product.kind,
                 "disabled": product.disabled_at is not None,
+                # Imported from a Seller Hub listing and still without components.
+                "to_complete": product.sellerhub_imported_at is not None and not own,
                 "updated_at": serialize_utc_datetime(max(product.updated_at, project.updated_at)),
                 "parts": [line(c, q) for c, q in own],
                 "assemblies": contract(groups),
@@ -1162,6 +1164,13 @@ async def sync_covers(body: CoverSyncIn, db: AsyncSession = Depends(get_db)) -> 
         if full is not None:
             for key in [f"sku:{s}" for s in item.skus] + [f"asin:{a}" for a in item.asins]:
                 images.setdefault(key, set()).add(full)
+    result = await apply_covers(db, images)
+    await db.commit()
+    return result
+
+
+async def apply_covers(db: AsyncSession, images: dict[str, set[str]]) -> dict:
+    """The rules of ``sync_covers`` for ``images`` (``sku:…``/``asin:…`` → full Amazon image URLs); no commit."""
     result = {"added": 0, "replaced": 0, "unchanged": 0, "manual": 0, "ambiguous": 0, "failed": 0}
     for p, project in (await db.execute(select(FarmProduct, Project).join(Project))).all():
         found = set().union(*(images.get(f"sku:{s}", ()) for s in p.skus or []))
@@ -1181,5 +1190,4 @@ async def sync_covers(body: CoverSyncIn, db: AsyncSession = Depends(get_db)) -> 
         else:
             outcome = "failed"
         result[outcome] += 1
-    await db.commit()
     return result

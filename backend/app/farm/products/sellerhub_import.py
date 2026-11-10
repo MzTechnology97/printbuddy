@@ -7,12 +7,20 @@ them (``excluded_inactive``) and the ones marked "not printed" there are listed 
 
 ``POST /farm/import/sellerhub/listings`` creates one product (name, SKUs, ASINs, Amazon photo as cover) for each
 chosen key, reading the plan again: nothing is created on its own, components are added by hand afterwards, and
-nothing is written to Seller Hub, Amazon or Etsy.
+nothing is written to Seller Hub, Amazon or Etsy. The Products page shows the listings not dismissed here as new ones
+("New product found on Seller Hub"); ``POST …/listings/ignore`` dismisses keys there, the panel still lists them.
+
+Every hour the plan's photos are given to the products with the rules of ``covers/sync`` (no cover: added; a cover set
+by an import: follows the listing; a cover uploaded by hand: never touched), so a photo Seller Hub finds later arrives.
 
 ``GET /farm/import/sellerhub/thumbnail`` serves a listing photo: the SPA's CSP blocks Amazon's CDN.
 """
 
 from __future__ import annotations
+
+import asyncio
+import json
+import logging
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -20,15 +28,24 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.routes.settings import get_setting, set_setting
+from backend.app.core import database
 from backend.app.core.database import get_db
 from backend.app.farm.plan import service as plan_service
 from backend.app.farm.products import routes as products
 from backend.app.farm.products.models import FarmProduct
 from backend.app.models.project import Project
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 THUMB_PX = 160
+DISMISSED_KEY = "farm_sellerhub_dismissed"  # JSON list of plan keys the new-products window no longer offers
+FIRST_COVERS_SECONDS = 180
+COVERS_EVERY_SECONDS = 3600
+# Two imports at once (a double click, "Add all" and "Add") never make the same product twice.
+LOCK = asyncio.Lock()
 
 
 def _ids(values: list) -> list[str]:
@@ -94,11 +111,25 @@ async def _plan(db: AsyncSession) -> dict:
     return plan
 
 
+async def _dismissed(db: AsyncSession) -> set[str]:
+    try:
+        raw = json.loads(await get_setting(db, DISMISSED_KEY) or "[]")
+    except ValueError:
+        return set()
+    return {k for k in raw if isinstance(k, str)} if isinstance(raw, list) else set()
+
+
 @router.get("/import/sellerhub/listings", dependencies=[products._read])
 async def importable_listings(db: AsyncSession = Depends(get_db)) -> dict:
+    """``dismissed``: "Ignore" was pressed on it in the new-products window, which leaves it out; the panel keeps it."""
     plan = await _plan(db)
     owned = await _owned(db)
-    rows = [r for r in listings(plan) if not owned.intersection(_keys(r["skus"], r["asins"]))]
+    dismissed = await _dismissed(db)
+    rows = [
+        {**r, "dismissed": r["key"] in dismissed}
+        for r in listings(plan)
+        if not owned.intersection(_keys(r["skus"], r["asins"]))
+    ]
     excluded = plan.get("excluded_inactive")
     return {
         "listings": rows,
@@ -112,13 +143,27 @@ class ImportIn(BaseModel):
     keys: list[str] = Field(min_length=1, max_length=500)
 
 
+@router.post("/import/sellerhub/listings/ignore", dependencies=[products._create])
+async def ignore_listings(body: ImportIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """The new-products window stops offering these keys; nothing else changes and they can still be imported."""
+    dismissed = await _dismissed(db) | {k[:200] for k in body.keys}
+    await set_setting(db, DISMISSED_KEY, json.dumps(sorted(dismissed)))
+    await db.commit()
+    return {"dismissed": len(dismissed)}
+
+
 @router.post("/import/sellerhub/listings", dependencies=[products._create])
 async def import_listings(body: ImportIn, db: AsyncSession = Depends(get_db)) -> dict:
     """A product for each chosen key that is still in Seller Hub's plan and still without a product."""
+    async with LOCK:
+        return await _import(body.keys, db)
+
+
+async def _import(keys: list[str], db: AsyncSession) -> dict:
     by_key = {r["key"]: r for r in listings(await _plan(db))}
     owned = await _owned(db)
     result: dict = {"created": [], "already_owned": [], "not_found": [], "covers_added": 0}
-    for key in dict.fromkeys(body.keys):
+    for key in dict.fromkeys(keys):
         row = by_key.get(key)
         if row is None:
             result["not_found"].append(key[:200])
@@ -131,7 +176,11 @@ async def import_listings(body: ImportIn, db: AsyncSession = Depends(get_db)) ->
         project = Project(name=row["name"])
         db.add(project)
         await db.flush()
-        db.add(FarmProduct(project_id=project.id, skus=row["skus"], asins=row["asins"]))
+        db.add(
+            FarmProduct(
+                project_id=project.id, skus=row["skus"], asins=row["asins"], sellerhub_imported_at=products._now()
+            )
+        )
         await db.flush()
         owned.update(ids)
         if await products._set_amazon_cover(project, row["image_url"]):
@@ -161,3 +210,65 @@ async def listing_image(url: str = Query(max_length=2048)) -> Response:
         media_type="image/png" if ext.lower() == "png" else "image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+def _images(plan: dict) -> dict[str, set[str]]:
+    """``sku:…``/``asin:…`` → the listing's full Amazon image (its own, else its part's), as ``covers/sync`` takes."""
+    images: dict[str, set[str]] = {}
+    for part in plan.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        for s in part.get("skus") or []:
+            if not isinstance(s, dict):
+                continue
+            url = products._amazon_image(s.get("image_url")) or products._amazon_image(part.get("image_url"))
+            if url:
+                for key in _keys(_ids([s.get("sku")]), _ids([s.get("asin")])):
+                    images.setdefault(key, set()).add(url)
+    return images
+
+
+async def sync_plan_covers(db: AsyncSession) -> dict | None:
+    """The plan's photos to the products (``covers/sync`` rules); None when Seller Hub is not set or did not answer."""
+    try:
+        plan = await _plan(db)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            logger.warning("Seller Hub photos: %s", exc.detail)
+        return None
+    result = await products.apply_covers(db, _images(plan))
+    await db.commit()
+    return result
+
+
+async def _covers_once() -> None:
+    try:
+        async with database.async_session() as db:
+            await sync_plan_covers(db)
+    except Exception:  # pragma: no cover - defensive, a background run never takes anything down
+        logger.exception("Seller Hub photos run failed")
+
+
+class SellerHubCoversScheduler:
+    """Every hour, the photos of Seller Hub's listings to the products (nothing else is created or changed)."""
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop(), name="farm-sellerhub-covers")
+
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    async def _loop(self) -> None:
+        await asyncio.sleep(FIRST_COVERS_SECONDS)
+        while True:
+            await _covers_once()
+            await asyncio.sleep(COVERS_EVERY_SECONDS)
+
+
+sellerhub_covers_scheduler = SellerHubCoversScheduler()

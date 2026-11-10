@@ -9,7 +9,7 @@ import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
 import { PlatesPanel } from './PlatesPanel';
-import { SellerHubImport } from './SellerHubImport';
+import { NewSellerHubBadge, NewSellerHubProducts, SellerHubImport } from './SellerHubImport';
 import './i18n';
 
 const INPUT =
@@ -311,6 +311,7 @@ export function ProductsPage() {
             {!importing && (
               <Button variant="secondary" onClick={() => setImporting(true)}>
                 <Download className="w-4 h-4" /> {t('farm.products.sellerHub.open')}
+                <NewSellerHubBadge />
               </Button>
             )}
             <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [], variants: [] })}>
@@ -357,6 +358,7 @@ export function ProductsPage() {
       </label>
 
       {importing && !editing && <SellerHubImport onClose={() => setImporting(false)} />}
+      {!editing && <NewSellerHubProducts />}
 
       {editing && (
         <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} shapes={shapes.data || []} onDone={() => setEditing(null)} />
@@ -388,8 +390,10 @@ export function ProductsPage() {
                     <h2 className="text-white font-semibold truncate">
                       <Link to={`/farm/products/${p.project_id}`} className="hover:text-bambu-green">{p.name}</Link>
                     </h2>
-                    <span className={`text-xs shrink-0 ${p.disabled ? 'text-bambu-gray' : todo(p) ? 'text-amber-400' : 'text-bambu-green'}`}>
-                      {t(p.disabled ? 'farm.project.disabledBadge' : todo(p) ? 'farm.project.todo' : 'farm.project.readyBadge')}
+                    <span className={`text-xs shrink-0 ${p.disabled ? 'text-bambu-gray' : todo(p) ? 'text-amber-400' : 'text-bambu-green'}`}
+                      title={!p.disabled && p.to_complete ? t('farm.project.toCompleteNote') : undefined}>
+                      {t(p.disabled ? 'farm.project.disabledBadge' : p.to_complete ? 'farm.project.toComplete'
+                        : todo(p) ? 'farm.project.todo' : 'farm.project.readyBadge')}
                     </span>
                     <Button variant="ghost" size="sm" onClick={() => setEditing(draftOf(p))}>{t('farm.products.edit')}</Button>
                   </div>
