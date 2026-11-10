@@ -11,7 +11,7 @@ import { type OrcaLayout, type ShortcutRow, keyText, orcaIcon, orcaText } from '
 import { SettingsPanel } from './SettingsPanel';
 import '../i18n';
 
-function Dialog({
+export function Dialog({
   title,
   intro,
   wide,
@@ -53,6 +53,8 @@ interface SaveProps {
   filename: string;
   draft: Draft;
   settings: Map<string, WorkspaceSetting>;
+  /** The preset switches the copy gets: a section's title and the preset's name. */
+  switches?: { section: string; name: string }[];
   invalid: string[];
   saving: boolean;
   error: unknown;
@@ -60,13 +62,18 @@ interface SaveProps {
   onClose: () => void;
 }
 
-export function SaveCopyDialog({ filename, draft, settings, invalid, saving, error, onSave, onClose }: SaveProps) {
+export function SaveCopyDialog({ filename, draft, settings, switches = [], invalid, saving, error, onSave, onClose }: SaveProps) {
   const { t, i18n } = useTranslation();
   const [name, setName] = useState('');
   const inherit = t('farm.workspace.inherit');
   return (
     <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={saving ? () => {} : onClose}>
       <ul className="p-4 space-y-1 overflow-y-auto text-sm">
+        {switches.map((s) => (
+          <li key={s.section}>
+            <span className="text-white">{s.section}</span> <span className="text-bambu-gray">→ {s.name}</span>
+          </li>
+        ))}
         {Object.entries(draft).map(([key, value]) => {
           const s = settings.get(key)!;
           return (
@@ -121,9 +128,27 @@ interface PresetProps {
   onChange: (setting: WorkspaceSetting, value: SettingValue) => void;
   onReset: (key: string) => void;
   onClose: () => void;
+  /** Save current %s and Compare presets (Tab.cpp's icons beside the preset), with their tooltips. */
+  onSavePreset?: () => void;
+  onComparePresets?: () => void;
+  presetTips?: { save: string; compare: string };
 }
 
-export function PresetDialog({ layout, kind, filament = 0, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
+export function PresetDialog({
+  layout,
+  kind,
+  filament = 0,
+  name,
+  settings,
+  draft,
+  editable,
+  onChange,
+  onReset,
+  onClose,
+  onSavePreset,
+  onComparePresets,
+  presetTips,
+}: PresetProps) {
   const { t } = useTranslation();
   const at = (key: string, i: number) => {
     const v = settings.find((s) => s.key === key)?.value;
@@ -161,7 +186,17 @@ export function PresetDialog({ layout, kind, filament = 0, name, settings, draft
                     {filament + 1}
                   </span>
                 )}
-                <span className="truncate">{preset ?? '—'}</span>
+                <span className="truncate flex-1">{preset ?? '—'}</span>
+                {onSavePreset && (
+                  <button type="button" onClick={onSavePreset} title={presetTips?.save} aria-label={presetTips?.save} className="p-0.5 rounded hover:bg-white/10">
+                    <img src={orcaIcon('save')} alt="" className="w-4 h-4" aria-hidden />
+                  </button>
+                )}
+                {onComparePresets && (
+                  <button type="button" onClick={onComparePresets} title={presetTips?.compare} aria-label={presetTips?.compare} className="p-0.5 rounded hover:bg-white/10">
+                    <img src={orcaIcon('compare')} alt="" className="w-4 h-4" aria-hidden />
+                  </button>
+                )}
               </div>
               {variants.length > 1 && (
                 <div className="flex flex-wrap gap-1 text-[11px]" aria-label={t('farm.workspace.variant')}>

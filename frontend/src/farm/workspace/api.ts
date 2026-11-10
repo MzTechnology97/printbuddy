@@ -95,11 +95,78 @@ export interface SavedCopy {
   changes: { key: string; before: SettingValue; after: SettingValue }[];
 }
 
+/** A user preset (Printbuddy's local presets) offered by the preset headers and Compare presets. */
+export interface PresetEntry {
+  id: number;
+  name: string;
+  inherits: string | null;
+}
+export interface PresetValues {
+  section: 'process' | 'filament' | 'printer';
+  name: string;
+  inherits: string | null;
+  /** A parent up its chain that couldn't be read: only the values below it are known. */
+  missing_parent: string | null;
+  values: Record<string, SettingValue>;
+}
+
+/** A preset to switch a section to (OrcaSlicer's preset combos): a user preset by id, a system one by name. */
+export interface PresetRef {
+  section: 'process' | 'filament' | 'printer';
+  /** the filament slot (from 0) */
+  index: number;
+  source: 'user' | 'system';
+  id?: number;
+  name?: string;
+}
+/** Why a preset isn't offered: a parent not cached, for other printers, only a compatibility condition (not
+ * evaluated), another printer model or nozzle. */
+export type SwitchReason = 'unresolved' | 'incompatible' | 'condition' | 'other_printer';
+export interface OfferedPreset {
+  source: 'user' | 'system';
+  name: string;
+  id?: number;
+  inherits?: string | null;
+  reason: SwitchReason | null;
+}
+/** The project's printer, as the offered presets are checked against it. */
+export interface PrinterIdentity {
+  printer: string;
+  printer_parent: string;
+  model: string;
+  variant: string;
+  nozzle: string;
+}
+
 export const workspaceApi = {
+  presets: (section: 'process' | 'filament' | 'printer') =>
+    farmRequest<{ section: string; user: PresetEntry[]; system: string[] }>(`/workspace/presets?section=${section}`),
+  /** Save preset's user preset, checked by the server as an edit is; ``id``: the one it overwrites. */
+  saveUserPreset: (section: PresetRef['section'], name: string, setting: Record<string, unknown>, id?: number) =>
+    farmRequest<{ id: number; name: string }>('/workspace/presets/user', {
+      method: 'POST',
+      body: JSON.stringify({ section, name, setting, id: id ?? null }),
+    }),
+  /** A user preset (by id) or a system one (by name), its inheritance resolved. */
+  presetValues: (section: 'process' | 'filament' | 'printer', source: 'user' | 'system', ref: number | string) =>
+    farmRequest<PresetValues>(
+      `/workspace/presets/values?section=${section}&source=${source}&${source === 'user' ? 'id' : 'name'}=${encodeURIComponent(String(ref))}`,
+    ),
+  /** The presets a section can switch to on this printer, each with why it isn't offered. */
+  offered: (section: PresetRef['section'], printer: PrinterIdentity) =>
+    farmRequest<{ section: string; presets: OfferedPreset[] }>(
+      `/workspace/presets/offered?${new URLSearchParams({ section, ...printer }).toString()}`,
+    ),
+  /** The project's values after the switches (nothing saved): the values that change. */
+  previewSwitch: (settings: Record<string, SettingValue>, presets: PresetRef[]) =>
+    farmRequest<{ values: Record<string, SettingValue> }>('/workspace/presets/switch', {
+      method: 'POST',
+      body: JSON.stringify({ settings, presets }),
+    }),
   get: (fileId: number) => farmRequest<WorkspaceDocument>(`/workspace/files/${fileId}`),
-  saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string) =>
+  saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string, presets: PresetRef[] = []) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
-      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null }),
+      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets }),
     }),
 };
