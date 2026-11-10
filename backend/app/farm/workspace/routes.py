@@ -25,6 +25,7 @@ from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
+from backend.app.farm.plates.service import output_grams
 from backend.app.farm.workspace import project, settings as ws_settings
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
@@ -147,7 +148,7 @@ async def _outputs(db: AsyncSession, lib_file: LibraryFile, version: str | None)
             "library_file_id": out.id,
             "filename": out.filename,
             "print_time_seconds": (out.file_metadata or {}).get("print_time_seconds"),
-            "filament_used_g": (out.file_metadata or {}).get("filament_used_g"),
+            "filament_used_g": output_grams(out.file_metadata or {}),
             "current": (out.file_metadata or {}).get("sliced_from_sha256") == version,
         }
         for plate, out in sorted(latest.items())

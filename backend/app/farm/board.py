@@ -191,6 +191,8 @@ def _row(job, item, printer, comp, archive, sliced, state) -> dict:
         "slicer": _slicer_of(state),
         "file": sliced.filename if sliced is not None else None,
         "library_file_id": sliced.id if sliced is not None else None,
+        # what the slicer changed in the project (``slicing.slice_fidelity``): version drift, settings
+        "slice_fidelity": (sliced.file_metadata or {}).get("slice_fidelity") if sliced is not None else None,
         "manual_start": bool(item.manual_start) if item is not None else False,
         "source": "outside" if job is not None and job.source else ("farm" if job is not None else "queue"),
         "created_at": (job.created_at if job is not None else item.created_at),

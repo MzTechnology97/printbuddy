@@ -19,7 +19,7 @@ import {
   type FarmPlanPlate,
   type FarmPlanSettings,
 } from './api';
-import { BoardSummary, SlicerBadge } from './JobsBoard';
+import { BoardSummary, SliceFidelityNote, SlicerBadge } from './JobsBoard';
 import { PlateThumb } from './PlatesPanel';
 import { PrinterSlots } from './PrinterSlots';
 import { kitUnits, suggestPrints } from './suggest';
@@ -190,6 +190,7 @@ function PlateRow({ plate, proposed, picked = false, onPick }: {
           <Grams plate={plate} />
           {!plate.sliced && <span className="text-xs text-amber-400"> · {t('farm.plan.notSliced')}</span>}
         </p>
+        <SliceFidelityNote fidelity={plate.slice_fidelity} />
         <div className="flex flex-wrap gap-1">
           {plate.printers.length ? (
             plate.printers.map((p) => <PrinterChip key={p.id} p={p} />)

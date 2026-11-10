@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import zipfile
@@ -28,7 +29,7 @@ from backend.app.api.routes import library as lib
 from backend.app.api.routes.settings import get_setting
 from backend.app.core import database
 from backend.app.core.config import settings as app_settings
-from backend.app.farm import notify, variants
+from backend.app.farm import detect, notify, variants
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY, SLICEABLE, SLICER_BAMBU, SLICER_ORCA
 from backend.app.farm.library_sync import _drop_thumbnail
 from backend.app.farm.models import FarmLibraryFile
@@ -89,6 +90,98 @@ def fix_printer_inherits(model_bytes: bytes) -> bytes:
                 data = json.dumps(cfg, indent=4) if info.filename == PROJECT_SETTINGS_ENTRY else zin.read(info.filename)
                 zout.writestr(info, data)
     return out.getvalue()
+
+
+# The "-1" (auto) sentinels each sidecar refuses in a project sliced without presets, so removed before (the
+# slicer then takes its own preset's value). Tried on OrcaSlicer 2.5.0-beta and Bambu Studio 02.08.02.61: Orca
+# refuses a customised raft_first_layer_expansion of -1 ("Invalid parameter value(s) included in the 3mf file")
+# and takes the other two; Bambu Studio takes all three. Removing one a sidecar takes changes the print (an
+# auto prime tower brim became 3 mm), so the library's list, made for ``--load-settings``, is not used here.
+FARM_SENTINEL_KEYS = {SLICER_ORCA: frozenset({"raft_first_layer_expansion"}), SLICER_BAMBU: frozenset()}
+
+# Settings that say where values came from, not how the plate prints: never reported as changed.
+_BOOKKEEPING = frozenset({"version", "use_3mf", "inherits_group", "different_settings_to_system"})
+# Changes shown first: the printer's own G-code and the nozzle (seen: hardened_steel became "undefine").
+WATCHED_SETTINGS = ("machine_start_gcode", "machine_end_gcode", "change_filament_gcode", "nozzle_type")
+_MAX_CHANGES = 200  # keys listed on an output; ``changed_count`` has them all
+_sidecar_versions: dict[str, str | None] = {}  # slicer -> the version its sidecar wrote in the last farm output
+
+
+def _one(value):
+    """A per-extruder list of one repeated value is that value: the CLI writes ["120", "120"] where a project has
+    ["120"] or "120", the same setting."""
+    return value[0] if isinstance(value, list) and value and all(v == value[0] for v in value) else value
+
+
+def _short(value) -> str | None:
+    """A value short enough to show (G-code isn't)."""
+    text = ",".join(map(str, value)) if isinstance(value, list) else str(value)
+    return text if len(text) <= 40 else None
+
+
+def _version_numbers(version: str) -> tuple[int, ...]:
+    """'2.5.0-beta' -> (2, 5, 0), '02.08.02.61' -> (2, 8, 2, 61): a pre-release counts as its release."""
+    return tuple(int(n) for n in re.findall(r"\d+", version.split("-")[0]))
+
+
+def _who_sliced(project_slicer: str, project: str | None, slicer: str, sidecar: str | None) -> dict:
+    """Who saved the project and who slices it ("OrcaSlicer 2.4.2"); drift when the slicer or its version differ:
+    the CLI re-bases every setting the owner didn't customise on its own presets, machine G-code included."""
+    names = {s: SLICER_NAMES.get(s, s) for s in (project_slicer, slicer)}
+    return {
+        "project": f"{names[project_slicer]} {project}" if project else None,
+        "slicer": f"{names[slicer]} {sidecar}" if sidecar else None,
+        "version_drift": bool(
+            project and sidecar and (project_slicer != slicer or _version_numbers(project) != _version_numbers(sidecar))
+        ),
+    }
+
+
+def slice_fidelity(sent: bytes, output: bytes, slicer: str) -> dict:
+    """What the slice did to the project: the versions (``_who_sliced``), and the settings whose values differ between
+    the project sent and the output's own ``project_settings.config``. Settings only one side has (new in another
+    version) are left out."""
+    with zipfile.ZipFile(io.BytesIO(sent)) as zin, zipfile.ZipFile(io.BytesIO(output)) as zout:
+        project, written = detect._read_header_metadata(zin), detect._read_header_metadata(zout)
+    before = detect.read_project_settings(io.BytesIO(sent))
+    after = detect.read_project_settings(io.BytesIO(output))
+    sidecar = detect.slicer_version(written, slicer)
+    if sidecar:
+        _sidecar_versions[slicer] = sidecar
+    keys = sorted(k for k in (before.keys() & after.keys()) - _BOOKKEEPING if _one(before[k]) != _one(after[k]))
+    return {
+        **_who_sliced(detect.detect_slicer(project), detect.slicer_version(project), slicer, sidecar),
+        "changed": [[k, _short(_one(before[k])), _short(_one(after[k]))] for k in keys[:_MAX_CHANGES]],
+        "changed_count": len(keys),
+        "highlight": [k for k in WATCHED_SETTINGS if k in keys],
+    }
+
+
+async def sidecar_version(db: AsyncSession, slicer: str) -> str | None:
+    """The slicer's sidecar version, as its last farm output wrote it (only Orca's /health says it)."""
+    if slicer not in _sidecar_versions:
+        rows = await db.execute(
+            LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id.desc()).limit(200)
+        )
+        _sidecar_versions[slicer] = next(
+            (
+                fid["slicer"].rsplit(" ", 1)[-1]
+                for out in rows.scalars()
+                if (meta := out.file_metadata or {}).get("sliced_with") == slicer
+                and (fid := meta.get("slice_fidelity") or {}).get("slicer")
+            ),
+            None,
+        )
+    return _sidecar_versions[slicer]
+
+
+def predicted_fidelity(state: FarmLibraryFile, sidecar: str | None) -> dict | None:
+    """Before the slice: who saved the project (its ``application``) against the sidecar's last known version."""
+    meta = {"Application": state.application or ""}
+    project_slicer = detect.detect_slicer(meta)
+    if state.slicer not in SLICEABLE or project_slicer != state.slicer_detected:
+        return None  # an Orca project read before its own version was kept: unknown until the slice
+    return _who_sliced(project_slicer, detect.slicer_version(meta), state.slicer, sidecar)
 
 
 def plate_key(plate: int | None) -> int:
@@ -176,7 +269,8 @@ async def slice_embedded(
     raw = await asyncio.to_thread(src.read_bytes)
     # The version id of the source (a zip-directory hash for NAS files): tells later whether the output is stale.
     source_sha = state.sha256
-    model_bytes = await asyncio.to_thread(fix_printer_inherits, lib._sanitize_project_settings_sentinels(raw))
+    model_bytes = lib._sanitize_project_settings_sentinels(raw, FARM_SENTINEL_KEYS[slicer])
+    model_bytes = await asyncio.to_thread(fix_printer_inherits, model_bytes)
     filament = await variant_of(db, model_bytes, plate, colour) if colour_key(colour) else 0
     if filament:
         model_bytes = await asyncio.to_thread(variants.move_plate_to, model_bytes, plate_key(plate), filament)
@@ -248,7 +342,15 @@ async def slice_embedded(
     except Exception as exc:
         logger.warning("Failed to parse sliced 3MF metadata for %s: %s", base_name, exc)
 
-    filament_g = result.filament_used_g or parsed.get("filament_used_grams") or 0.0
+    from backend.app.farm.plates.service import output_grams
+
+    # the sidecar's X-Filament-Used-g header has the first filament only: the output's own figures, all filaments
+    filament_g = output_grams(parsed) or result.filament_used_g or 0.0
+    try:
+        fidelity = await asyncio.to_thread(slice_fidelity, model_bytes, result.content, slicer)
+    except Exception:  # only a report on the slice: never what fails it
+        logger.warning("Cannot compare the settings of %s with its slice", base_name, exc_info=True)
+        fidelity = None
     filament_mm = result.filament_used_mm or parsed.get("filament_used_mm") or 0.0
     metadata = dict(lib._without_print_name(parsed) or {})
     metadata.update(
@@ -263,6 +365,7 @@ async def slice_embedded(
             "sliced_with": slicer,
             "sliced_color": colour.strip() if colour else None,  # as the component writes it: "Nero"
             "sliced_filament": filament or None,
+            "slice_fidelity": fidelity,
         }
     )
     new_file = previous or LibraryFile(file_type="gcode", source_type="sliced")

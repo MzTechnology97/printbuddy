@@ -476,6 +476,198 @@ class TestEmbeddedSlicing:
         assert resp.status_code == 400
         assert sidecar == []
 
+    async def test_grams_are_all_the_filaments_of_the_slice(self, async_client, db_session, watched, nas, monkeypatch):
+        from backend.app.farm.plates import service as plates
+        from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+        # The sidecar's header counts the first filament only (60 g); the slice used 60 + 35.5 g.
+        output = make_sliced(nas.parent / "out.gcode.3mf", BAMBU, {}, filaments=(60.0, 35.5))
+
+        async def fake_slice(self, **kwargs):
+            return SliceResult(content=output, print_time_seconds=600, filament_used_g=60.0, filament_used_mm=1.0)
+
+        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["box.3mf"]["library_file_id"]
+
+        response = await self._slice(db_session, file_id)
+        assert response.filament_used_g == 95.5
+        out = await db_session.get(LibraryFile, response.library_file_id)
+        assert out.file_metadata["filament_used_g"] == 95.5
+        # an output from before kept the header's figure; the slice's own filaments win over it
+        assert plates.output_grams({**out.file_metadata, "filament_used_g": 60.0}) == 95.5
+        assert plates.output_grams({"filament_used_g": 60.0}) == 60.0
+
+    async def test_sentinels_left_where_the_sidecar_takes_them(self, async_client, db_session, watched, nas, sidecar):
+        sentinels = {
+            "prime_tower_brim_width": "-1",
+            "raft_first_layer_expansion": "-1",
+            "tree_support_wall_count": "-1",
+        }
+        make_project(nas / "Auto" / "auto.3mf", BAMBU, sentinels)
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["auto.3mf"]["library_file_id"]
+
+        await self._slice(db_session, file_id)  # Bambu Studio takes all three
+        await async_client.put(f"/api/v1/farm/library/files/{file_id}/slicer", json={"slicer": "orcaslicer"})
+        await self._slice(db_session, file_id)  # Orca refuses raft_first_layer_expansion only
+        sent = [detect.read_project_settings(io.BytesIO(c["model_bytes"])) for c in sidecar]
+        assert sent[0] == sentinels
+        assert sent[1] == {k: v for k, v in sentinels.items() if k != "raft_first_layer_expansion"}
+
+    async def test_what_the_slicer_changed_is_kept_on_the_output(
+        self, async_client, db_session, watched, nas, monkeypatch
+    ):
+        from backend.app.farm import slicing
+        from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+        make_project(nas / "Old" / "old.3mf", ORCA_24, PROJECT)
+        output = make_sliced(nas.parent / "out.gcode.3mf", ORCA_OUT, SLICED)
+
+        async def fake_slice(self, **kwargs):
+            return SliceResult(content=output, print_time_seconds=600, filament_used_g=1.0, filament_used_mm=1.0)
+
+        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+        monkeypatch.setattr(slicing, "_sidecar_versions", {})
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))["old.3mf"]["library_file_id"]
+
+        response = await self._slice(db_session, file_id)
+        out = await db_session.get(LibraryFile, response.library_file_id)
+        assert out.file_metadata["slice_fidelity"] == FIDELITY
+        # the sidecar's version, for plates not sliced yet: from the slice, and after a restart from its output
+        assert await slicing.sidecar_version(db_session, "orcaslicer") == "2.5.0-beta"
+        slicing._sidecar_versions.clear()
+        assert await slicing.sidecar_version(db_session, "orcaslicer") == "2.5.0-beta"
+        assert await slicing.sidecar_version(db_session, "bambu_studio") is None
+
+
+# 3MFs of a farm slice, all made up: Orca 2.4 saved the project, an Orca 2.5 sidecar sliced it.
+ORCA_24 = {"Application": "BambuStudio-02.06.00.51", "OrcaSlicer": "2.4.2"}
+ORCA_OUT = {"Application": "BambuStudio-02.08.01.55", "OrcaSlicer": "2.5.0-beta"}
+PROJECT = {
+    "version": "02.06.00.51",
+    "printer_model": "Bambu Lab P1S",
+    "machine_start_gcode": "G28 ; start of 2025",
+    "nozzle_type": ["hardened_steel"],
+    "wall_loops": "5",
+    "travel_speed": ["300"],
+    "different_settings_to_system": ["wall_loops", "", ""],
+}
+SLICED = {
+    **PROJECT,
+    "version": "02.08.01.55",
+    "machine_start_gcode": "G28 ; start of 2026\n" + "M104 S0\n" * 10,
+    "nozzle_type": ["undefine", "undefine"],
+    "travel_speed": ["300", "300"],  # the same value, per extruder
+    "support_ironing_spacing": "0.15",  # only in the newer version
+    "use_3mf": "1",
+}
+FIDELITY = {
+    "project": "OrcaSlicer 2.4.2",
+    "slicer": "OrcaSlicer 2.5.0-beta",
+    "version_drift": True,
+    "changed": [["machine_start_gcode", "G28 ; start of 2025", None], ["nozzle_type", "hardened_steel", "undefine"]],
+    "changed_count": 2,
+    "highlight": ["machine_start_gcode", "nozzle_type"],
+}
+
+
+def make_project(path: Path, metadata: dict, settings: dict) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = "".join(f'<metadata name="{k}">{v}</metadata>' for k, v in metadata.items())
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("3D/3dmodel.model", f"<model>{meta}<resources/></model>")
+        zf.writestr("Metadata/project_settings.config", json.dumps(settings))
+    return age(path)
+
+
+def make_sliced(path: Path, metadata: dict, settings: dict, filaments=(10.0,)) -> bytes:
+    """A sidecar's output: the slicer's own metadata first, the project's kept after it, as the Orca CLI writes."""
+    make_project(path, metadata, settings)
+    slots = "".join(f'<filament id="{i}" type="PLA" used_g="{g}"/>' for i, g in enumerate(filaments, 1))
+    info = f'<config><plate><metadata key="index" value="1"/><metadata key="weight" value="{sum(filaments)}"/>'
+    with zipfile.ZipFile(path, "a") as zf:
+        zf.writestr("Metadata/slice_info.config", f"{info}{slots}</plate></config>")
+    if "OrcaSlicer" in metadata:
+        with zipfile.ZipFile(path) as zf:
+            entries = {n: zf.read(n) for n in zf.namelist()}
+        model = entries["3D/3dmodel.model"].replace(
+            b"<resources", b'<metadata name="OrcaSlicer">2.4.2</metadata><resources'
+        )
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, data in entries.items():
+                zf.writestr(name, model if name == "3D/3dmodel.model" else data)
+    return path.read_bytes()
+
+
+class TestSliceFidelity:
+    """What a farm slice changed: versions and settings, without a sidecar."""
+
+    def test_same_version_and_settings_report_nothing(self, tmp_path):
+        from backend.app.farm.slicing import slice_fidelity
+
+        bs = {"Application": "BambuStudio-02.08.02.61"}
+        sent = make_sliced(tmp_path / "in.3mf", bs, PROJECT)
+        out = make_sliced(tmp_path / "out.3mf", bs, {**PROJECT, "travel_speed": ["300", "300"]})
+        assert slice_fidelity(sent, out, "bambu_studio") == {
+            "project": "Bambu Studio 02.08.02.61",
+            "slicer": "Bambu Studio 02.08.02.61",
+            "version_drift": False,
+            "changed": [],
+            "changed_count": 0,
+            "highlight": [],
+        }
+
+    def test_a_project_sent_to_the_other_slicer_drifts(self, tmp_path):
+        from backend.app.farm.slicing import slice_fidelity
+
+        sent = make_sliced(tmp_path / "in.3mf", {"Application": "BambuStudio-02.08.02.61"}, PROJECT)
+        out = make_sliced(tmp_path / "out.3mf", ORCA_OUT, PROJECT)
+        found = slice_fidelity(sent, out, "orcaslicer")
+        assert (found["project"], found["slicer"], found["version_drift"]) == (
+            "Bambu Studio 02.08.02.61",
+            "OrcaSlicer 2.5.0-beta",
+            True,
+        )
+
+    @pytest.mark.parametrize(
+        ("application", "detected", "sidecar", "expected"),
+        [
+            ("OrcaSlicer-2.4.2", "orcaslicer", "2.5.0-beta", ("OrcaSlicer 2.4.2", "OrcaSlicer 2.5.0-beta", True)),
+            ("OrcaSlicer-2.5.0-beta", "orcaslicer", "2.5.0", ("OrcaSlicer 2.5.0-beta", "OrcaSlicer 2.5.0", False)),
+            (
+                "BambuStudio-02.06.00.51",
+                "bambu_studio",
+                "02.08.02.61",
+                ("Bambu Studio 02.06.00.51", "Bambu Studio 02.08.02.61", True),
+            ),
+            ("BambuStudio-02.08.02.61", "bambu_studio", None, ("Bambu Studio 02.08.02.61", None, False)),
+        ],
+    )
+    def test_prediction_before_the_slice(self, application, detected, sidecar, expected):
+        from backend.app.farm.slicing import predicted_fidelity
+
+        state = FarmLibraryFile(application=application, slicer_detected=detected, status="ok")
+        found = predicted_fidelity(state, sidecar)
+        assert found == dict(zip(("project", "slicer", "version_drift"), expected, strict=True))
+
+    def test_no_prediction_for_an_orca_project_read_before(self):
+        from backend.app.farm.slicing import predicted_fidelity
+
+        # stored before the Orca version was kept: the Application names a Bambu Studio release
+        state = FarmLibraryFile(application="BambuStudio-02.06.00.51", slicer_detected="orcaslicer", status="ok")
+        assert predicted_fidelity(state, "2.5.0-beta") is None
+
+    def test_orca_project_keeps_its_own_version(self, tmp_path):
+        info = detect.inspect_3mf(make_project(tmp_path / "p.3mf", ORCA_24, {}))
+        assert (info.application, info.slicer) == ("OrcaSlicer-2.4.2", "orcaslicer")
+        assert detect.slicer_version({"Application": "BambuStudio-2.3.2-rc2"}) == "2.3.2-rc2"
+        # Bambu Studio keeps an Orca tag of the project: not its own version
+        assert detect.slicer_version({**ORCA_24, "Application": "BambuStudio-02.08.02.61"}, "bambu_studio") == (
+            "02.08.02.61"
+        )
+
 
 # ---------------------------------------------------------------- colour variants
 

@@ -241,3 +241,55 @@ async def test_plates_carry_the_slicer_weight_or_the_solid_bound(async_client, d
         ("P1S", 80.0, None),  # the slicer's weight wins
         ("K1", None, None),  # objects not measured
     ]
+
+
+@pytest.mark.asyncio
+async def test_plates_warn_of_another_slicer_version(async_client, db_session, farm, monkeypatch):
+    from backend.app.farm import slicing
+    from backend.app.farm.models import FarmLibraryFile, FarmWatchedFolder
+    from backend.app.models.library import LibraryFile
+
+    monkeypatch.setattr(slicing, "_sidecar_versions", {"orcaslicer": "2.5.0-beta"})
+    a1_file, p1s_file, _k1_file = farm["files"]
+    folder_id = (await db_session.get(LibraryFile, a1_file)).folder_id
+    db_session.add(FarmWatchedFolder(folder_id=folder_id))
+    for file_id in (a1_file, p1s_file):  # saved with Orca 2.4
+        db_session.add(
+            FarmLibraryFile(
+                watch_folder_id=folder_id,
+                library_file_id=file_id,
+                path=f"/x/{file_id}.3mf",
+                mtime=0,
+                size=1,
+                application="OrcaSlicer-2.4.2",
+                slicer_detected="orcaslicer",
+            )
+        )
+    report = {
+        "project": "OrcaSlicer 2.4.2",
+        "slicer": "OrcaSlicer 2.5.0-beta",
+        "version_drift": True,
+        "changed": [["nozzle_type", "hardened_steel", "undefine"]],
+        "changed_count": 1,
+        "highlight": ["nozzle_type"],
+    }
+    out = LibraryFile(
+        filename="p1.gcode.3mf",
+        file_path="/x/p1.gcode.3mf",
+        file_type="gcode",
+        file_size=1,
+        source_type="sliced",
+        file_metadata={"slice_fidelity": report},
+    )
+    db_session.add(out)
+    await db_session.flush()
+    p1s = await db_session.scalar(select(FarmPlate).where(FarmPlate.library_file_id == p1s_file))
+    p1s.sliced_file_id = out.id
+    await db_session.commit()
+
+    black = (await async_client.get(f"{API}/plan")).json()["components"][1]
+    found = {o["printer_model"]: o["slice_fidelity"] for o in black["plates"]}
+    assert found["P1S"] == report  # sliced: what its slice changed
+    # not sliced yet: who saved the project against the sidecar's version
+    assert found["A1"] == {"project": "OrcaSlicer 2.4.2", "slicer": "OrcaSlicer 2.5.0-beta", "version_drift": True}
+    assert found["K1"] is None  # no slicer known for its 3MF

@@ -117,6 +117,14 @@ const en = {
     mirrored: 'mirrored piece',
     counts: '{{open}} to decide · {{done}} in the product',
   },
+  fidelity: {
+    versionDrift: 'Project saved with {{project}}, sliced with {{slicer}}: machine G-code and settings not customised in the project can change',
+    warning: 'The slicer changed the project: open for details',
+    changed_one: 'The slicer changed {{count}} setting',
+    changed_other: 'The slicer changed {{count}} settings',
+    watched: 'check {{keys}}',
+    more: '…and {{count}} more',
+  },
   jobs: {
     title: 'Accoda jobs',
     accoda: 'Queue',
@@ -1042,6 +1050,14 @@ const it: typeof en = {
     linked_one: 'Cartella collegata a {{count}} progetto',
     linked_other: 'Cartella collegata a {{count}} progetti',
     unlinked: 'Cartella scollegata',
+  },
+  fidelity: {
+    versionDrift: 'Progetto salvato con {{project}}, slicing con {{slicer}}: G-code macchina e valori non personalizzati possono cambiare',
+    warning: 'Lo slicer ha cambiato il progetto: apri per i dettagli',
+    changed_one: 'Lo slicer ha cambiato {{count}} impostazione',
+    changed_other: 'Lo slicer ha cambiato {{count}} impostazioni',
+    watched: 'controlla {{keys}}',
+    more: '…e altre {{count}}',
   },
   board: {
     tab: 'Lavori',

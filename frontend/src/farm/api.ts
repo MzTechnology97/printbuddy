@@ -141,6 +141,17 @@ export interface FarmProductView {
   }[];
 }
 
+/** What a farm slice changed in the project: who saved it and who sliced it, and the settings whose values
+ * differ ([key, before, after], values left out when too long). Before the slice, only the versions. */
+export interface FarmSliceFidelity {
+  project: string | null;
+  slicer: string | null;
+  version_drift: boolean;
+  changed?: [string, string | null, string | null][];
+  changed_count?: number;
+  highlight?: string[];
+}
+
 export interface FarmPlanPlate {
   plate_id: number;
   library_file_id: number;
@@ -158,6 +169,7 @@ export interface FarmPlanPlate {
   sliced_file_id?: number | null;
   /** The slicer the 3MF was made with (detected, or set by hand). */
   slicer?: string | null;
+  slice_fidelity?: FarmSliceFidelity | null;
   score: number;
   printers: {
     id: number;
@@ -377,6 +389,7 @@ export interface FarmBoardRow {
   slice_progress?: { percent: number | null; stage: string | null } | null;
   file: string | null;
   library_file_id: number | null;
+  slice_fidelity?: FarmSliceFidelity | null;
   manual_start: boolean;
   source: 'farm' | 'queue' | 'outside';
   created_at: string | null;
