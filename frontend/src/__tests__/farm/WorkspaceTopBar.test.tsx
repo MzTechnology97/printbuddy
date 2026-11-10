@@ -1,0 +1,165 @@
+/**
+ * Printfarm (fork): the 3MF Workspace's top bar (batch D1). Undo / redo of the settings edits, the File and ≡
+ * menus in OrcaSlicer's order (with real submenus), the Slice / Print buttons with their ▾, and the slice's checks
+ * against the bed.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import { fireEvent, screen, within } from '@testing-library/react';
+import { render } from '../utils';
+import { COALESCE_MS, type DraftHistory, draftHistory } from '../../farm/workspace/draft';
+import { type MenuActions, type MenuState, fileMenu, mainMenu, stripMnemonic } from '../../farm/workspace/menuBar';
+import { TopBar, type TopBarProps } from '../../farm/workspace/TopBar';
+import { ContextMenu } from '../../farm/workspace/Viewport';
+import { sliceWarnings } from '../../farm/workspace/gcode/checks';
+import { parseGcode } from '../../farm/workspace/gcode/parse';
+
+describe('undo / redo of the settings edits', () => {
+  const start: DraftHistory = { draft: {}, past: [], future: [], last: null };
+  const edit = (h: DraftHistory, key: string, value: string, at: number) =>
+    draftHistory(h, { type: 'edit', edit: (d) => ({ ...d, [key]: value }), key, at });
+
+  it('typing in one field is one step; another field, or a pause, is another', () => {
+    let h = edit(start, 'layer_height', '0.1', 0);
+    h = edit(h, 'layer_height', '0.12', 200); // same field, soon after: the same step
+    expect(h.past).toHaveLength(1);
+    h = edit(h, 'layer_height', '0.16', 200 + COALESCE_MS + 1); // after a pause: a new step
+    h = edit(h, 'wall_loops', '3', 200 + COALESCE_MS + 2);
+    expect(h.past).toHaveLength(3);
+    h = draftHistory(h, { type: 'undo' });
+    expect(h.draft).toEqual({ layer_height: '0.16' });
+    h = draftHistory(draftHistory(h, { type: 'undo' }), { type: 'undo' });
+    expect(h.draft).toEqual({});
+    expect(draftHistory(h, { type: 'undo' })).toBe(h); // nothing more to undo
+    h = draftHistory(h, { type: 'redo' });
+    expect(h.draft).toEqual({ layer_height: '0.12' });
+  });
+
+  it('a new edit drops what could be redone, and an edit that changes nothing is no step', () => {
+    let h = edit(start, 'a', '1', 0);
+    h = draftHistory(h, { type: 'undo' });
+    expect(h.future).toHaveLength(1);
+    h = edit(h, 'b', '2', 5000);
+    expect(h.future).toHaveLength(0);
+    const same = draftHistory(h, { type: 'edit', edit: (d) => ({ ...d }), key: null, at: 9000 });
+    expect(same).toBe(h);
+  });
+});
+
+const state: MenuState = {
+  canUndo: true, canRedo: false, canSave: false, dirty: true, hasSlice: false, prepare: true, perspective: true,
+  navigator: true, grid: true, labels: false, collision: false, overhangs: false, outline: true,
+};
+const actions = (): MenuActions => ({
+  open: vi.fn(), save: vi.fn(), download3mf: vi.fn(), exportSliced: vi.fn(), exportGcode: vi.fn(), quit: vi.fn(),
+  undo: vi.fn(), redo: vi.fn(), resetAll: vi.fn(), selectAll: vi.fn(), deselectAll: vi.fn(), view: vi.fn(),
+  perspective: vi.fn(), toggle: vi.fn(), shortcuts: vi.fn(),
+});
+const tr = (s: string) => stripMnemonic(s);
+const trc = (_c: string, s: string) => s;
+const hints = { phase: (n: number) => `phase ${n}`, later: 'later' };
+
+describe('menus (MainFrame.cpp)', () => {
+  it("File: Orca's order; what works runs, the rest is greyed with its phase", () => {
+    const a = actions();
+    const items = fileMenu(tr, hints, state, a, { download3mf: 'Download the 3MF' });
+    expect(items.map((i) => i.label)).toEqual(['New Project', 'Open Project', 'Save Project', 'Save Project as', 'Publish 3MF', 'Import', 'Export', 'Quit']);
+    expect(items[0].onClick).toBeUndefined();
+    expect(items[0].hint).toBe('phase 2');
+    expect(items[2].onClick).toBeUndefined(); // nothing to save
+    const exp = items.find((i) => i.label === 'Export')!.items!;
+    const sliced = exp.find((i) => i.label === 'Export plate sliced file')!;
+    expect([sliced.shortcut, sliced.onClick]).toEqual(['Ctrl+G', undefined]);
+    expect(exp.find((i) => i.label === 'Export all plate sliced file')).toMatchObject({ hint: 'later' });
+    const withSlice = fileMenu(tr, hints, { ...state, hasSlice: true, canSave: true }, a, { download3mf: 'x' });
+    withSlice.find((i) => i.label === 'Export')!.items!.find((i) => i.label === 'Export G-code')!.onClick!();
+    expect(a.exportGcode).toHaveBeenCalled();
+    expect(withSlice[3].onClick).toBe(a.save);
+  });
+
+  it('≡: Edit, View, Preferences, Speed Dial, Plugins and Help; View has the camera views and the switches', () => {
+    const a = actions();
+    const items = mainMenu(tr, trc, hints, state, a, { resetAll: 'Reset all' });
+    expect(items.map((i) => i.label)).toEqual(['Edit', 'View', 'Preferences', 'Open Speed Dial', 'Plugins', 'Help']);
+    const edit = items[0].items!;
+    expect(edit[0]).toMatchObject({ label: 'Undo', shortcut: 'Ctrl+Z' });
+    expect(edit[1].onClick).toBeUndefined(); // nothing to redo
+    const view = items[1].items!;
+    expect(view.slice(0, 7).map((i) => i.shortcut)).toEqual(['Ctrl+0', 'Ctrl+1', 'Ctrl+2', 'Ctrl+3', 'Ctrl+4', 'Ctrl+5', 'Ctrl+6']);
+    view.find((i) => i.label === 'Top')!.onClick!();
+    expect(a.view).toHaveBeenCalledWith('top');
+    expect(view.find((i) => i.label === 'Show Labels')).toMatchObject({ checked: false, shortcut: 'Ctrl+E' });
+    expect(view.find((i) => i.label === 'Use Orthogonal View')!.checked).toBe(false);
+    expect(items[5].items![0]).toMatchObject({ label: 'Keyboard Shortcuts', shortcut: '?' });
+  });
+
+  it('a submenu opens with the right arrow, runs its item and closes the whole menu', () => {
+    const run = vi.fn();
+    const close = vi.fn();
+    render(<ContextMenu items={[{ label: 'View', items: [{ label: 'Top', onClick: run }] }, { label: 'Help', items: [] }]} at={{ x: 0, y: 0 }} onClose={close} />);
+    const view = screen.getByRole('menuitem', { name: 'View' });
+    expect(view).toHaveAttribute('aria-haspopup', 'true');
+    fireEvent.keyDown(view, { key: 'ArrowRight' });
+    expect(view).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Top' }));
+    expect(run).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+  });
+});
+
+describe('TopBar', () => {
+  const props = (over: Partial<TopBarProps> = {}): TopBarProps => ({
+    title: 'Bracket.3mf', subtitle: 'OrcaSlicer', dirty: true, file: [], main: [],
+    labels: { close: 'Close', file: 'File', menu: 'Menu', save: 'Save Project', undo: 'Undo', redo: 'Redo', tabs: 'Workspace' },
+    onClose: vi.fn(), modes: [{ key: 'prepare', label: 'Prepare' }, { key: 'preview', label: 'Preview' }], mode: 'prepare', onMode: vi.fn(),
+    slice: { label: 'Slice plate', run: vi.fn(), busy: false, options: [], more: 'Slice options' },
+    print: { label: 'Print plate', options: [], more: 'Print options' },
+    ...over,
+  });
+
+  it('marks unsaved changes with "*" and greys Undo / Redo / Print when they have nothing to do', () => {
+    render(<TopBar {...props()} />);
+    expect(screen.getByRole('heading')).toHaveTextContent('*Bracket.3mf');
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Print plate' })).toBeDisabled();
+  });
+
+  it('the ▾ picks what the Slice button does; the button runs it', () => {
+    const all = vi.fn();
+    const p = props({ slice: { label: 'Slice plate', run: vi.fn(), busy: false, more: 'Slice options', options: [{ label: 'Slice all', onClick: all }, { label: 'Slice plate', checked: true, onClick: vi.fn() }] } });
+    render(<TopBar {...p} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Slice plate' }));
+    expect(p.slice.run).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Slice options' }));
+    const menu = screen.getByRole('menu');
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Slice all' }));
+    expect(all).toHaveBeenCalled();
+  });
+});
+
+describe("the slice's checks against the bed (GLCanvas3D)", () => {
+  const plate = (lines: string[], height = 250) =>
+    parseGcode(
+      ['; CONFIG_BLOCK_START', '; printable_area = 0x0,256x0,256x256,0x256', `; printable_height = ${height}`, '; CONFIG_BLOCK_END', 'M83', ...lines].join('\n'),
+    );
+
+  it('finds nothing on a plate within the bed', () => {
+    expect(sliceWarnings(plate(['; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X10 Y10 Z0.2 F600', 'G1 X20 Y10 E1']))).toEqual([]);
+  });
+
+  it('a path beyond the edges is an error; the start G-code (custom) out there is not', () => {
+    const out = plate(['; FEATURE: Custom', 'G1 X-40 Y5 Z0.2', 'G1 X-30 Y5 E2', '; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X250 Y10', 'G1 X260 Y10 E1']);
+    expect(sliceWarnings(out).map((w) => [w.key, w.error])).toEqual([['outside', true]]);
+    const purgeOnly = plate(['; FEATURE: Custom', 'G1 X-40 Y5 Z0.2', 'G1 X-30 Y5 E2', '; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Outer wall', 'G1 X10 Y10', 'G1 X20 Y10 E1']);
+    expect(sliceWarnings(purgeOnly)).toEqual([]);
+  });
+
+  it('too tall: the height error alone (Orca then leaves the edge check out)', () => {
+    const tall = plate(['; CHANGE_LAYER', '; Z_HEIGHT: 5', '; FEATURE: Outer wall', 'G1 X300 Y10 Z5', 'G1 X310 Y10 E1'], 4);
+    expect(sliceWarnings(tall).map((w) => w.key)).toEqual(['height']);
+  });
+
+  it('a prime tower beyond the plate is a warning', () => {
+    const tower = plate(['; CHANGE_LAYER', '; Z_HEIGHT: 0.2', '; FEATURE: Prime tower', 'G1 X250 Y250 Z0.2', 'G1 X258 Y250 E1']);
+    expect(sliceWarnings(tower).map((w) => [w.key, w.error])).toEqual([['outside', true], ['tower', false]]);
+  });
+});

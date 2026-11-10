@@ -528,6 +528,10 @@ export interface MenuItem {
   shortcut?: string;
   /** A submenu arrow (its submenu comes with phase 2). */
   submenu?: boolean;
+  /** A real submenu: opens on hover, a click, Enter or the right arrow (the left arrow goes back). */
+  items?: MenuItem[];
+  /** Why it is greyed, as its tooltip (default: phase 2). */
+  hint?: string;
   checked?: boolean;
   icon?: string;
   /** Works when set; otherwise disabled, "phase 2". */
@@ -538,11 +542,30 @@ export interface MenuItem {
 
 /** A right-click menu at a point (``at``), or beside its button: arrows, Enter, Esc and a click outside close
  * it; disabled items say they come in phase 2. */
-export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { x: number; y: number }; onClose: () => void }) {
+export function ContextMenu({
+  items,
+  at,
+  onClose,
+  nested,
+  onBack,
+}: {
+  items: MenuItem[];
+  at?: { x: number; y: number };
+  onClose: () => void;
+  /** A submenu: the root menu handles a click outside and Esc. */
+  nested?: boolean;
+  /** Back to the parent menu (left arrow). */
+  onBack?: () => void;
+}) {
   const { t } = useTranslation();
   const ref = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
+  const [sub, setSub] = useState<{ index: number; at: { x: number; y: number } } | null>(null);
+  const openSub = (index: number, el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    setSub({ index, at: { x: r.right, y: r.top - 4 } });
+  };
   const [place, setPlace] = useState<React.CSSProperties>(
     at ? { position: 'fixed', left: at.x, top: at.y } : { position: 'absolute', left: '100%', bottom: 0, marginLeft: 6 },
   );
@@ -560,6 +583,7 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
   }, [at]);
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])')?.focus();
+    if (nested) return;
     const outside = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && close.current();
     const esc = (e: KeyboardEvent) => e.key === 'Escape' && close.current();
     document.addEventListener('mousedown', outside);
@@ -568,6 +592,7 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
       document.removeEventListener('mousedown', outside);
       window.removeEventListener('keydown', esc);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, as the menu opens
   }, []);
 
   const run = (item: MenuItem) => {
@@ -575,14 +600,19 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
     close.current();
   };
   const onKey = (e: React.KeyboardEvent) => {
-    const enabled = [...(ref.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])') ?? [])];
+    // this menu's own items only (a submenu inside it handles its keys itself)
+    const enabled = [...(ref.current?.querySelectorAll<HTMLElement>(':scope > div > [role^="menuitem"]:not([aria-disabled="true"])') ?? [])];
     const i = enabled.indexOf(document.activeElement as HTMLElement);
     const next = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: enabled.length - 1 }[e.key];
+    e.stopPropagation(); // the menu, not a menu or a dialog behind it
     if (next != null && enabled.length) {
       e.preventDefault();
+      setSub(null);
       enabled[(next + enabled.length) % enabled.length].focus();
+    } else if (e.key === 'ArrowLeft' && onBack) {
+      e.preventDefault();
+      onBack();
     } else if (e.key === 'Escape') {
-      e.stopPropagation(); // the menu, not a dialog behind it
       close.current();
     }
   };
@@ -597,7 +627,8 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
       className="z-[70] min-w-[15rem] rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary py-1 text-[12px] shadow-xl"
     >
       {items.map((item, i) => {
-        const enabled = !!item.onClick;
+        const parent = !!item.items?.length;
+        const enabled = !!item.onClick || parent;
         return (
           <div key={i}>
             {item.separator && i > 0 && <div className="my-1 h-px bg-bambu-dark-tertiary" role="separator" />}
@@ -605,11 +636,18 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
               role={item.checked != null ? 'menuitemcheckbox' : 'menuitem'}
               aria-checked={item.checked ?? undefined}
               aria-disabled={!enabled || undefined}
+              aria-haspopup={parent || undefined}
+              aria-expanded={parent ? sub?.index === i : undefined}
               tabIndex={enabled ? -1 : undefined}
-              title={enabled ? undefined : soon}
-              onClick={() => enabled && run(item)}
+              title={enabled ? undefined : (item.hint ?? soon)}
+              onMouseEnter={(e) => (parent ? openSub(i, e.currentTarget) : setSub(null))}
+              onClick={(e) => (parent ? openSub(i, e.currentTarget) : enabled && run(item))}
               onKeyDown={(e) => {
-                if (enabled && (e.key === 'Enter' || e.key === ' ')) {
+                if (parent && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowRight')) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  openSub(i, e.currentTarget);
+                } else if (enabled && !parent && (e.key === 'Enter' || e.key === ' ')) {
                   e.preventDefault();
                   run(item);
                 }
@@ -626,12 +664,24 @@ export function ContextMenu({ items, at, onClose }: { items: MenuItem[]; at?: { 
                 ) : null}
               </span>
               <span className="flex-1 whitespace-nowrap">{item.label}</span>
-              {item.submenu ? (
+              {item.submenu || parent ? (
                 <ChevronRight className="w-3 h-3" />
               ) : item.shortcut ? (
                 <span className="text-bambu-gray">{item.shortcut}</span>
               ) : null}
             </div>
+            {parent && sub?.index === i && (
+              <ContextMenu
+                items={item.items!}
+                at={sub.at}
+                nested
+                onClose={() => close.current()}
+                onBack={() => {
+                  setSub(null);
+                  ref.current?.querySelectorAll<HTMLElement>(':scope > div > [role^="menuitem"]')[i]?.focus();
+                }}
+              />
+            )}
           </div>
         );
       })}

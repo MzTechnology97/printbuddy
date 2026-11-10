@@ -11,6 +11,7 @@ import type { ViewerScene } from '../../../components/ModelViewer';
 import { VIEW_KEYS, setView } from '../viewTools';
 import { LegendPanel } from './LegendPanel';
 import { type OptionKey, type RangeView, type ViewType, VIEW_TYPES, defaultViewType, paint, rangeOf, shortTime } from './legend';
+import { sliceWarnings } from './checks';
 import { MOVE, ROLES, type Toolpaths } from './parse';
 import type { WorkerReply, WorkerRequest } from './parse.worker';
 import { ToolpathScene } from './scene';
@@ -196,6 +197,7 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
     };
   }, [tp, bed.x, bed.y, bed.z]);
 
+  const warnings = useMemo(() => sliceWarnings(tp), [tp]);
   const roleMask = useMemo(() => roles.reduce((m, on, r) => (on ? m | (1 << r) : m), 0), [roles]);
   const range = useMemo(
     () => (VIEW_TYPES.some((t) => t.key === view && 'title' in t) ? rangeOf(tp, view as RangeView, roles, options) : null),
@@ -267,6 +269,21 @@ function Viewer({ tp, bed, colours: projectColours, o, phaseTitle, labels, notic
     <div className="relative h-full" onKeyDown={onKey}>
       <div ref={host} className="absolute inset-0" onPointerDown={() => three?.view.renderer.domElement.focus({ preventScroll: true })} />
       {notice}
+      {/* the slice's warnings (Orca's notifications, bottom right above the move slider) */}
+      {warnings.length > 0 && (
+        <div className="absolute right-16 bottom-10 z-10 flex max-w-sm flex-col items-end gap-1" role="alert">
+          {warnings.map((w) => (
+            <p
+              key={w.key}
+              className={`rounded border px-2 py-1 text-xs shadow ${
+                w.error ? 'border-red-500/70 bg-red-950/90 text-red-200' : 'border-amber-500/70 bg-amber-950/90 text-amber-200'
+              }`}
+            >
+              {o(w.text)}
+            </p>
+          ))}
+        </div>
+      )}
       <LegendPanel
         tp={tp}
         view={view}

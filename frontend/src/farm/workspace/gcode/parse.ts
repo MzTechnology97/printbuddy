@@ -59,6 +59,17 @@ export function roleOf(name: string): number {
   return ROLE_BY_NAME.get(n) ?? ROLE_ALIASES[n] ?? ROLE.Undefined;
 }
 
+export type Box = [number, number, number, number, number, number];
+const emptyBox = (): Box => [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+function grow(b: Box, x: number, y: number, z: number) {
+  if (x < b[0]) b[0] = x;
+  if (y < b[1]) b[1] = y;
+  if (z < b[2]) b[2] = z;
+  if (x > b[3]) b[3] = x;
+  if (y > b[4]) b[4] = y;
+  if (z > b[5]) b[5] = z;
+}
+
 /** Fixed-point scales of the stored columns: value = stored / scale. */
 export const SCALE = { width: 1000, height: 1000, feedrate: 10, temperature: 10, jerk: 100, pressureAdvance: 10000, flow: 10000 } as const;
 /** ``pressureAdvance`` when the G-code never set one. */
@@ -88,6 +99,10 @@ export interface GcodeStats {
   typeTime: number[];
   roleTime: number[];
   usedExtruders: number[];
+  /** Extent of the extrusions (custom G-code left out) and of the prime tower: [minX, minY, minZ, maxX, maxY, maxZ],
+   * null when there are none. */
+  pathBox: Box | null;
+  towerBox: Box | null;
   densities: number[];
   diameters: number[];
 }
@@ -232,6 +247,8 @@ export class GcodeParser {
   private roleMm3: number[] = Array(ROLES.length).fill(0);
   private modelMm3: number[] = []; private supportMm3: number[] = []; private towerMm3: number[] = []; private flushMm3: number[] = [];
   private used = new Set<number>();
+  private pathBox: Box = emptyBox();
+  private towerBox: Box = emptyBox();
   private filamentChanges = 0;
   private extruderChanges = 0;
 
@@ -327,6 +344,11 @@ export class GcodeParser {
       else this.width = (dE * Math.PI * r * r) / (xyz * h) + (1 - 0.25 * Math.PI) * h;
       if (this.width === 0) this.width = 0.4;
       this.width = Math.min(this.width, Math.max(2, 4 * h));
+      // the paths the bed checks look at (BuildVolume::all_paths_inside: extrusions, not custom G-code)
+      if (role !== ROLE.Custom && this.width > 0 && h > 0) {
+        grow(this.pathBox, nx, ny, nz);
+        if (role === ROLE['Prime tower']) grow(this.towerBox, nx, ny, nz);
+      }
     } else if (type === MOVE.unretract && this.flushing) {
       this.add(this.flushMm3, f, area * dE);
     }
@@ -684,6 +706,8 @@ export class GcodeParser {
         extruderChanges: this.extruderChanges,
         typeDistance: this.typeDistance, typeCount: this.typeCount, typeTime, roleTime,
         usedExtruders: [...this.used].sort((a, b) => a - b),
+        pathBox: Number.isFinite(this.pathBox[0]) ? this.pathBox : null,
+        towerBox: Number.isFinite(this.towerBox[0]) ? this.towerBox : null,
         densities: this.densities, diameters: this.diameters,
       },
     };
