@@ -11,7 +11,7 @@ import { type OrcaLayout, type ShortcutRow, keyText, orcaIcon, orcaText } from '
 import { SettingsPanel } from './SettingsPanel';
 import '../i18n';
 
-function Dialog({
+export function Dialog({
   title,
   intro,
   wide,
@@ -121,9 +121,27 @@ interface PresetProps {
   onChange: (setting: WorkspaceSetting, value: SettingValue) => void;
   onReset: (key: string) => void;
   onClose: () => void;
+  /** Save current %s and Compare presets (Tab.cpp's icons beside the preset), with their tooltips. */
+  onSavePreset?: () => void;
+  onComparePresets?: () => void;
+  presetTips?: { save: string; compare: string };
 }
 
-export function PresetDialog({ layout, kind, filament = 0, name, settings, draft, editable, onChange, onReset, onClose }: PresetProps) {
+export function PresetDialog({
+  layout,
+  kind,
+  filament = 0,
+  name,
+  settings,
+  draft,
+  editable,
+  onChange,
+  onReset,
+  onClose,
+  onSavePreset,
+  onComparePresets,
+  presetTips,
+}: PresetProps) {
   const { t } = useTranslation();
   const at = (key: string, i: number) => {
     const v = settings.find((s) => s.key === key)?.value;
@@ -161,7 +179,17 @@ export function PresetDialog({ layout, kind, filament = 0, name, settings, draft
                     {filament + 1}
                   </span>
                 )}
-                <span className="truncate">{preset ?? '—'}</span>
+                <span className="truncate flex-1">{preset ?? '—'}</span>
+                {onSavePreset && (
+                  <button type="button" onClick={onSavePreset} title={presetTips?.save} aria-label={presetTips?.save} className="p-0.5 rounded hover:bg-white/10">
+                    <img src={orcaIcon('save')} alt="" className="w-4 h-4" aria-hidden />
+                  </button>
+                )}
+                {onComparePresets && (
+                  <button type="button" onClick={onComparePresets} title={presetTips?.compare} aria-label={presetTips?.compare} className="p-0.5 rounded hover:bg-white/10">
+                    <img src={orcaIcon('compare')} alt="" className="w-4 h-4" aria-hidden />
+                  </button>
+                )}
               </div>
               {variants.length > 1 && (
                 <div className="flex flex-wrap gap-1 text-[11px]" aria-label={t('farm.workspace.variant')}>

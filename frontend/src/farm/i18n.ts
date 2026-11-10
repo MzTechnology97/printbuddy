@@ -549,6 +549,14 @@ const en = {
       sliceFirst: 'Slice the plate first',
       slicingNoReload: 'Slicing: the page is not reloaded until it is done',
     },
+    presets: {
+      project: 'in the project',
+      notFound: 'this preset could not be read',
+      saveFailed: 'The preset could not be saved',
+      saved: 'Preset "{{name}}" saved in the local presets',
+      insideProjectLater: 'comes with switching presets in the workspace',
+      missingParent: 'Its parent preset "{{name}}" could not be read: only the values the preset sets itself are compared.',
+    },
     previewPane: {
       none: 'Plate {{index}} is not sliced yet.',
       stale: 'Sliced from an older version of this 3MF',
@@ -1234,6 +1242,14 @@ const it: typeof en = {
       printOptions: 'Opzioni di stampa',
       sliceFirst: 'Prima elabora il piatto',
       slicingNoReload: 'Elaborazione in corso: la pagina non si ricarica finché non termina',
+    },
+    presets: {
+      project: 'nel progetto',
+      notFound: 'impossibile leggere questo profilo',
+      saveFailed: 'Impossibile salvare il profilo',
+      saved: 'Profilo "{{name}}" salvato nei profili locali',
+      insideProjectLater: "arriva con il cambio di profilo nell'area di lavoro",
+      missingParent: 'Impossibile leggere il profilo padre "{{name}}": si confrontano solo i valori che il profilo imposta.',
     },
     previewPane: {
       none: 'Il piatto {{index}} non è ancora elaborato.',

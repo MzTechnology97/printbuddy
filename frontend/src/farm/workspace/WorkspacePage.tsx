@@ -18,6 +18,8 @@ import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
 import { type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
+import { ComparePresetsDialog, SavePresetDialog } from './PresetDialogs';
+import { SECTION_TITLES } from './presetTools';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
@@ -209,6 +211,9 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
   const [sliceJob, setSliceJob] = useState<{ id: number; plate: number | null } | null>(null);
   const jobId = sliceJob?.id ?? null;
   const [printOpen, setPrintOpen] = useState(false);
+  // OrcaSlicer's Save preset (of a section, a filament's for the filament window) and Compare presets
+  const [savePreset, setSavePreset] = useState<{ section: 'process' | 'filament' | 'printer'; filament: number } | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
 
   const projectQuery = useQuery({
     queryKey: ['farmProjectSettings', fileId],
@@ -230,6 +235,11 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
 
   // --- 3D view: selection, menus, tools (they only look; see Viewport.tsx) ---
   const tr = useCallback((text: string) => orcaText(layout, text, i18n.language), [layout, i18n.language]);
+  // Tab.cpp's "Save current %s" and ParamsPanel's "Compare presets" tooltips
+  const presetTips = (section: 'process' | 'filament' | 'printer') => ({
+    save: tr('Save current %s').replace('%s', tr(SECTION_TITLES[section])),
+    compare: tr('Compare presets'),
+  });
   const focusRef = useRef(true);
   focusRef.current = canvas.focus;
   const onScene = useCallback((scene: ViewerScene) => {
@@ -870,6 +880,9 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
               setSelectedIds(base.includes(id) ? base.filter((x) => x !== id) : [...base, id]);
             }}
             stats={stats}
+            onSavePreset={doc.kind === 'project' ? () => setSavePreset({ section: 'process', filament: 0 }) : undefined}
+            onComparePresets={() => setCompareOpen(true)}
+            presetTips={presetTips('process')}
           />
         </aside>
         <main className={`${pane === 'view' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-w-0 relative`}>
@@ -1021,6 +1034,33 @@ function Workspace({ doc, layout }: { doc: WorkspaceDocument; layout: OrcaLayout
           onChange={set}
           onReset={reset}
           onClose={() => setPreset(null)}
+          onSavePreset={doc.kind === 'project' ? () => setSavePreset({ section: preset.kind, filament: preset.filament }) : undefined}
+          onComparePresets={() => setCompareOpen(true)}
+          presetTips={presetTips(preset.kind)}
+        />
+      )}
+      {savePreset && (
+        <SavePresetDialog
+          layout={layout}
+          section={savePreset.section}
+          filament={savePreset.filament}
+          settings={doc.settings}
+          draft={draft}
+          onClose={() => setSavePreset(null)}
+          onSaved={(name) => {
+            setSavePreset(null);
+            showToast(t('farm.workspace.presets.saved', { name }), 'success');
+          }}
+        />
+      )}
+      {compareOpen && (
+        <ComparePresetsDialog
+          layout={layout}
+          settings={doc.settings}
+          draft={draft}
+          editable={doc.editable}
+          onTransfer={set}
+          onClose={() => setCompareOpen(false)}
         />
       )}
       {printOpen && output?.current && (

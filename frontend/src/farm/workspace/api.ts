@@ -95,7 +95,29 @@ export interface SavedCopy {
   changes: { key: string; before: SettingValue; after: SettingValue }[];
 }
 
+/** A user preset (Printbuddy's local presets) offered by the preset headers and Compare presets. */
+export interface PresetEntry {
+  id: number;
+  name: string;
+  inherits: string | null;
+}
+export interface PresetValues {
+  section: 'process' | 'filament' | 'printer';
+  name: string;
+  inherits: string | null;
+  /** A parent up its chain that couldn't be read: only the values below it are known. */
+  missing_parent: string | null;
+  values: Record<string, SettingValue>;
+}
+
 export const workspaceApi = {
+  presets: (section: 'process' | 'filament' | 'printer') =>
+    farmRequest<{ section: string; user: PresetEntry[] }>(`/workspace/presets?section=${section}`),
+  /** A user preset (by id) or a system one (by name), its inheritance resolved. */
+  presetValues: (section: 'process' | 'filament' | 'printer', source: 'user' | 'system', ref: number | string) =>
+    farmRequest<PresetValues>(
+      `/workspace/presets/values?section=${section}&source=${source}&${source === 'user' ? 'id' : 'name'}=${encodeURIComponent(String(ref))}`,
+    ),
   get: (fileId: number) => farmRequest<WorkspaceDocument>(`/workspace/files/${fileId}`),
   saveCopy: (fileId: number, baseSha256: string, changes: Record<string, SettingValue>, filename?: string) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {

@@ -66,6 +66,12 @@ interface Props {
   selectedIds: string[];
   onToggle: (objectId: string) => void;
   stats: Map<string, ObjectStats>;
+  /** Save the project's process preset as a user preset (Save preset). */
+  onSavePreset?: () => void;
+  /** OrcaSlicer's Compare presets. */
+  onComparePresets?: () => void;
+  /** OrcaSlicer strings for those buttons' tooltips. */
+  presetTips?: { save: string; compare: string };
 }
 
 export function Sidebar({
@@ -85,6 +91,9 @@ export function Sidebar({
   selectedIds,
   onToggle,
   stats,
+  onSavePreset,
+  onComparePresets,
+  presetTips,
 }: Props) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>('simple');
@@ -166,6 +175,11 @@ export function Sidebar({
               options={MODES.map((m) => ({ value: m, label: t(`farm.workspace.modes.${m}`) }))}
               onChange={(m) => setMode(m as Mode)}
             />
+            {onComparePresets && (
+              <button type="button" onClick={onComparePresets} title={presetTips?.compare} aria-label={presetTips?.compare} className="p-0.5 rounded hover:bg-white/10">
+                <img src={orcaIcon('compare')} alt="" className="w-4 h-4" aria-hidden />
+              </button>
+            )}
           </>
         )}
       </Header>
@@ -200,8 +214,15 @@ export function Sidebar({
               mode={mode}
               develop={develop}
               header={
-                <div className={`${box} flex items-center px-2 h-7 text-[13px] text-white`} title={presets.process ?? undefined}>
-                  <span className="truncate">{presets.process ?? '—'}</span>
+                <div className="flex items-center gap-1">
+                  <div className={`${box} flex-1 min-w-0 flex items-center px-2 h-7 text-[13px] text-white`} title={presets.process ?? undefined}>
+                    <span className="truncate">{presets.process ?? '—'}</span>
+                  </div>
+                  {onSavePreset && (
+                    <button type="button" onClick={onSavePreset} title={presetTips?.save} aria-label={presetTips?.save} className="p-0.5 rounded hover:bg-white/10">
+                      <img src={orcaIcon('save')} alt="" className="w-4 h-4" aria-hidden />
+                    </button>
+                  )}
                 </div>
               }
             />

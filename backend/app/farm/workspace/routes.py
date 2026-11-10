@@ -27,11 +27,13 @@ from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
 from backend.app.farm.workspace import project, settings as ws_settings
+from backend.app.farm.workspace.presets import router as presets_router
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspace", tags=["farm-workspace"])
+router.include_router(presets_router)  # the preset headers and Compare presets (presets.py)
 _one_build = asyncio.Semaphore(1)  # a copy holds its source in memory: one at a time
 
 MAX_CHANGES = 1000
