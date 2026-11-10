@@ -16,10 +16,11 @@ import { PrintModal } from '../../components/PrintModal';
 import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
-import { type OfferedPreset, type PresetRef, type SettingValue, type SwitchReason, type WorkspaceDocument, workspaceApi } from './api';
+import { type OfferedPreset, type PresetRef, type SwitchReason, type WorkspaceDocument, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
-import { SECTION_TITLES, draftAfterSwitch, projectPreset, unsavedKeys, withSwitched } from './presetTools';
+import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
+import { type LiveState, usePresetSwitch } from './presetSwitch';
 import { toLocaleDecimal, useSettingsDraft } from './draft';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
@@ -174,9 +175,10 @@ export function WorkspacePage() {
 
 function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: OrcaLayout }) {
   const { t, i18n } = useTranslation();
-  // OrcaSlicer's preset combos: the switches made, in order, and the project's values with them (the server's
-  // preview, the same switch the saved copy gets); the page shows the switched project
-  const [switched, setSwitched] = useState<{ refs: PresetRef[]; values: Record<string, SettingValue> }>({ refs: [], values: {} });
+  // OrcaSlicer's preset combos (presetSwitch.ts): the page shows the switched project; ``livePresets`` is the page now
+  const livePresets = useRef<LiveState | null>(null);
+  const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
+  const { switched, pending } = presetSwitch;
   const doc = useMemo(() => ({ ...source, settings: withSwitched(source.settings, switched.values) }), [source, switched.values]);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -185,6 +187,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const fileId = doc.file.id;
   const { draft, set, reset, resetAll, replace, invalid, count: edits, undo, redo, canUndo, canRedo } = useSettingsDraft(doc.settings);
   const count = edits + switched.refs.length; // unsaved: the edits and the preset switches
+  livePresets.current = { settings: doc.settings, draft, replace };
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
   // focus mode (on at first, as OrcaSlicer) shows one plate, the first to begin with; off: null, every plate
@@ -220,10 +223,6 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const [savePreset, setSavePreset] = useState<{ section: 'process' | 'filament' | 'printer'; filament: number } | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   const [picker, setPicker] = useState<{ section: PresetRef['section']; filament: number; at: { x: number; y: number } } | null>(null);
-  // a switch waiting on the unsaved-changes dialog
-  const [pending, setPending] = useState<{ ref: PresetRef; refs: PresetRef[]; values: Record<string, SettingValue>; keys: string[] } | null>(
-    null,
-  );
 
   const projectQuery = useQuery({
     queryKey: ['farmProjectSettings', fileId],
@@ -262,29 +261,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     queryFn: () => workspaceApi.offered(picker!.section, identity),
     enabled: picker != null,
   });
-  const preview = useMutation({
-    mutationFn: (refs: PresetRef[]) =>
-      workspaceApi.previewSwitch(Object.fromEntries(source.settings.map((s) => [s.key, s.value])), refs),
-  });
-  const commitSwitch = (next: { ref: PresetRef; refs: PresetRef[]; values: Record<string, SettingValue>; keys: string[] }, transfer: boolean) => {
-    const after = withSwitched(source.settings, next.values);
-    replace(draftAfterSwitch(doc.settings, after, draft, next.keys, next.ref.section, next.ref.index, transfer));
-    setSwitched({ refs: next.refs, values: next.values });
-    setPending(null);
-  };
-  const pickPreset = (entry: OfferedPreset) => {
-    if (!picker) return;
-    const ref: PresetRef = { section: picker.section, index: picker.filament, source: entry.source, id: entry.id, name: entry.id == null ? entry.name : undefined };
-    const refs = [...switched.refs.filter((r) => r.section !== ref.section || r.index !== ref.index), ref];
-    preview.mutate(refs, {
-      onSuccess: ({ values }) => {
-        const next = { ref, refs, values, keys: unsavedKeys(doc.settings, draft, ref.section, ref.index) };
-        if (next.keys.length) setPending(next);
-        else commitSwitch(next, false);
-      },
-      onError: (e) => showToast(e instanceof Error ? e.message : String(e), 'error'),
-    });
-  };
+  const pickPreset = (entry: OfferedPreset) =>
+    picker &&
+    presetSwitch.pick({ section: picker.section, index: picker.filament, source: entry.source, id: entry.id, name: entry.id == null ? entry.name : undefined });
   const switchReasons: Record<SwitchReason, string> = {
     unresolved: t('farm.workspace.presets.switch.unresolved'),
     incompatible: t('farm.workspace.presets.switch.incompatible'),
@@ -830,7 +809,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     redo,
     resetAll: () => {
       resetAll();
-      setSwitched({ refs: [], values: {} });
+      presetSwitch.reset();
     },
     selectAll: () => {
       const ids = [...stats.keys()];
@@ -959,7 +938,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             onSavePreset={doc.kind === 'project' ? () => setSavePreset({ section: 'process', filament: 0 }) : undefined}
             onComparePresets={() => setCompareOpen(true)}
             presetTips={presetTips('process')}
-            onPickPreset={doc.editable ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
+            onPickPreset={doc.editable && !presetSwitch.busy ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
             pickLabel={(name) => t('farm.workspace.presets.switch.pick', { name })}
           />
         </aside>
@@ -1102,9 +1081,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           layout={layout}
           preset={projectPreset(doc.settings, pending.ref.section, pending.ref.index) ?? '—'}
           keys={pending.keys}
-          onTransfer={() => commitSwitch(pending, true)}
-          onDiscard={() => commitSwitch(pending, false)}
-          onClose={() => setPending(null)}
+          onTransfer={() => presetSwitch.commit(pending, true)}
+          onDiscard={() => presetSwitch.commit(pending, false)}
+          onClose={presetSwitch.cancel}
         />
       )}
       {shortcutsOpen && (
@@ -1139,6 +1118,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           filament={savePreset.filament}
           settings={doc.settings}
           draft={draft}
+          invalid={invalid}
           onClose={() => setSavePreset(null)}
           onSaved={(name) => {
             setSavePreset(null);

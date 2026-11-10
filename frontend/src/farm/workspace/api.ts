@@ -140,7 +140,13 @@ export interface PrinterIdentity {
 
 export const workspaceApi = {
   presets: (section: 'process' | 'filament' | 'printer') =>
-    farmRequest<{ section: string; user: PresetEntry[] }>(`/workspace/presets?section=${section}`),
+    farmRequest<{ section: string; user: PresetEntry[]; system: string[] }>(`/workspace/presets?section=${section}`),
+  /** Save preset's user preset, checked by the server as an edit is; ``id``: the one it overwrites. */
+  saveUserPreset: (section: PresetRef['section'], name: string, setting: Record<string, unknown>, id?: number) =>
+    farmRequest<{ id: number; name: string }>('/workspace/presets/user', {
+      method: 'POST',
+      body: JSON.stringify({ section, name, setting, id: id ?? null }),
+    }),
   /** A user preset (by id) or a system one (by name), its inheritance resolved. */
   presetValues: (section: 'process' | 'filament' | 'printer', source: 'user' | 'system', ref: number | string) =>
     farmRequest<PresetValues>(

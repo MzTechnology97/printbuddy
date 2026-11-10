@@ -7,7 +7,6 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { ArrowRight, Loader2, Save } from 'lucide-react';
-import { api } from '../../api/client';
 import { Button } from '../../components/Button';
 import { type PresetValues, type SettingValue, type WorkspaceSetting, workspaceApi } from './api';
 import { Dialog } from './Dialogs';
@@ -80,11 +79,13 @@ interface SaveProps {
   filament?: number;
   settings: WorkspaceSetting[];
   draft: Draft;
+  /** Unsaved values that don't read as their type: a preset with them isn't saved. */
+  invalid?: string[];
   onClose: () => void;
   onSaved: (name: string) => void;
 }
 
-export function SavePresetDialog({ layout, section, filament = 0, settings, draft, onClose, onSaved }: SaveProps) {
+export function SavePresetDialog({ layout, section, filament = 0, settings, draft, invalid = [], onClose, onSaved }: SaveProps) {
   const { t } = useTranslation();
   const { o, f } = useOrca(layout);
   const queryClient = useQueryClient();
@@ -95,7 +96,10 @@ export function SavePresetDialog({ layout, section, filament = 0, settings, draf
   const parent = currentUser ? currentUser.inherits : current;
   const [name, setName] = useState(() => suggestedName(current, !currentUser, o('Copy')));
   const [detach, setDetach] = useState(false);
-  const check = checkPresetName(name, users.map((u) => u.name), currentUser || !current ? [] : [current]);
+  // no system preset's name (the ones listed, and the project's own when it is one)
+  const system = [...(list.data?.system ?? []), ...(currentUser || !current ? [] : [current])];
+  const check = checkPresetName(name, users.map((u) => u.name), system);
+  const blocked = invalid.filter((k) => settings.find((s) => s.key === k)?.section === section);
   const values = useMemo(() => sectionValues(settings, draft, section, filament), [settings, draft, section, filament]);
   const changed = useMemo(
     () => settings.filter((s) => s.section === section && (s.differs_from_system || s.key in draft)).map((s) => s.key),
@@ -104,9 +108,7 @@ export function SavePresetDialog({ layout, section, filament = 0, settings, draf
   const save = useMutation({
     mutationFn: async () => {
       const setting = userPresetSetting(section, name, parent, values, changed, detach);
-      const existing = users.find((u) => u.name === name);
-      if (existing) await api.updateLocalPreset(existing.id, { setting });
-      else await api.createLocalPreset({ name, preset_type: section, setting });
+      await workspaceApi.saveUserPreset(section, name, setting, users.find((u) => u.name === name)?.id);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workspacePresets', section] });
@@ -119,7 +121,7 @@ export function SavePresetDialog({ layout, section, filament = 0, settings, draf
         className="p-4 space-y-3 text-sm"
         onSubmit={(e) => {
           e.preventDefault();
-          if (check.status !== 'invalid' && !save.isPending) save.mutate();
+          if (check.status !== 'invalid' && !blocked.length && !save.isPending) save.mutate();
         }}
       >
         <label className="block">
@@ -159,12 +161,21 @@ export function SavePresetDialog({ layout, section, filament = 0, settings, draf
             {o(parent ? 'Detach from parent' : 'Save without parent')}
           </label>
         </div>
-        {save.isError && <p className="text-xs text-red-400">{t('farm.workspace.presets.saveFailed')}</p>}
+        {blocked.length > 0 && (
+          <p className="text-xs text-red-400" role="alert">
+            {t('farm.workspace.save.invalid')}
+          </p>
+        )}
+        {save.isError && (
+          <p className="text-xs text-red-400">
+            {t('farm.workspace.presets.saveFailed')}: {save.error instanceof Error ? save.error.message : ''}
+          </p>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="ghost" onClick={onClose}>
             {o('Cancel')}
           </Button>
-          <Button type="submit" disabled={check.status === 'invalid' || save.isPending || list.isLoading}>
+          <Button type="submit" disabled={check.status === 'invalid' || blocked.length > 0 || save.isPending || list.isLoading}>
             {save.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             {o('Save')}
           </Button>

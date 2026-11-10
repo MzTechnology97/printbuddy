@@ -1,10 +1,13 @@
 """Fork (printfarm): the presets the 3MF Workspace's preset headers and its Compare presets dialog offer.
 
 ``GET /farm/workspace/presets?section=``: the user presets (Printbuddy's local presets) of a section (process,
-filament, printer). ``GET /farm/workspace/presets/values``: one preset's values with its inheritance resolved, a
-user preset by id or a system preset by name (OrcaSlicer's ``inherits`` chain, through the cached base profiles
-``services/orca_profiles`` already uses for local presets). Nothing here writes: saving a user preset is
-``POST /local-presets/``.
+filament, printer), and the system presets the base-profile cache holds. ``GET /farm/workspace/presets/values``:
+one preset's values with its inheritance resolved, a user preset by id or a cached system preset by name
+(OrcaSlicer's ``inherits`` chain).
+
+Everything here reads the base-profile cache that ``services/orca_profiles`` fills when local presets are imported:
+no network, and nothing is written. A system preset is named only as the cache has it; any other name (a path, a
+name not cached) is refused before anything is looked up. Saving a user preset is ``POST /local-presets/``.
 
 A preset switch (OrcaSlicer's preset combos) resolves from the base-profile cache only, never half: a preset whose
 chain isn't all there isn't offered, and what is offered is exactly what the saved copy gets (``switch_target``,
@@ -14,6 +17,7 @@ then ``settings.switch_preset``). ``POST /farm/workspace/presets/switch`` shows 
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -63,6 +67,20 @@ class PresetRef(BaseModel):
     name: str | None = Field(default=None, max_length=300)
 
 
+class UserPresetSave(BaseModel):
+    """A user preset as OrcaSlicer stores one (``inherits`` and the keys that differ, or detached, every value);
+    ``id``: the user preset it overwrites."""
+
+    section: Section
+    name: str = Field(min_length=1, max_length=150)
+    setting: dict[str, str | list[str]] = Field(max_length=2000)
+    id: int | None = None
+
+
+# check_preset_name (SavePresetDialog.cpp): what the dialog refuses, refused here too
+ILLEGAL_NAME = re.compile(r'[<>\[\]:/\\|?*"\x00-\x1f\x7f]')
+
+
 class SwitchRequest(BaseModel):
     settings: dict[str, str | list[str]]
     presets: list[PresetRef] = Field(max_length=66)
@@ -88,11 +106,14 @@ async def list_presets(
     rows = (
         await db.execute(select(LocalPreset).where(LocalPreset.preset_type == section).order_by(LocalPreset.name))
     ).scalars()
+    cache = await _cache(db)
     return {
         "section": section,
         "user": [
             {"id": r.id, "name": r.name, "inherits": r.inherits or _setting(r).get("inherits") or None} for r in rows
         ],
+        # the names a user preset may not take (Orca: "Overwriting a system profile is not allowed")
+        "system": sorted(n for n, (kind, data) in cache.items() if _instantiable(kind, data, section)),
     }
 
 
@@ -105,29 +126,19 @@ async def preset_values(
     db: AsyncSession = Depends(get_db),
     _: User | None = Depends(require_permission_if_auth_enabled(Permission.SETTINGS_READ)),
 ) -> dict:
-    """A preset's values with its parents merged in (child keys replace parent keys, as OrcaSlicer)."""
+    """A preset's values with its cached parents merged in (child keys replace parent keys, as OrcaSlicer)."""
+    cache = await _cache(db)
     if source == "user":
         row = await db.get(LocalPreset, id) if id is not None else None
         if row is None or row.preset_type != section:
             raise HTTPException(status_code=404, detail="Preset not found")
         data, label = _setting(row), row.name
+        if not data.get("inherits") and row.inherits:
+            data = {**data, "inherits": row.inherits}
     else:
-        if not name:
-            raise HTTPException(status_code=422, detail="name is required for a system preset")
-        data, label = {"inherits": name}, name
-    if source == "user" and not data.get("inherits") and row.inherits:
-        data = {**data, "inherits": row.inherits}
-    # the first parent up the chain that can't be found: the values above it are unknown, not the preset's
-    missing, parent, depth = None, data.get("inherits"), 0
-    while parent and depth < orca_profiles.MAX_INHERITANCE_DEPTH:
-        base = await orca_profiles.fetch_and_cache_base_profile(parent, section, db)
-        if base is None:
-            missing = parent
-            break
-        parent, depth = base.get("inherits"), depth + 1
-    if source == "system" and missing == name:
-        raise HTTPException(status_code=404, detail="System preset not found")
-    resolved = await orca_profiles.resolve_preset(dict(data), section, db)
+        data, label = _system(name, section, cache), name
+    # the first parent up the chain that isn't cached: the values above it are unknown, not the preset's
+    resolved, missing = _merge(data, cache)
     values = {k: v for k, v in resolved.items() if k not in ("inherits", "name", "from", "type", "instantiation")}
     return {
         "section": section,
@@ -152,18 +163,39 @@ async def _cache(db: AsyncSession) -> dict[str, tuple[str, dict]]:
     return out
 
 
-def _resolved(data: dict, cache: dict[str, tuple[str, dict]]) -> dict | None:
-    """``data`` with its whole ``inherits`` chain merged in (child keys win), or None when a parent isn't cached."""
-    chain, parent = [data], data.get("inherits")
+def _merge(data: dict, cache: dict[str, tuple[str, dict]]) -> tuple[dict, str | None]:
+    """``data`` with its ``inherits`` chain merged in (child keys win) as far as the cache has it, and the first
+    parent it doesn't have (None: the whole chain)."""
+    chain, parent, missing = [data], data.get("inherits"), None
     while parent:
         if parent not in cache or len(chain) > orca_profiles.MAX_INHERITANCE_DEPTH:
-            return None
+            missing = parent
+            break
         chain.append(cache[parent][1])
         parent = chain[-1].get("inherits")
     merged: dict = {}
     for d in reversed(chain):
         merged.update(d)
-    return merged
+    return merged, missing
+
+
+def _resolved(data: dict, cache: dict[str, tuple[str, dict]]) -> dict | None:
+    """``data`` with its whole ``inherits`` chain merged in, or None when a parent isn't cached."""
+    merged, missing = _merge(data, cache)
+    return None if missing else merged
+
+
+def _system(name: str | None, section: str, cache: dict[str, tuple[str, dict]]) -> dict:
+    """The cached system preset ``name`` of ``section``: 422 for what can't be a preset's name, 404 for one not
+    cached (it is never fetched from here)."""
+    if not name:
+        raise HTTPException(status_code=422, detail="name is required for a system preset")
+    if orca_profiles.UNSAFE_NAME.search(name):
+        raise HTTPException(status_code=422, detail="Not a preset name")
+    kind, data = cache.get(name, ("", {}))
+    if not _instantiable(kind, data, section):
+        raise HTTPException(status_code=404, detail="System preset not found")
+    return data
 
 
 def _instantiable(kind: str, data: dict, section: str) -> bool:
@@ -198,13 +230,50 @@ async def switch_target(db: AsyncSession, ref: PresetRef, cache: dict | None = N
         inherits = data.get("inherits") or row.inherits or ""
         target = _target(ref.section, row.name, inherits, {**data, "inherits": inherits}, cache, ref.index)
     else:
-        kind, data = cache.get(ref.name or "", ("", {}))
-        if not _instantiable(kind, data, ref.section):
-            raise HTTPException(status_code=404, detail="System preset not found")
+        data = _system(ref.name, ref.section, cache)
         target = _target(ref.section, ref.name, "", data, cache, ref.index)
     if target is None:
         raise HTTPException(status_code=422, detail="This preset's inheritance isn't fully known: it can't be applied")
     return target
+
+
+@router.post("/user")
+async def save_user_preset(
+    body: UserPresetSave,
+    db: AsyncSession = Depends(get_db),
+    _: User | None = Depends(require_permission_if_auth_enabled(Permission.SETTINGS_UPDATE)),
+) -> dict:
+    """Save Save preset's user preset: the name checked as Orca checks it (no system preset's name), every value
+    checked as an edit is, the parent a plain name. Stored as given (the parent and the keys that differ), never
+    resolved over the network."""
+    name = body.name
+    cache = await _cache(db)
+    if ILLEGAL_NAME.search(name) or name != name.strip() or "(modified)" in name:
+        raise HTTPException(status_code=422, detail="Name is invalid")
+    if name in cache or name in ("Default Setting", "Default Filament", "Default Printer"):
+        raise HTTPException(status_code=422, detail="Overwriting a system profile is not allowed.")
+    if errors := ws_settings.preset_errors(body.setting, body.section):
+        raise HTTPException(
+            status_code=422, detail=f"Some values were refused: {ws_settings.InvalidChange(errors)}"[:1000]
+        )
+    inherits = body.setting.get("inherits") or ""
+    if inherits and orca_profiles.UNSAFE_NAME.search(inherits):
+        raise HTTPException(status_code=422, detail="Not a preset name")
+    same = await db.scalar(select(LocalPreset).where(LocalPreset.preset_type == body.section, LocalPreset.name == name))
+    row = await db.get(LocalPreset, body.id) if body.id is not None else None
+    if body.id is not None and (row is None or row.preset_type != body.section):
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if same is not None and same is not row:
+        raise HTTPException(status_code=409, detail=f'Preset "{name}" already exists.')
+    core = orca_profiles.extract_core_fields(_merge(dict(body.setting), cache)[0])
+    if row is None:
+        row = LocalPreset(name=name, preset_type=body.section, source="manual")
+        db.add(row)
+    row.name, row.setting, row.inherits = name, json.dumps(body.setting), inherits or None
+    for key, value in core.items():
+        setattr(row, key, value)
+    await db.commit()  # saved when the answer says so
+    return {"id": row.id, "name": row.name}
 
 
 @router.get("/offered")

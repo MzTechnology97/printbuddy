@@ -3,11 +3,13 @@
  * section's values, the differences between two presets, what a saved user preset holds, and both dialogs.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { render } from '../utils';
-import type { WorkspaceSetting } from '../../farm/workspace/api';
+import { act, fireEvent, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { createTestQueryClient, render } from '../utils';
+import type { PresetRef, SettingValue, WorkspaceSetting } from '../../farm/workspace/api';
+import type { Draft } from '../../farm/workspace/draft';
+import { usePresetSwitch } from '../../farm/workspace/presetSwitch';
 import { workspaceApi } from '../../farm/workspace/api';
-import { api } from '../../api/client';
 import type { OrcaLayout } from '../../farm/workspace/orcaLayout';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from '../../farm/workspace/PresetDialogs';
 import { checkPresetName, draftAfterSwitch, presetDiff, sectionValues, suggestedName, unsavedKeys, userPresetSetting, withSwitched } from '../../farm/workspace/presetTools';
@@ -67,11 +69,15 @@ describe('presetTools', () => {
 
 describe('SavePresetDialog', () => {
   beforeEach(() => {
-    vi.spyOn(workspaceApi, 'presets').mockResolvedValue({ section: 'process', user: [{ id: 7, name: 'Mine', inherits: '0.20mm Standard @Test' }] });
+    vi.spyOn(workspaceApi, 'presets').mockResolvedValue({
+      section: 'process',
+      user: [{ id: 7, name: 'Mine', inherits: '0.20mm Standard @Test' }],
+      system: ['0.12mm Fine @Test', '0.20mm Standard @Test'],
+    });
   });
 
   it('saves the changes on top of the system preset as a new user preset', async () => {
-    const create = vi.spyOn(api, 'createLocalPreset').mockResolvedValue({} as never);
+    const create = vi.spyOn(workspaceApi, 'saveUserPreset').mockResolvedValue({ id: 8, name: 'Fine 0.16' });
     const onSaved = vi.fn();
     render(<SavePresetDialog layout={LAYOUT} section="process" settings={SETTINGS} draft={{ layer_height: '0.16' }} onClose={vi.fn()} onSaved={onSaved} />);
     const name = screen.getByRole('textbox');
@@ -80,15 +86,16 @@ describe('SavePresetDialog', () => {
     fireEvent.change(name, { target: { value: 'Fine 0.16' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Fine 0.16'));
-    expect(create).toHaveBeenCalledWith({
-      name: 'Fine 0.16',
-      preset_type: 'process',
-      setting: { layer_height: '0.16', wall_loops: '3', name: 'Fine 0.16', from: 'User', type: 'process', inherits: '0.20mm Standard @Test' },
-    });
+    expect(create).toHaveBeenCalledWith(
+      'process',
+      'Fine 0.16',
+      { layer_height: '0.16', wall_loops: '3', name: 'Fine 0.16', from: 'User', type: 'process', inherits: '0.20mm Standard @Test' },
+      undefined,
+    );
   });
 
   it('warns before overwriting a user preset, refuses a bad name, and overwrites when asked', async () => {
-    const update = vi.spyOn(api, 'updateLocalPreset').mockResolvedValue({} as never);
+    const update = vi.spyOn(workspaceApi, 'saveUserPreset').mockResolvedValue({ id: 7, name: 'Mine' });
     render(<SavePresetDialog layout={LAYOUT} section="process" settings={SETTINGS} draft={{}} onClose={vi.fn()} onSaved={vi.fn()} />);
     const name = screen.getByRole('textbox');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
@@ -97,7 +104,30 @@ describe('SavePresetDialog', () => {
     fireEvent.change(name, { target: { value: 'Mine' } });
     expect(screen.getByRole('status')).toHaveTextContent('Preset "Mine" already exists.');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith(7, expect.objectContaining({ setting: expect.objectContaining({ inherits: '0.20mm Standard @Test' }) })));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith('process', 'Mine', expect.objectContaining({ inherits: '0.20mm Standard @Test' }), 7),
+    );
+  });
+
+  it("never takes a system preset's name, the project's own or any other", async () => {
+    render(<SavePresetDialog layout={LAYOUT} section="process" settings={SETTINGS} draft={{}} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const name = screen.getByRole('textbox');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled());
+    fireEvent.change(name, { target: { value: '0.12mm Fine @Test' } });
+    expect(screen.getByRole('status')).toHaveTextContent('Overwriting a system profile is not allowed.');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('refuses while an unsaved value of the section is invalid', async () => {
+    const save = vi.spyOn(workspaceApi, 'saveUserPreset');
+    save.mockClear();
+    render(
+      <SavePresetDialog layout={LAYOUT} section="process" settings={SETTINGS} draft={{ layer_height: 'abc' }} invalid={['layer_height']} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('textbox').closest('form')!);
+    expect(save).not.toHaveBeenCalled();
   });
 });
 
@@ -172,5 +202,50 @@ describe('preset switch (the preset combos)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Discard' }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect([transfer, discard, close].map((f) => f.mock.calls.length)).toEqual([1, 1, 1]);
+  });
+});
+
+describe('usePresetSwitch: a preview applies onto the page as it is when it comes back', () => {
+  const WITH_DIFF = [...SETTINGS, setting('different_settings_to_system', null, ['', '', '', ''], { editable: false, readonly_reason: 'identity' })];
+  const ref = (name: string): PresetRef => ({ section: 'process', index: 0, source: 'system', name });
+  const deferred = () => {
+    let resolve!: (v: { values: Record<string, SettingValue> }) => void;
+    return { promise: new Promise<{ values: Record<string, SettingValue> }>((r) => (resolve = r)), resolve: (v: { values: Record<string, SettingValue> }) => resolve(v) };
+  };
+  const setup = () => {
+    const page = { settings: WITH_DIFF, draft: {} as Draft, replace: vi.fn((d: Draft) => (page.draft = d)) };
+    const wrapper = ({ children }: { children: React.ReactNode }) => <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>;
+    const hook = renderHook(() => usePresetSwitch(WITH_DIFF, () => page, vi.fn()), { wrapper });
+    return { page, hook };
+  };
+
+  it('keeps an edit typed while the preview runs, and takes no other pick meanwhile', async () => {
+    const first = deferred();
+    const preview = vi.spyOn(workspaceApi, 'previewSwitch').mockReturnValueOnce(first.promise);
+    const { page, hook } = setup();
+    act(() => hook.result.current.pick(ref('0.12mm Fine @Test')));
+    await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    act(() => hook.result.current.pick(ref('0.16mm Other @Test'))); // ignored: one at a time
+    page.draft = { wall_loops: '4' }; // typed meanwhile
+    await act(async () => first.resolve({ values: { layer_height: '0.12', print_settings_id: '0.12mm Fine @Test' } }));
+    expect(preview).toHaveBeenCalledTimes(1);
+    // the edit typed meanwhile is seen: the unsaved-changes dialog asks about it, and Transfer keeps it
+    await waitFor(() => expect(hook.result.current.pending?.keys).toEqual(['wall_loops']));
+    act(() => hook.result.current.commit(hook.result.current.pending!, true));
+    expect(hook.result.current.switched.refs).toEqual([ref('0.12mm Fine @Test')]);
+    expect(page.draft).toEqual({ wall_loops: '4' });
+  });
+
+  it('drops an answer that comes back after the switches were undone', async () => {
+    const first = deferred();
+    vi.spyOn(workspaceApi, 'previewSwitch').mockReturnValueOnce(first.promise);
+    const { page, hook } = setup();
+    act(() => hook.result.current.pick(ref('0.12mm Fine @Test')));
+    await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    act(() => hook.result.current.reset()); // Undo all while it runs
+    await act(async () => first.resolve({ values: { layer_height: '0.12' } }));
+    await waitFor(() => expect(hook.result.current.busy).toBe(false));
+    expect(hook.result.current.switched.refs).toEqual([]);
+    expect(page.replace).not.toHaveBeenCalled();
   });
 });

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from sqlalchemy import select
 
 from backend.app.api.routes import library
 from backend.app.farm.workspace import presets, project, settings as ws
@@ -28,14 +29,26 @@ BASES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Nothing here goes out: any outbound request fails the test."""
+
+    class Offline:
+        def AsyncClient(*args, **kwargs):  # noqa: N802 - httpx's name
+            raise AssertionError("an outbound request was made")
+
+    monkeypatch.setattr(orca_profiles, "httpx", Offline)
+
+
 @pytest.fixture
-def bases(monkeypatch):
-    """System presets come from the cached OrcaSlicer base profiles: test ones, no network."""
+async def bases(db_session):
+    """System presets come from the cached OrcaSlicer base profiles: test rows."""
+    db_session.add_all(OrcaBaseProfile(name=n, profile_type="process", setting=json.dumps(d)) for n, d in BASES.items())
+    await db_session.commit()
 
-    async def fetch(name, profile_type, db):
-        return dict(BASES[name]) if name in BASES else None
 
-    monkeypatch.setattr(orca_profiles, "fetch_and_cache_base_profile", fetch)
+async def cache_rows(db) -> int:
+    return len((await db.execute(select(OrcaBaseProfile))).scalars().all())
 
 
 @pytest.mark.asyncio
@@ -104,7 +117,9 @@ async def test_resolves_a_system_preset_by_name(async_client, bases):
     assert resp.status_code == 200, resp.text
     assert resp.json()["values"] == {"layer_height": "0.2", "wall_loops": "2", "sparse_infill_density": "15%"}
     missing = await async_client.get(f"{API}/values", params={"section": "process", "source": "system", "name": "Nope"})
-    assert missing.status_code == 404
+    assert missing.status_code == 404  # not cached: never fetched
+    other = {"section": "filament", "source": "system", "name": "Test Process 0.20 @Base"}
+    assert (await async_client.get(f"{API}/values", params=other)).status_code == 404  # another section's
     assert (
         await async_client.get(f"{API}/values", params={"section": "process", "source": "system"})
     ).status_code == 422
@@ -253,3 +268,108 @@ async def test_previews_and_saves_a_switch_on_the_copy_only(async_client, db_ses
     assert library.to_absolute_path(f.file_path).read_bytes() == original  # the original is never touched
     rejected = await save(async_client, doc, {}, presets=[orphan])
     assert rejected.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    ["../../../../../../../attacker/repo/main/evil", "a/b", "a\\b", "..", "x\x00y", "line\nbreak"],
+)
+async def test_a_path_or_control_character_is_never_a_preset_name(async_client, db_session, bases, name):
+    before = await cache_rows(db_session)
+    resp = await async_client.get(f"{API}/values", params={"section": "process", "source": "system", "name": name})
+    assert resp.status_code == 422, resp.text
+    switch = {"settings": project_settings(), "presets": [{"section": "process", "source": "system", "name": name}]}
+    assert (await async_client.post(f"{API}/switch", json=switch)).status_code == 422
+    assert await cache_rows(db_session) == before  # nothing fetched, nothing cached
+
+
+@pytest.mark.asyncio
+async def test_reading_presets_writes_nothing(async_client, db_session, bases):
+    before = await cache_rows(db_session)
+    for params in (
+        {"section": "process", "source": "system", "name": "Test Process 0.20 @Base"},
+        {"section": "process", "source": "system", "name": "Not cached"},
+    ):
+        await async_client.get(f"{API}/values", params=params)
+    assert await cache_rows(db_session) == before
+
+
+@pytest.mark.asyncio
+async def test_the_base_profile_fetch_refuses_a_path(db_session):
+    for name in ("../../x", "a/b", "a\\b", "x\x00", None):
+        assert await orca_profiles.fetch_and_cache_base_profile(name, "process", db_session) is None
+
+
+class TestSwitchedValuesAreChecked:
+    @pytest.mark.parametrize(
+        ("key", "value", "error"),
+        [
+            ("layer_height", "abc", "not a number"),
+            ("outer_wall_speed", "-5", "below the minimum"),
+            ("sparse_infill_pattern", "grid\x01", "not one of the options"),
+        ],
+    )
+    def test_a_value_that_is_not_one_refuses_the_whole_switch(self, key, value, error):
+        target = _switch_target("0.12mm Fine @Test", "process")
+        target["values"][key] = value
+        cfg = project_settings()
+        with pytest.raises(ws.InvalidChange, match=error) as exc:
+            ws.switch_preset(cfg, target)
+        assert key in exc.value.errors and cfg == project_settings()
+
+    def test_old_values_read_as_orca_reads_them(self):
+        target = _switch_target("0.12mm Fine @Test", "process")
+        target["values"].update({"enable_arc_fitting": "1", "tree_support_wall_count": "-1"})
+        cfg, _ = ws.switch_preset(project_settings(enable_arc_fitting="disabled", tree_support_wall_count="2"), target)
+        assert (cfg["enable_arc_fitting"], cfg["tree_support_wall_count"]) == ("enabled", "0")
+
+    def test_a_printer_presets_thumbnail_size_list_is_the_projects_thumbnails_string(self):
+        target = _switch_target("Test Printer 0.4 nozzle", "printer")
+        target["values"]["thumbnail_size"] = ["50x50"]  # as the BBL machine profiles hold it
+        cfg, _ = ws.switch_preset(project_settings(thumbnails="96x96/PNG"), target)
+        assert cfg["thumbnails"] == "50x50"
+
+    def test_inherited_nil_stays_for_a_filament(self):
+        target = _switch_target("Test PETG HF", "filament", index=1)
+        target["values"]["filament_retraction_length"] = ["nil"]
+        cfg, _ = ws.switch_preset(project_settings(filament_retraction_length=["0.5", "0.6"]), target)
+        assert cfg["filament_retraction_length"] == ["0.5", "nil"]
+
+
+class TestSaveUserPreset:
+    URL = f"{API}/user"
+    GOOD = {
+        "inherits": "0.12mm Fine @Test",
+        "name": "Fine 0.10",
+        "from": "User",
+        "type": "process",
+        "layer_height": "0.1",
+    }
+
+    async def test_saves_the_parent_and_the_changes_as_given(self, async_client, db_session, cached):
+        resp = await async_client.post(self.URL, json={"section": "process", "name": "Fine 0.10", "setting": self.GOOD})
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LocalPreset, resp.json()["id"])
+        assert row.inherits == "0.12mm Fine @Test" and json.loads(row.setting) == self.GOOD  # not resolved
+        again = {"section": "process", "name": "Fine 0.10", "setting": self.GOOD}
+        assert (await async_client.post(self.URL, json=again)).status_code == 409  # exists: overwrite by id only
+        again["id"] = row.id
+        assert (await async_client.post(self.URL, json=again)).status_code == 200
+
+    @pytest.mark.parametrize(
+        ("name", "setting"),
+        [
+            ("Fine 0.10", {"layer_height": "abc"}),  # not a number
+            ("Fine 0.10", {"outer_wall_speed": "-5"}),  # below the minimum
+            ("Fine 0.10", {"nozzle_temperature": ["220"]}),  # a filament key in a process preset
+            ("Fine 0.10", {"print_settings_id": "x"}),  # identity
+            ("Fine 0.10", {"inherits": "../../evil"}),  # a path as the parent
+            ("0.12mm Fine @Test", {"layer_height": "0.1"}),  # a system preset's name
+            ("bad:name", {"layer_height": "0.1"}),  # check_preset_name
+            (" lead", {"layer_height": "0.1"}),
+        ],
+    )
+    async def test_refuses_what_the_slicer_would_not_take(self, async_client, db_session, cached, name, setting):
+        resp = await async_client.post(self.URL, json={"section": "process", "name": name, "setting": setting})
+        assert resp.status_code == 422, resp.text

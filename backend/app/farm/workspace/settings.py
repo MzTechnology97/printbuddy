@@ -406,8 +406,72 @@ def apply_changes(settings: dict, changes: dict, slicer: str = "orcaslicer") -> 
 
 
 SETTINGS_ID = {"process": "print_settings_id", "filament": "filament_settings_id", "printer": "printer_settings_id"}
+# PrintConfigDef::handle_legacy's renames that system presets still use (thumbnail_size, a list in the BBL machine
+# profiles, is the string option thumbnails)
+LEGACY_KEYS = {
+    "thumbnail_size": "thumbnails",
+    "sparse_infill_anchor": "infill_anchor",
+    "sparse_infill_anchor_max": "infill_anchor_max",
+    "chamber_temperatures": "chamber_temperature",
+}
+ZIGZAG_PATTERNS = (
+    "sparse_infill_pattern",
+    "top_surface_pattern",
+    "bottom_surface_pattern",
+    "internal_solid_infill_pattern",
+    "ironing_pattern",
+    "support_ironing_pattern",
+)
+
+
+def legacy_value(key: str, value: str) -> str:
+    """A system preset's old value as OrcaSlicer reads it (PrintConfigDef::handle_legacy, v2.5.0): the public
+    profiles still hold some (fdm_process_common: enable_arc_fitting 1, tree_support_wall_count -1)."""
+    if key == "enable_arc_fitting":
+        return {"1": "enabled", "true": "enabled", "0": "disabled", "false": "disabled"}.get(value.lower(), value)
+    if key == "ensure_vertical_shell_thickness":
+        return {"1": "ensure_all", "0": "ensure_moderate"}.get(value, value)
+    if key == "tree_support_wall_count" and value == "-1":
+        return "0"
+    if key == "support_base_pattern" and value == "none":
+        return "hollow"
+    if key == "draft_shield" and value == "limited":
+        return "disabled"
+    if key in ZIGZAG_PATTERNS and value == "zig-zag":
+        return "rectilinear"
+    return value
+
+
 # what a printer preset switch must keep: the model and nozzle the copy's machine G-code, bed and farm queue go with
 SAME_PRINTER = ("printer_model", "printer_variant", "nozzle_diameter")
+
+
+PRESET_META = frozenset({"name", "from", "type", "inherits"})  # what a user preset file holds besides its values
+
+
+def preset_errors(setting: dict, section: str, slicer: str = "orcaslicer") -> dict[str, str]:
+    """Why a user preset's ``setting`` can't be saved, by key (empty: it can): every value must be one of the
+    section's settings and read as its type, as an edit must; identity keys are never in one."""
+    known = options(slicer)
+    errors: dict[str, str] = {}
+    if sum(len(str(v).encode("utf-8")) for v in setting.values()) > MAX_CHANGES:
+        return {"setting": f"larger than {MAX_CHANGES // (1024 * 1024)} MB in total"}
+    for key, value in setting.items():
+        if key in PRESET_META:
+            if not isinstance(value, str) or _CONTROL_RE.search(value) or "\n" in value:
+                errors[key] = "not a name"
+            continue
+        option = known.get(key)
+        if key in IDENTITY or option is None or option.get("section") != section:
+            errors[key] = "not a setting of this preset"
+            continue
+        for v in value if isinstance(value, list) else [value]:
+            text = legacy_value(key, str(v))
+            reason = None if text == NIL and option.get("nullable") else _check(option, text)
+            if reason:
+                errors[key] = reason
+                break
+    return errors
 
 
 def switch_refusal(target: dict, settings: dict) -> str | None:
@@ -464,21 +528,36 @@ def switch_preset(settings: dict, target: dict, slicer: str = "orcaslicer") -> t
 
     # shortcut: a key no preset of the chain holds keeps the project's value, where OrcaSlicer would take its built-in
     # default (PrintConfig.cpp); the defaults aren't in slicer_options yet. Add them there to close the gap.
-    for key, new in target["values"].items():
+    values = {LEGACY_KEYS.get(k, k): v for k, v in target["values"].items()}
+    for key, new in values.items():
         option = known.get(key)
         if key in IDENTITY or not option or option.get("section") != section or key not in settings:
             continue
-        old, news = settings[key], _elements(new)
+        old = settings[key]
+        if not isinstance(old, list) and isinstance(new, list):
+            new = ",".join(map(str, new))  # a list for a single value: joined, as ConfigBase::load_from_json
+        news = _elements(new)
         if section == "filament":
             # one value per filament, its preset's first (ConfigOptionVector::set in full_fff_config)
             if not isinstance(old, list) or len(old) != filaments or not news:
                 errors[key] = "per-variant values: not switched here"
                 continue
-            put(key, [*old[:index], str(news[0]), *old[index + 1 :]])
+            pairs = [(news[0], old[index])]
         elif isinstance(old, list) != isinstance(new, list) or (isinstance(old, list) and len(old) != len(new)):
             errors[key] = "another per-extruder layout"
+            continue
         else:
-            put(key, [str(v) for v in new] if isinstance(new, list) else str(new))
+            pairs = list(zip(news, _elements(old), strict=True))
+        try:  # checked as an edit is: type, range, enum, control characters; the project's format kept
+            pairs = [(legacy_value(key, str(n)), o) for n, o in pairs]
+            checked = [n if n == NIL and option.get("nullable") else _normalize(option, n, o) for n, o in pairs]
+        except ValueError as exc:
+            errors[key] = f"the preset's value doesn't fit: {exc}"
+            continue
+        if section == "filament":
+            put(key, [*old[:index], checked[0], *old[index + 1 :]])
+        else:
+            put(key, checked if isinstance(old, list) else checked[0])
     if errors:
         raise InvalidChange(errors)
 

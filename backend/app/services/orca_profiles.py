@@ -10,6 +10,7 @@ Handles:
 import io
 import json
 import logging
+import re
 import zipfile
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 ORCA_BASE_URL = "https://raw.githubusercontent.com/SoftFever/OrcaSlicer/main/resources/profiles/BBL"
 CACHE_TTL_DAYS = 7
 MAX_INHERITANCE_DEPTH = 10
+# never part of a profile name: a path (the name goes into the GitHub URL), or control characters
+UNSAFE_NAME = re.compile(r"[/\\\x00-\x1f\x7f]|\.\.")
 
 
 async def get_cached_base_profile(name: str, db: AsyncSession) -> dict | None:
@@ -49,7 +52,11 @@ async def get_cached_base_profile(name: str, db: AsyncSession) -> dict | None:
 
 
 async def fetch_and_cache_base_profile(name: str, profile_type: str, db: AsyncSession) -> dict | None:
-    """Fetch a base profile from OrcaSlicer GitHub and cache it."""
+    """Fetch a base profile from OrcaSlicer GitHub and cache it. A name that isn't a plain profile name (``..``, a
+    slash, control characters) is never fetched."""
+    if not isinstance(name, str) or not name or UNSAFE_NAME.search(name):
+        logger.warning("Base profile name refused: %r", name[:100] if name else name)
+        return None
     # Check cache first
     cached = await get_cached_base_profile(name, db)
     if cached is not None:
