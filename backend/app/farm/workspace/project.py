@@ -38,6 +38,8 @@ MAX_ENTRIES = 10_000
 MAX_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RATIO = 200  # inflation of one big entry beyond this is a ZIP bomb, not a mesh
 MAX_CONFIG_BYTES = 32 * 1024 * 1024  # project / model settings, read whole
+# 3D/3dmodel.model, read whole only to place instances anew (Orca keeps its meshes in it; only <build> is parsed)
+MAX_MODEL_BYTES = 256 * 1024 * 1024
 _COPY_CHUNK = 1024 * 1024
 
 # What the workspace can do with a file
@@ -91,17 +93,36 @@ def open_archive(data: bytes | Path) -> zipfile.ZipFile:
     return zf
 
 
-def _read_small(zf: zipfile.ZipFile, name: str) -> bytes | None:
+def _read_small(zf: zipfile.ZipFile, name: str, limit: int = MAX_CONFIG_BYTES) -> bytes | None:
     try:
         info = zf.getinfo(name)
     except KeyError:
         return None
-    if info.file_size > MAX_CONFIG_BYTES:
+    if info.file_size > limit:
         raise ArchiveError(f"{name} is too large")
     try:
         return zf.read(info)
     except _ENTRY_ERRORS as exc:
         raise ArchiveError(f"{name} cannot be read: {exc}") from exc
+
+
+def cannot_place(zf: zipfile.ZipFile) -> str | None:
+    """Why a copy of this archive can't place instances anew (None: it can), known before anything is moved."""
+    try:
+        info = zf.getinfo(MODEL_ENTRY)
+    except KeyError:
+        return f"it has no {MODEL_ENTRY}"
+    if info.file_size > MAX_MODEL_BYTES:
+        return f"its {MODEL_ENTRY} is larger than {MAX_MODEL_BYTES // (1024 * 1024)} MB"
+    return None
+
+
+def read_model(zf: zipfile.ZipFile) -> bytes:
+    """``3D/3dmodel.model`` to place instances in; ``ArchiveError`` when ``cannot_place`` says why not."""
+    why = cannot_place(zf)
+    if why:
+        raise ArchiveError(f"the objects can't be placed anew: {why}")
+    return _read_small(zf, MODEL_ENTRY, MAX_MODEL_BYTES) or b""
 
 
 def read_settings(zf: zipfile.ZipFile) -> dict | None:
@@ -204,10 +225,13 @@ def write_copy(data: bytes, settings: dict, dest: Path, replaced: dict[str, byte
     zin = open_archive(data)
     if set(replaced) - set(zin.namelist()) or PROJECT_SETTINGS_ENTRY in replaced:
         raise ArchiveError("the copy can only replace entries the archive has")
+    # settings with the same values keep their bytes (Bambu Studio's line breaks, say): a copy that only places
+    # instances changes nothing else
+    same_settings = read_settings(zin) == settings
     try:
         with zipfile.ZipFile(dest, "w") as zout:
             for info in zin.infolist():
-                if info.filename == PROJECT_SETTINGS_ENTRY:
+                if info.filename == PROJECT_SETTINGS_ENTRY and not same_settings:
                     zout.writestr(info, json.dumps(settings, indent=4, ensure_ascii=False).encode("utf-8"))
                 elif info.filename in replaced:
                     zout.writestr(info, replaced[info.filename])

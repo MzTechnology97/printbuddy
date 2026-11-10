@@ -540,6 +540,7 @@ const en = {
     },
     move: {
       objectLater: 'comes with Rotate and Scale',
+      tooLarge: "This project's model is too large to save objects moved in a copy",
     },
     topbar: {
       menu: 'Menu',
@@ -1248,6 +1249,7 @@ const it: typeof en = {
     },
     move: {
       objectLater: 'arriva con Ruota e Ridimensiona',
+      tooLarge: 'Il modello di questo progetto è troppo grande per salvare gli oggetti spostati in una copia',
     },
     topbar: {
       menu: 'Menu',

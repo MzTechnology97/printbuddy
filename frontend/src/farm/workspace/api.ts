@@ -70,6 +70,8 @@ export interface WorkspaceDocument {
   slicer: string;
   application: string | null;
   editable: boolean;
+  /** why a copy of this file can't hold objects moved (its model is too large to rewrite); null: it can */
+  cannot_place?: string | null;
   plates: WorkspacePlate[];
   objects: WorkspaceObject[];
   warnings: string[];

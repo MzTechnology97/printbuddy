@@ -328,9 +328,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const moveObjects = selectedIds.length ? selectedIds : selection?.kind === 'object' && !selection.partId ? [selection.id] : [];
   const moveInstance = !selectedIds.length && selection?.kind === 'object' ? selection.instance : null;
   const moveKeys = useMemo(
-    () => (doc.editable ? selectedItems(view, moveObjects, moveInstance) : []),
+    () => (doc.editable && !doc.cannot_place ? selectedItems(view, moveObjects, moveInstance) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the objects selected, by id
-    [view, doc.editable, moveObjects.join('|'), moveInstance],
+    [view, doc.editable, doc.cannot_place, moveObjects.join('|'), moveInstance],
   );
   const moveTip = useRef<[number, number, number]>([0, 0, 0]);
   const [dragTip, setDragTip] = useState<{ text: string; x: number; y: number } | null>(null);
@@ -361,9 +361,12 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     // eslint-disable-next-line react-hooks/exhaustive-deps -- again when the placements or the scene change
   }, [view, placed]);
   const moveBy = (d: [number, number, number]) => view && place(withMoved(view, placed, moveKeys, d));
-  const toolReady: Record<string, true | string> = doc.editable
-    ? { move: moveKeys.length ? true : orcaText(layout, 'Please select at least one object.', i18n.language) }
-    : {};
+  // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
+  const toolReady: Record<string, true | string> = !doc.editable
+    ? {}
+    : doc.cannot_place
+      ? { move: t('farm.workspace.move.tooLarge') }
+      : { move: moveKeys.length ? true : orcaText(layout, 'Please select at least one object.', i18n.language) };
   useEffect(() => {
     if (view) highlight(view, JSON.parse(targetsKey) as Target[], canvas.outline);
   }, [view, targetsKey, canvas.outline, placed]);

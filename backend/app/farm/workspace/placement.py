@@ -4,7 +4,8 @@ An instance is a build item of ``3D/3dmodel.model``: bbs_3mf writes one ``<item>
 instance order, so the n-th item of an object is its instance n (the 3D view counts them the same way).
 Its ``transform`` attribute (a 3x4 matrix by rows, the translation last, as 3MF has it) is the only
 thing a placement changes. The bytes around it, the meshes, the parts and their own matrices stay as
-they are, and the result is parsed back and compared item by item.
+they are, and the result is parsed back and compared item by item. Only ``<build>…</build>`` is parsed
+(inside the model's own root tag, for its namespaces): OrcaSlicer keeps every mesh in the same file.
 
 Shortcut: the assembly view's own placement (``assemble_item`` in ``model_settings.config``) and the
 plate thumbnails are left as they were. The slicer uses neither to slice, and remakes the thumbnails at
@@ -25,6 +26,8 @@ MAX_OFFSET = 100_000.0  # mm from the origin: far beyond any bed, short of nonse
 MIN_SCALE, MAX_SCALE = 1e-3, 1e3  # per axis
 IDENTITY = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
 
+_ROOT = re.compile(rb"<model\b[^>]*>")
+_BUILD = re.compile(rb"<build\b[^>]*>")
 _ITEM = re.compile(rb"<item\b[^>]*>")
 _OBJECT_ID = re.compile(rb"""\sobjectid\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _TRANSFORM = re.compile(rb"""\stransform\s*=\s*(?:"([^"]*)"|'([^']*)')""")
@@ -80,14 +83,26 @@ def _numbers(text: str | None) -> tuple[float, ...]:
     return values
 
 
+def _build_span(model: bytes) -> tuple[int, int]:
+    """Where ``<build>…</build>`` is in the model (after ``</resources>``, so a mesh can't hold it)."""
+    start = _BUILD.search(model, max(0, model.rfind(b"</resources>")))
+    end = model.find(b"</build>", start.end()) if start else -1
+    if start is None or end < 0:
+        raise InvalidPlacement("the model has no build items to place")
+    return start.start(), end + len(b"</build>")
+
+
 def _build_items(model: bytes) -> list[dict[str, str]]:
+    """The build items' attributes, parsing ``<build>`` alone inside the model's root tag (its namespaces)."""
+    root = _ROOT.search(model)
+    if root is None:
+        raise InvalidPlacement("3D/3dmodel.model has no <model> root")
+    start, end = _build_span(model)
     try:
-        root = SafeET.fromstring(model)
-    except (SafeET.ParseError, DefusedXmlException) as exc:
-        raise InvalidPlacement(f"3D/3dmodel.model is not valid XML: {exc}") from exc
-    build = next((el for el in root if el.tag.rsplit("}", 1)[-1] == "build"), None)
-    items = [] if build is None else [el for el in build if el.tag.rsplit("}", 1)[-1] == "item"]
-    return [dict(el.attrib) for el in items]
+        build = SafeET.fromstring(root.group(0) + model[start:end] + b"</model>")[0]
+    except (SafeET.ParseError, DefusedXmlException, IndexError) as exc:
+        raise InvalidPlacement(f"the model's build items are not valid XML: {exc}") from exc
+    return [dict(el.attrib) for el in build if el.tag.rsplit("}", 1)[-1] == "item"]
 
 
 def _without_transform(attrs: dict[str, str]) -> dict[str, str]:
@@ -97,13 +112,10 @@ def _without_transform(attrs: dict[str, str]) -> dict[str, str]:
 def place(model: bytes, transforms: list[InstanceTransform]) -> tuple[bytes, list[dict]]:
     """``model`` with each instance's ``transform`` replaced; the placements made, as the copy records them."""
     items_before = _build_items(model)
-    start = re.search(rb"<build\b[^>]*>", model)
-    end = model.find(b"</build>", start.end()) if start else -1
-    if start is None or end < 0:
-        raise InvalidPlacement("the model has no build items to place")
+    start, end = _build_span(model)
     found: dict[tuple[str, int], re.Match] = {}
     count: dict[str, int] = {}
-    for m in _ITEM.finditer(model, start.end(), end):
+    for m in _ITEM.finditer(model, start, end):
         oid = _OBJECT_ID.search(m.group(0))
         if oid is None:
             continue

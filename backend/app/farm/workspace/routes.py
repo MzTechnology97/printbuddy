@@ -84,6 +84,8 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         "slicer": slicer,
         "application": application,
         "editable": editable,
+        # why Move can't be saved in a copy of this file (None: it can), so the 3D view says so before a move
+        "cannot_place": project.cannot_place(zf) if editable else None,
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
@@ -199,10 +201,7 @@ def _build_copy(
         new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
         replaced, placed = {}, []
         if transforms:
-            model = project._read_small(zf, project.MODEL_ENTRY)
-            if model is None:
-                raise HTTPException(status_code=400, detail="This project's model can't be placed anew")
-            replaced[project.MODEL_ENTRY], placed = placement.place(model, transforms)
+            replaced[project.MODEL_ENTRY], placed = placement.place(project.read_model(zf), transforms)
         applied = switched + applied + placed
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")

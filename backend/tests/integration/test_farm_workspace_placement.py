@@ -6,7 +6,9 @@ every other entry, stays as it was; the original is untouched.
 
 from __future__ import annotations
 
+import io
 import math
+import zipfile
 
 import pytest
 
@@ -84,8 +86,34 @@ class TestPlace:
         with pytest.raises(placement.InvalidPlacement, match="placed twice"):
             placement.place(model, twice)
 
+    def test_only_the_build_is_parsed_inside_the_models_root_tag(self, monkeypatch):
+        # an Orca model with its meshes inline: they are not parsed (a mesh here is not even valid XML), and
+        # Bambu Studio's p:UUID resolves through the root tag's namespace
+        model = (
+            b'<?xml version="1.0"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '
+            b'xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"><resources>'
+            b'<object id="2"><mesh><vertices><vertex x="0" y="0" z="0"><build>not this</build></mesh></object>'
+            b'</resources><build><item objectid="2" p:UUID="00000002" transform="1 0 0 0 1 0 0 0 1 10 10 0"/></build></model>'
+        )
+        parsed = []
+        real = placement.SafeET.fromstring
+        monkeypatch.setattr(placement.SafeET, "fromstring", lambda text: parsed.append(text) or real(text))
+        out, _ = placement.place(model, [placement.InstanceTransform(object_id="2", instance=0, matrix=MOVED)])
+        assert out == model.replace(b"1 0 0 0 1 0 0 0 1 10 10 0", b"1 0 0 0 1 0 0 0 1 80 60 5")
+        assert len(parsed) == 2 and not any(b"<mesh" in text for text in parsed)  # before and after: the build alone
+
 
 class TestSaveCopy:
+    async def test_a_model_too_large_to_rewrite_is_said_before_any_move(self, async_client, db_session, monkeypatch):
+        monkeypatch.setattr(project, "MAX_MODEL_BYTES", 100)
+        f = await add_file(db_session, make_project())
+        doc = await open_ws(async_client, f.id)
+        assert "larger than" in doc["cannot_place"]
+        resp = await save(async_client, doc, {}, transforms=[{"object_id": "2", "instance": 0, "matrix": MOVED}])
+        assert resp.status_code == 422, resp.text
+        monkeypatch.setattr(project, "MAX_MODEL_BYTES", 256 * 1024 * 1024)
+        assert (await open_ws(async_client, f.id))["cannot_place"] is None
+
     async def test_a_moved_instance_is_saved_in_the_copy_and_the_original_stays(self, async_client, db_session):
         original = make_project("bambu")
         f = await add_file(db_session, original)
@@ -103,6 +131,21 @@ class TestSaveCopy:
                 assert before[name] == after[name], name
         assert after[project.MODEL_ENTRY] == before[project.MODEL_ENTRY].replace(b"300 50 5", b"80 60 5")
         assert library.to_absolute_path(f.file_path).read_bytes() == original
+
+    async def test_a_move_alone_keeps_the_settings_bytes_as_bambu_studio_wrote_them(self, async_client, db_session):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in entries(make_project("bambu")).items():
+                crlf_settings = name == project.PROJECT_SETTINGS_ENTRY  # Bambu Studio's line breaks
+                zf.writestr(name, data.replace(b"\n", b"\r\n") if crlf_settings else data)
+        crlf = buf.getvalue()
+        f = await add_file(db_session, crlf)
+        doc = await open_ws(async_client, f.id)
+        resp = await save(async_client, doc, {}, transforms=[{"object_id": "4", "instance": 0, "matrix": MOVED}])
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        after = entries(library.to_absolute_path(row.file_path).read_bytes())
+        assert after[project.PROJECT_SETTINGS_ENTRY] == entries(crlf)[project.PROJECT_SETTINGS_ENTRY]
 
     async def test_with_settings_changes_both_are_saved(self, async_client, db_session):
         f = await add_file(db_session, make_project())
