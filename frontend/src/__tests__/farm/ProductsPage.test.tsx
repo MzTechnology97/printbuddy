@@ -200,3 +200,65 @@ describe('ProductsPage', () => {
     );
   });
 });
+
+describe('ProductsPage · import from Seller Hub', () => {
+  let posted: unknown;
+
+  beforeEach(() => {
+    posted = undefined;
+    server.use(
+      http.get('/api/v1/farm/shapes', () => HttpResponse.json([])),
+      http.get('/api/v1/farm/products', () => HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products })),
+      http.get('/api/v1/farm/products/overview', () => HttpResponse.json([])),
+      http.get('/api/v1/farm/components', () => HttpResponse.json(components)),
+      http.get('/api/v1/farm/import/sellerhub/listings', () =>
+        HttpResponse.json({
+          listings: [
+            {
+              key: 'asin:B0FAKE0001',
+              name: 'Supporto di prova',
+              title: 'Supporto di prova, nero',
+              skus: ['TEST-A1', 'TEST-A1-FBM'],
+              asins: ['B0FAKE0001'],
+              image_url: 'https://m.media-amazon.com/images/I/FAKEIMG01.jpg',
+            },
+            { key: 'asin:B0FAKE0002', name: 'Gancio di prova', title: 'Gancio di prova', skus: ['TEST-B1'], asins: ['B0FAKE0002'], image_url: null },
+          ],
+          excluded_inactive: 2,
+          ignored: 1,
+        }),
+      ),
+      http.post('/api/v1/farm/import/sellerhub/listings', async ({ request }) => {
+        posted = await request.json();
+        return HttpResponse.json({
+          created: [{ key: 'asin:B0FAKE0002', project_id: 9, name: 'Gancio di prova' }],
+          already_owned: [],
+          not_found: [],
+          covers_added: 0,
+        });
+      }),
+    );
+  });
+
+  it('lists photo, SKU and title, and imports only the ticked listings', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    await user.click(await screen.findByRole('button', { name: /Import from Seller Hub/ }));
+
+    const first = await screen.findByRole('checkbox', { name: /Supporto di prova, nero/ });
+    expect(first).toHaveAccessibleName(/TEST-A1 · TEST-A1-FBM/);
+    expect(screen.getByText('becomes “Supporto di prova”')).toBeInTheDocument();
+    // The Amazon photo goes through Printbuddy, never straight to Amazon (CSP).
+    const img = document.querySelector('img[src*="sellerhub/thumbnail"]');
+    expect(img?.getAttribute('src')).toBe(
+      '/api/v1/farm/import/sellerhub/thumbnail?url=' + encodeURIComponent('https://m.media-amazon.com/images/I/FAKEIMG01.jpg'),
+    );
+    expect(screen.getByText(/2 inactive on Amazon, 1 marked/)).toBeInTheDocument();
+
+    const button = screen.getByRole('button', { name: 'Import 0 products' });
+    expect(button).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: /Gancio di prova/ }));
+    await user.click(screen.getByRole('button', { name: 'Import 1 product' }));
+    await waitFor(() => expect(posted).toEqual({ keys: ['asin:B0FAKE0002'] }));
+  });
+});

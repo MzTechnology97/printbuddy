@@ -3,12 +3,13 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { Package, Plus, Trash2, Loader2, Search, Grid3x3 } from 'lucide-react';
+import { Package, Plus, Trash2, Loader2, Search, Grid3x3, Download } from 'lucide-react';
 import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { useToast } from '../contexts/ToastContext';
 import { farmApi, type FarmComponent, type FarmProduct, type FarmProductInput, type FarmShape } from './api';
 import { PlatesPanel } from './PlatesPanel';
+import { SellerHubImport } from './SellerHubImport';
 import './i18n';
 
 const INPUT =
@@ -287,6 +288,7 @@ export function ProductsPage() {
   // Components and pieces live on each product's sheet; old ?tab=components|pieces links land on the list.
   const tab = params.get('tab') === 'plates' ? 'plates' : 'products';
   const [onlyTodo, setOnlyTodo] = useState(false);
+  const [importing, setImporting] = useState(false);
   const products = useQuery({ queryKey: ['farm', 'products'], queryFn: farmApi.getProducts });
   const overview = useQuery({ queryKey: ['farm', 'overview'], queryFn: farmApi.getOverview });
   const components = useQuery({ queryKey: ['farm', 'components'], queryFn: farmApi.getComponents });
@@ -305,9 +307,16 @@ export function ProductsPage() {
           <Package className="w-7 h-7 text-bambu-green" /> {t('farm.products.title')}
         </h1>
         {!editing && tab === 'products' && (
-          <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [], variants: [] })}>
-            <Plus className="w-4 h-4" /> {t('farm.products.new')}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {!importing && (
+              <Button variant="secondary" onClick={() => setImporting(true)}>
+                <Download className="w-4 h-4" /> {t('farm.products.sellerHub.open')}
+              </Button>
+            )}
+            <Button onClick={() => setEditing({ name: '', skus: '', asins: '', parts: [], variants: [] })}>
+              <Plus className="w-4 h-4" /> {t('farm.products.new')}
+            </Button>
+          </div>
         )}
       </div>
       <div role="tablist" className="flex gap-2 border-b border-bambu-dark-tertiary">
@@ -346,6 +355,8 @@ export function ProductsPage() {
         <input type="checkbox" checked={onlyTodo} onChange={(e) => setOnlyTodo(e.target.checked)} />
         {t('farm.project.onlyTodo')}
       </label>
+
+      {importing && !editing && <SellerHubImport onClose={() => setImporting(false)} />}
 
       {editing && (
         <ProductForm key={editing.id ?? 'new'} draft={editing} components={components.data || []} shapes={shapes.data || []} onDone={() => setEditing(null)} />
