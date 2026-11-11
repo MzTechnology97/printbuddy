@@ -93,7 +93,7 @@ function minZ(item: THREE.Object3D, placed: Placed, instance?: Spec): number {
 }
 
 /** The targets' (instances' or a part's) points in the slicer's coordinates (turned by ``into``), in one flat array. */
-function targetPoints(view: ViewerScene, placed: Placed, targets: string[], into?: THREE.Matrix4): Float32Array {
+export function targetPoints(view: ViewerScene, placed: Placed, targets: string[], into?: THREE.Matrix4): Float32Array {
   const parts: { p: Float32Array; m: number[] }[] = [];
   for (const item of items(view))
     for (const t of targets) {
@@ -307,8 +307,9 @@ export interface Change {
   apply: (spec: Spec, key: string) => Spec;
   /** the object's other instances: their height only ('none'), or their rotation and scale too ('general') */
   sync: 'none' | 'general';
-  /** do_move snaps what floats; do_rotate / do_scale also lift what the change sank, unless it was sinking already */
-  drop: 'move' | 'transform';
+  /** do_move snaps what floats; do_rotate / do_scale also lift what the change sank, unless it was sinking already;
+   * Lay on face ("Gizmo-Place on Face") puts the object on the bed even when it was sinking */
+  drop: 'move' | 'transform' | 'flatten';
 }
 
 const linear = (m: THREE.Matrix4) => m.clone().setPosition(0, 0, 0);
@@ -341,7 +342,7 @@ export function changed(view: ViewerScene, placed: Placed, change: Change, autoD
     const key = keyOf(item);
     if (!next[key] || !autoDrop(String(item.userData.objectId))) continue;
     const shift = minZ(item, placed, next[key]);
-    const sinkingBefore = minZ(item, placed) < SINKING;
+    const sinkingBefore = change.drop !== 'flatten' && minZ(item, placed) < SINKING;
     const drop = change.drop === 'move' ? shift > SINKING : !sinkingBefore || shift > SINKING;
     if (drop && Math.abs(shift) > 1e-9) next[key] = [...next[key].slice(0, 11), Number((next[key][11] - shift).toFixed(9))];
   }
@@ -368,19 +369,35 @@ export function changedPart(
   drop: 'move' | 'transform',
   autoDrop: (objectId: string) => boolean,
 ): Placed {
-  const { inst, part } = splitTarget(target);
+  return changedParts(view, placed, [target], (w) => apply(w), drop, autoDrop);
+}
+
+/** The same for several parts of one instance (Orca's Volume selection), each with its own change. */
+export function changedParts(
+  view: ViewerScene,
+  placed: Placed,
+  targets: string[],
+  apply: (world: Spec, target: string) => Spec,
+  drop: 'move' | 'transform',
+  autoDrop: (objectId: string) => boolean,
+): Placed {
+  const inst = splitTarget(targets[0] ?? '').inst;
   const item = items(view).find((i) => keyOf(i) === inst);
-  const group = item && part != null ? partsOf(item).find((g) => String(g.userData.partId) === part) : undefined;
-  if (!item || !group || part == null) return placed;
+  if (!item || targets.some((t) => splitTarget(t).inst !== inst)) return placed;
   const objectId = String(item.userData.objectId);
   const m = fromSpec(placed[inst] ?? fileSpec(item));
-  const world = toSpec(m.clone().multiply(fromSpec(partSpec(item, group, placed))));
-  const own = toSpec(m.clone().invert().multiply(fromSpec(apply(world))));
   const next = { ...placed };
-  const key = partKey(objectId, part);
-  const file = partFileSpec(group);
-  if (own.every((x, i) => Math.abs(x - file[i]) < 1e-9)) delete next[key];
-  else next[key] = own;
+  for (const target of targets) {
+    const { part } = splitTarget(target);
+    const group = part != null ? partsOf(item).find((g) => String(g.userData.partId) === part) : undefined;
+    if (!group || part == null) continue;
+    const world = toSpec(m.clone().multiply(fromSpec(partSpec(item, group, placed))));
+    const own = toSpec(m.clone().invert().multiply(fromSpec(apply(world, target))));
+    const key = partKey(objectId, part);
+    const file = partFileSpec(group);
+    if (own.every((x, i) => Math.abs(x - file[i]) < 1e-9)) delete next[key];
+    else next[key] = own;
+  }
   for (const other of items(view)) {
     if (String(other.userData.objectId) !== objectId || !autoDrop(objectId)) continue;
     const k = keyOf(other);

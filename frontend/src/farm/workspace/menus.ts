@@ -5,11 +5,16 @@ import type { MenuItem } from './Viewport';
 
 type Tr = (text: string) => string;
 
+/** Align/Distribute: its submenu (align.ts), or greyed with why (a string), or (none given) phase 2. */
+const alignItem = (tr: Tr, align?: MenuItem[] | string): MenuItem =>
+  Array.isArray(align) ? { label: tr('Align/Distribute'), items: align } : { label: tr('Align/Distribute'), submenu: true, hint: align };
+
 export function objectMenu(
   tr: Tr,
   deleteKey: string,
   printable: boolean,
   on: { select: () => void; zoom: () => void; info: () => void; settings: () => void },
+  align?: MenuItem[] | string,
 ): MenuItem[] {
   return [
     { label: tr('Select'), onClick: on.select },
@@ -20,7 +25,7 @@ export function objectMenu(
     { label: tr('Center'), separator: true },
     { label: tr('Drop') },
     { label: tr('Transform'), submenu: true },
-    { label: tr('Align/Distribute'), submenu: true },
+    alignItem(tr, align),
     { label: tr('Edit'), submenu: true },
     { label: tr('Delete'), shortcut: deleteKey, separator: true },
     { label: tr('Add Part'), icon: 'menu_add_part', submenu: true, separator: true },
@@ -84,7 +89,13 @@ export function partMenu(tr: Tr, deleteKey: string, on: { select: () => void; zo
 }
 
 /** Several objects selected (GUI_Factories.cpp multi selection menu). */
-export function multiMenu(tr: Tr, deleteKey: string, printable: boolean, on: { zoom: () => void; deselect: () => void }): MenuItem[] {
+export function multiMenu(
+  tr: Tr,
+  deleteKey: string,
+  printable: boolean,
+  on: { zoom: () => void; deselect: () => void },
+  align?: MenuItem[] | string,
+): MenuItem[] {
   return [
     { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
     { label: tr('Deselect All'), shortcut: 'Esc', onClick: on.deselect },
@@ -92,7 +103,7 @@ export function multiMenu(tr: Tr, deleteKey: string, printable: boolean, on: { z
     { label: tr('Center') },
     { label: tr('Drop') },
     { label: tr('Transform'), submenu: true },
-    { label: tr('Align/Distribute'), submenu: true },
+    alignItem(tr, align),
     { label: tr('Fix Model') },
     { label: tr('Delete'), shortcut: deleteKey, separator: true },
     { label: tr('Set Filament for selected items'), submenu: true, separator: true },

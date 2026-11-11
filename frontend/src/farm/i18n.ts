@@ -572,6 +572,12 @@ const en = {
     move: {
       tooLarge: "This project's model is too large to save objects moved in a copy",
     },
+    flatten: {
+      single: 'Select one instance of an object to lay it on a face',
+    },
+    align: {
+      nothing: 'Select two or more objects, or an object with two or more parts',
+    },
     topbar: {
       menu: 'Menu',
       phase: 'coming in phase {{phase}}',
@@ -1310,6 +1316,12 @@ const it: typeof en = {
     },
     move: {
       tooLarge: 'Il modello di questo progetto è troppo grande per salvare gli oggetti spostati in una copia',
+    },
+    flatten: {
+      single: 'Seleziona una sola istanza di un oggetto per posizionarla su una faccia',
+    },
+    align: {
+      nothing: 'Seleziona due o più oggetti, oppure un oggetto con due o più parti',
     },
     topbar: {
       menu: 'Menu',
