@@ -146,18 +146,21 @@ async def ask_slicing(db: AsyncSession, plate: FarmPlate, from_nas: bool = False
     return True
 
 
-async def variant_file(db: AsyncSession, plate: FarmPlate, color: str | None) -> LibraryFile | None:
-    """The plate's sliced output in the component's colour (``farm.slicing``); None until sliced."""
+async def variant_file(
+    db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: int | None = None
+) -> LibraryFile | None:
+    """The plate's sliced output in the component's colour (on the chosen slot's nozzle: ``_slot_nozzle``)
+    (``farm.slicing``); None until sliced."""
     from backend.app.farm.slicing import variant_slice
 
-    return await variant_slice(db, plate, color)
+    return await variant_slice(db, plate, color, nozzle)
 
 
-async def ask_variant(db: AsyncSession, plate: FarmPlate, color: str | None) -> str:
+async def ask_variant(db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: int | None = None) -> str:
     """Ask for the plate's slice in the component's colour; the job's note: being sliced, or why not yet."""
     from backend.app.farm.slicing import queue_slice_note
 
-    return await queue_slice_note(db, plate, color)
+    return await queue_slice_note(db, plate, color, nozzle)
 
 
 def _plate_model(resolver: PrinterModelResolver, plate: FarmPlate) -> str:
@@ -195,7 +198,7 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
     files = await component_files(db)
     own = await product_shapes(db)
     jobs = []
-    forced: set[tuple[int, str | None]] = set()  # (plate, colour) sliced again once, whatever jobs share it
+    forced: set[tuple] = set()  # (plate, colour, nozzle) sliced again once, whatever jobs share it
     for req in requests:
         comp = await db.scalar(select(FarmComponent).where(FarmComponent.code == req["component_code"]))
         if comp is None or comp.retired_at is not None:
@@ -220,13 +223,17 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
                 raise HTTPException(422, f"No confirmed plate of {comp.code} for {printer.name} ({printer.model})")
         if not plates:
             raise HTTPException(422, f"No plate for {comp.code}")
+        options = _queue_options(req, printer_id, plates)
+        nozzle = await _slot_nozzle(db, plates[0], comp.color, printer_id, req.get("ams_mapping"))
+        if nozzle is not None:  # the slice goes on the nozzle of the slot chosen (one plate, see _queue_options)
+            options["nozzle"] = nozzle
         job = FarmPrintJob(
             component_code=comp.code,
             color=comp.color,
             plate_ids=[p.id for p in plates],
             expected_pieces=_pieces(plates[0], comp, own),
             printer_id=printer_id,
-            queue_options=_queue_options(req, printer_id, plates),
+            queue_options=options,
         )
         db.add(job)
         jobs.append(job)
@@ -234,12 +241,12 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
             if req.get("force_slice"):  # asked in Accoda: a new slice from the 3MF on the NAS, never the old one
                 from backend.app.farm.slicing import colour_key, force_slice
 
-                if (plate.id, colour_key(comp.color)) not in forced:
-                    forced.add((plate.id, colour_key(comp.color)))
-                    if not await force_slice(db, plate, comp.color):
+                if (plate.id, colour_key(comp.color), nozzle) not in forced:
+                    forced.add((plate.id, colour_key(comp.color), nozzle))
+                    if not await force_slice(db, plate, comp.color, nozzle):
                         job.note = f"plate {plate.plate_index}: the 3MF is no longer in the library, no new slice"
-            elif await variant_file(db, plate, comp.color) is None:
-                await ask_variant(db, plate, comp.color)
+            elif await variant_file(db, plate, comp.color, nozzle) is None:
+                await ask_variant(db, plate, comp.color, nozzle)
     await db.commit()
     for job in jobs:
         job_events.record(
@@ -254,12 +261,16 @@ async def create_jobs(db: AsyncSession, requests: list[dict]) -> list[FarmPrintJ
 
 async def plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None) -> list[dict] | None:
     """The filament slots of the plate's sliced output in that colour (what AMS/CFS slots are chosen for);
-    None until sliced."""
+    None until sliced. A plate whose slice follows the chosen slot's nozzle (``_slot_nozzle``) says no nozzle:
+    either nozzle's slots may take it."""
     sliced = await variant_file(db, plate, color)
     if sliced is None:
         return None
     path = await _local_path(db, sliced)
-    return await asyncio.to_thread(extract_filament_requirements, path, _plate_in_file(path, plate.plate_index))
+    rows = await asyncio.to_thread(extract_filament_requirements, path, _plate_in_file(path, plate.plate_index))
+    if rows and await _free_nozzle(db, plate, color):
+        rows = [{k: v for k, v in row.items() if k != "nozzle_id"} for row in rows]
+    return rows
 
 
 # Not on disk (NAS away), not a zip, or settings that don't parse: the slots wait for the slice.
@@ -269,7 +280,41 @@ UNREADABLE_3MF = (OSError, zipfile.BadZipFile, ElementTree.ParseError, ValueErro
 async def unsliced_plate_filaments(db: AsyncSession, plate: FarmPlate, color: str | None) -> list[dict] | None:
     """Before the slice: the plate's filaments in the component's colour, read from the project, so the slots
     are chosen now as in the slicers' print dialog (the 3MF is not touched). None when they can't be told."""
-    from backend.app.farm import slicing, variants
+    from backend.app.farm import variants
+
+    return await _read_project(db, plate, color, variants.plate_slots)
+
+
+async def _free_nozzle(db: AsyncSession, plate: FarmPlate, color: str | None) -> bool:
+    """``variants.free_nozzle`` of the plate in the component's colour: its slice follows the chosen slot."""
+    from backend.app.farm import variants
+
+    return bool(await _read_project(db, plate, color, variants.free_nozzle))
+
+
+async def _slot_nozzle(
+    db: AsyncSession, plate: FarmPlate, color: str | None, printer_id: int | None, mapping: list[int] | None
+) -> int | None:
+    """The nozzle a job's slice is forced onto: on a dual-nozzle plate printing one filament on automatic
+    grouping (``variants.free_nozzle``), the nozzle of the slot chosen for that filament. None for every other
+    plate, and without chosen slots: sliced as it is. 422 when that slot or its nozzle is unknown."""
+    if not mapping or printer_id is None or not await _free_nozzle(db, plate, color):
+        return None
+    rows = await unsliced_plate_filaments(db, plate, color) or []
+    slot = rows[0]["slot_id"] if len(rows) == 1 else 0
+    tray = mapping[slot - 1] if 0 < slot <= len(mapping) else -1
+    if tray < 0:
+        raise HTTPException(422, f"Choose a slot for filament {slot}: its nozzle is the one the plate is sliced for")
+    nozzle = next((t.get("extruder_id") for t in _loaded_trays(printer_id) if t.get("global_tray_id") == tray), None)
+    if nozzle is None:
+        raise HTTPException(422, f"The nozzle of slot {tray} is not known now: the plate can't be sliced for it")
+    return int(nozzle)
+
+
+async def _read_project(db: AsyncSession, plate: FarmPlate, color: str | None, read):
+    """``read(path, plate, filament)`` on the plate's project in the component's colour (the filament the
+    colour variant moves it to, else 0); None when the project or that colour can't be read."""
+    from backend.app.farm import slicing
     from backend.app.farm.nas.access import library_path
     from backend.app.farm.nas.cache import ensure_local
 
@@ -288,7 +333,7 @@ async def unsliced_plate_filaments(db: AsyncSession, plate: FarmPlate, color: st
             return None
     try:
         return await asyncio.to_thread(
-            variants.plate_slots, library_path(lib_file.file_path), slicing.plate_key(plate.plate_index), filament
+            read, library_path(lib_file.file_path), slicing.plate_key(plate.plate_index), filament
         )
     except UNREADABLE_3MF:
         return None
@@ -643,7 +688,9 @@ async def _slice_reason(db: AsyncSession, item: PrintQueueItem, job: FarmPrintJo
     if out_meta.get("sliced_from_sha256") != state.sha256:
         from backend.app.farm.slicing import previous_output  # slicing imports this module
 
-        newer = await previous_output(db, project_id, out_meta.get("sliced_plate"), out_meta.get("sliced_color"))
+        newer = await previous_output(
+            db, project_id, out_meta.get("sliced_plate"), out_meta.get("sliced_color"), out_meta.get("sliced_nozzle")
+        )
         if newer is not None and (newer.file_metadata or {}).get("sliced_from_sha256") == state.sha256:
             # Sliced again into a row of its own: the slice queued here was kept (``slicing.slice_embedded``).
             plate = await db.get(FarmPlate, job.plate_id) if job is not None else None
@@ -999,6 +1046,7 @@ async def dispatch_once(db: AsyncSession) -> int:
             job.note = f"Starts at {start_at:%Y-%m-%d %H:%M} UTC"
             continue
         mapped = options.get("ams_mapping")  # slots chosen by hand: no spool check, nothing forced
+        nozzle = options.get("nozzle")  # the chosen slot's nozzle: only a slice forced onto it is printed
         reasons = []
         placed = False
         slicing = False
@@ -1013,9 +1061,9 @@ async def dispatch_once(db: AsyncSession) -> int:
                     continue
                 if not may_print(files, comp.id, plate.library_file_id):  # queued before the 3MF left
                     continue
-                sliced = await variant_file(db, plate, job.color)  # the slice in the component's colour
+                sliced = await variant_file(db, plate, job.color, nozzle)  # the slice in the component's colour
                 if sliced is None:
-                    reasons.append(await ask_variant(db, plate, job.color))  # being sliced, or why it failed
+                    reasons.append(await ask_variant(db, plate, job.color, nozzle))  # being sliced, or why it failed
                     slicing = True
                     continue
                 model = _plate_model(resolver, plate)

@@ -748,7 +748,7 @@ class TestColourVariantFile:
 
     def test_plate_slots_before_the_slice(self, tmp_path):
         """The print dialog's slot rows from the unsliced project: the plate's filaments, or the variant's."""
-        from backend.app.farm.variants import plate_slots
+        from backend.app.farm.variants import free_nozzle, plate_slots
 
         src = make_variant_3mf(tmp_path / "ami.3mf")
         assert plate_slots(src, 1, 0) == [
@@ -790,9 +790,29 @@ class TestColourVariantFile:
         assert [s["slot_id"] for s in plate_slots(sup, 1, 0)] == [1, 2]
         off = with_settings("off.3mf", enable_support="0", support_filament="1")
         assert [s["slot_id"] for s in plate_slots(off, 1, 0)] == [2]
-        # Dual nozzle on automatic grouping: the slicer picks the nozzles, the slots wait for the slice.
-        auto = with_settings("auto.3mf", physical_extruder_map=["1", "0"], filament_map_mode="Auto For Flush")
-        assert plate_slots(auto, 1, 0) is None
+        # Dual nozzle on automatic grouping: several filaments wait for the slice (the slicer picks the nozzles);
+        # one filament, supports included, may go on either nozzle's slots (the row says no nozzle).
+        auto = with_settings(
+            "auto.3mf",
+            physical_extruder_map=["1", "0"],
+            filament_map_mode="Auto For Flush",
+            filament_nozzle_map=["1"] * 3,
+        )
+        assert plate_slots(auto, 2, 0) is None
+        assert plate_slots(auto, 1, 0) == [
+            {"slot_id": 2, "type": "", "color": "#FCE300", "tray_info_idx": "", "used_grams": 0}
+        ]
+        assert [s["slot_id"] for s in plate_slots(auto, 1, 3)] == [3]  # the colour variant's filament
+        assert free_nozzle(auto, 1, 0) and not free_nozzle(auto, 2, 0) and not free_nozzle(src, 1, 0)
+        sup_auto = with_settings(
+            "sup_auto.3mf",
+            physical_extruder_map=["1", "0"],
+            filament_map_mode="Auto For Flush",
+            enable_support="1",
+            support_filament="1",
+        )
+        assert plate_slots(sup_auto, 1, 0) is None  # its supports print with another filament
+        assert not free_nozzle(sup_auto, 1, 0)
 
         typed = tmp_path / "typed.3mf"
         with zipfile.ZipFile(src) as zin, zipfile.ZipFile(typed, "w") as zout:
@@ -809,6 +829,161 @@ class TestColourVariantFile:
         assert extruders(moved) == {"2": ["3", "3", "3"], "3": ["1"], "4": ["3"]}
         with zipfile.ZipFile(io.BytesIO(moved)) as zf:
             assert json.loads(zf.read("Metadata/project_settings.config")) == VARIANT_SETTINGS
+
+
+DUAL_AUTO = {
+    "physical_extruder_map": ["1", "0"],  # logical extruder 1 is the left nozzle (1), 2 the right one (0)
+    "filament_map_mode": "Auto For Flush",
+    "filament_map": ["1", "1", "1"],
+}
+
+
+def make_dual_3mf(path: Path) -> Path:
+    """The colour variant project on a dual-nozzle printer on automatic grouping (plate 1: filament 2 only)."""
+    make_variant_3mf(path)
+    with zipfile.ZipFile(path) as zin:
+        entries = {n: zin.read(n) for n in zin.namelist()}
+    entries["Metadata/project_settings.config"] = json.dumps({**VARIANT_SETTINGS, **DUAL_AUTO}).encode()
+    with zipfile.ZipFile(path, "w") as zout:
+        for name, data in entries.items():
+            zout.writestr(name, data)
+    return age(path)
+
+
+@pytest.mark.integration
+class TestForcedNozzle:
+    """A dual-nozzle plate on one filament, sliced onto the chosen slot's nozzle (``slice_embedded(nozzle=)``)."""
+
+    @pytest.fixture
+    def sidecar(self, monkeypatch, tmp_path):
+        """A slicer that puts filament 2 where the sent ``filament_map`` says, or on ``lie`` whatever it is sent."""
+        from backend.app.services.slicer_api import SlicerApiService, SliceResult
+
+        state = {"calls": [], "lie": None}
+
+        async def fake_slice(self, **kwargs):
+            state["calls"].append(kwargs)
+            with zipfile.ZipFile(io.BytesIO(kwargs["model_bytes"])) as zf:
+                cfg = json.loads(zf.read("Metadata/project_settings.config"))
+            logical = state["lie"] or int((cfg.get("filament_map") or ["1", "1"])[1])
+            out = make_3mf(tmp_path / f"out{len(state['calls'])}.gcode.3mf", BAMBU)
+            with zipfile.ZipFile(out, "a") as zf:
+                zf.writestr("Metadata/project_settings.config", json.dumps(cfg))
+                zf.writestr(
+                    "Metadata/slice_info.config",
+                    f'<config><plate><filament id="2" group_id="{logical - 1}"/></plate></config>',
+                )
+            return SliceResult(
+                content=out.read_bytes(), print_time_seconds=600, filament_used_g=5.0, filament_used_mm=1000.0
+            )
+
+        monkeypatch.setattr(SlicerApiService, "slice_without_profiles", fake_slice)
+        return state
+
+    @staticmethod
+    async def _project(async_client, db_session, watched, path):
+        await scan(async_client, watched)
+        file_id = (await files_by_name(async_client))[path.name]["library_file_id"]
+        lib_file = await db_session.get(LibraryFile, file_id)
+        state = await db_session.scalar(select(FarmLibraryFile).where(FarmLibraryFile.library_file_id == file_id))
+        return file_id, lib_file, state
+
+    @staticmethod
+    def _sent(call) -> tuple[dict, str]:
+        with zipfile.ZipFile(io.BytesIO(call["model_bytes"])) as zf:
+            return (
+                json.loads(zf.read("Metadata/project_settings.config")),
+                zf.read("Metadata/model_settings.config").decode(),
+            )
+
+    async def test_normal_plate_keeps_its_keys_names_and_output(self, async_client, db_session, watched, nas, sidecar):
+        from types import SimpleNamespace
+
+        from backend.app.farm.slicing import _queue_key, output_name, previous_output, slice_embedded, variant_slice
+
+        # Without a nozzle: the keys and names of before.
+        assert _queue_key(7, None, " Nero ") == (7, 1, "nero")
+        assert _queue_key(7, 2, None) == (7, 2, None)
+        assert output_name("ami", 1, "Nero") == "ami - Nero.gcode.3mf"
+        assert output_name("ami", 2) == "ami - plate 2.gcode.3mf"
+        assert output_name("ami", 2, "Nero", 1) == "ami - plate 2 - Nero - left nozzle.gcode.3mf"
+
+        path = make_variant_3mf(nas / "Ami" / "ami.3mf")
+        file_id, lib_file, state = await self._project(async_client, db_session, watched, path)
+        plate = SimpleNamespace(library_file_id=file_id, plate_index=1)
+        plain = await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1)
+        out = await db_session.get(LibraryFile, plain.library_file_id)
+        assert out.filename == "ami.gcode.3mf" and "sliced_nozzle" not in out.file_metadata
+        assert self._sent(sidecar["calls"][-1])[0] == VARIANT_SETTINGS  # sent as it is
+        assert (await previous_output(db_session, file_id, 1)).id == out.id
+        assert await previous_output(db_session, file_id, 1, nozzle=1) is None
+        assert (await variant_slice(db_session, plate, None)).id == out.id
+        assert await variant_slice(db_session, plate, None, 1) is None
+
+    async def test_each_nozzle_its_own_slice(self, async_client, db_session, watched, nas, sidecar):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from backend.app.farm import slicing
+        from backend.app.farm.reslice import sliced_plates
+
+        path = make_dual_3mf(nas / "Ami" / "dual.3mf")
+        before = path.read_bytes()
+        file_id, lib_file, state = await self._project(async_client, db_session, watched, path)
+        plate = SimpleNamespace(library_file_id=file_id, plate_index=1)
+        args = {"lib_file": lib_file, "state": state, "plate": 1}
+
+        plain = await slicing.slice_embedded(db_session, **args)
+        assert self._sent(sidecar["calls"][-1])[0]["filament_map_mode"] == "Auto For Flush"
+        right = await slicing.slice_embedded(db_session, **args, nozzle=0)
+        cfg, model_settings = self._sent(sidecar["calls"][-1])
+        assert (cfg["filament_map_mode"], cfg["filament_map"]) == ("Manual", ["2", "2", "2"])
+        assert '<metadata key="filament_maps" value="2 2 2" />' in model_settings  # on the plate too
+        left = await slicing.slice_embedded(db_session, **args, nozzle=1)
+        assert self._sent(sidecar["calls"][-1])[0]["filament_map"] == ["1", "1", "1"]
+        assert path.read_bytes() == before  # the project on the NAS is untouched
+
+        outs = {n: await db_session.get(LibraryFile, r.library_file_id) for n, r in (("r", right), ("l", left))}
+        assert (outs["r"].filename, outs["r"].file_metadata["sliced_nozzle"]) == ("dual - right nozzle.gcode.3mf", 0)
+        assert (outs["l"].filename, outs["l"].file_metadata["sliced_nozzle"]) == ("dual - left nozzle.gcode.3mf", 1)
+        assert (await slicing.variant_slice(db_session, plate, None)).id == plain.library_file_id
+        assert (await slicing.variant_slice(db_session, plate, None, 0)).id == right.library_file_id
+        assert (await slicing.variant_slice(db_session, plate, None, 1)).id == left.library_file_id
+        assert sorted(map(str, (await sliced_plates(db_session, {file_id}))[file_id])) == [
+            "(1, None)",
+            "(1, None, 0)",
+            "(1, None, 1)",
+        ]
+        again = await slicing.slice_embedded(db_session, **args, nozzle=0)
+        assert again.library_file_id == right.library_file_id  # replaces its own nozzle's output only
+
+        # One nozzle's failure and waits are its own: the other job's slice is neither blocked nor retried.
+        slicing.queue_slice_ended(file_id, path.name, 1, None, "bambu_studio", HTTPException(409, "no"), nozzle=0)
+        try:
+            assert slicing._queue_key(file_id, 1, None, 0) in slicing._failed
+            assert slicing._queue_key(file_id, 1, None, 1) not in slicing._failed
+            assert slicing._queue_key(file_id, 1, None) not in slicing._failed
+        finally:
+            slicing._failed.pop(slicing._queue_key(file_id, 1, None, 0), None)
+
+    async def test_slice_on_the_other_nozzle_is_never_saved(self, async_client, db_session, watched, nas, sidecar):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from backend.app.farm.slicing import slice_embedded, variant_slice
+
+        path = make_dual_3mf(nas / "Ami" / "dual.3mf")
+        file_id, lib_file, state = await self._project(async_client, db_session, watched, path)
+        plate = SimpleNamespace(library_file_id=file_id, plate_index=1)
+        await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1)  # the automatic one: left
+        sidecar["lie"] = 1  # the slicer keeps filament 2 on logical extruder 1, the left nozzle
+        with pytest.raises(HTTPException) as err:
+            await slice_embedded(db_session, lib_file=lib_file, state=state, plate=1, nozzle=0)
+        assert err.value.status_code == 409
+        assert "not all on the right nozzle of the chosen slot (filament: nozzle {2: 1})" in err.value.detail
+        assert await variant_slice(db_session, plate, None, 0) is None  # nothing saved: the job waits, no fallback
 
 
 @pytest.mark.integration

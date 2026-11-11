@@ -266,7 +266,7 @@ async def test_a_slice_found_another_way_clears_the_failure(db_session, project,
     await run_slice(project)
     assert slicing._failed
 
-    async def sliced(db, lib_file, sha256, colour=None):
+    async def sliced(db, lib_file, sha256, colour=None, nozzle=None):
         return {2: SimpleNamespace(id=9)}
 
     monkeypatch.setattr(plates, "_latest_slices", sliced)

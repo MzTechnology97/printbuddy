@@ -31,22 +31,24 @@ logger = logging.getLogger(__name__)
 _running: set[int] = set()  # project ids with a re-slice job in progress
 
 
-async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, list[tuple[int | None, str | None]]]:
-    """``(plate, colour variant)`` pairs that already have a project-settings output, by project id."""
+async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, list[tuple]]:
+    """``(plate, colour variant)`` pairs that already have a project-settings output, by project id; an output
+    forced onto a nozzle adds it, ``(plate, colour, nozzle)``."""
     from backend.app.farm.slicing import plate_key
 
-    found: dict[int, dict[tuple[int, str | None], tuple[int | None, str | None]]] = {}
+    found: dict[int, dict[tuple, tuple]] = {}
     rows = await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced"))
     for out in rows.scalars():
         meta = out.file_metadata or {}
         pid = meta.get("sliced_from_library_file_id")
         if meta.get("used_embedded_settings") and pid in project_ids and "extracted_from_library_file_id" not in meta:
-            plate, colour = meta.get("sliced_plate"), meta.get("sliced_color")
-            found.setdefault(pid, {})[(plate_key(plate), colour)] = (plate, colour)
+            plate, colour, nozzle = meta.get("sliced_plate"), meta.get("sliced_color"), meta.get("sliced_nozzle")
+            extra = () if nozzle is None else (nozzle,)
+            found.setdefault(pid, {})[(plate_key(plate), colour, *extra)] = (plate, colour, *extra)
     return {pid: list(plates.values()) for pid, plates in found.items()}
 
 
-async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple[int | None, str | None]], job_id: int) -> dict:
+async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple], job_id: int) -> dict:
     from backend.app.farm.plates.models import FarmPlate
     from backend.app.farm.plates.service import PlateReadError, refresh_plates
     from backend.app.farm.slicing import slice_embedded
@@ -66,13 +68,19 @@ async def _reslice(db: AsyncSession, project_id: int, plates: list[tuple[int | N
         current = set(
             (await db.execute(select(FarmPlate.plate_index).where(FarmPlate.library_file_id == project_id))).scalars()
         )
-        for plate, colour in plates:
+        for plate, colour, *forced in plates:
             if current and (plate or 1) not in current:
                 logger.info("Auto re-slice of %s: plate %s is no longer in the project", lib_file.filename, plate)
                 continue
             try:
                 response = await slice_embedded(
-                    db, lib_file=lib_file, state=state, plate=plate, job_id=job_id, colour=colour
+                    db,
+                    lib_file=lib_file,
+                    state=state,
+                    plate=plate,
+                    job_id=job_id,
+                    colour=colour,
+                    nozzle=next(iter(forced), None),
                 )
                 results.append(response.model_dump())
                 notify.slicing_done(project_id, lib_file.filename, plate, colour, notify.AUTO_RESLICE)

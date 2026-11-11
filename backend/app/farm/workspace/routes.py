@@ -150,6 +150,7 @@ async def _outputs(db: AsyncSession, lib_file: LibraryFile, version: str | None)
             and meta.get("sliced_from_library_file_id") == lib_file.id
             and "extracted_from_library_file_id" not in meta
             and not colour_key(meta.get("sliced_color"))
+            and meta.get("sliced_nozzle") is None  # forced onto one nozzle for a job's slot: not the plate's slice
         ):
             latest[plate_key(meta.get("sliced_plate"))] = out
     return [

@@ -64,11 +64,11 @@ async def farm(async_client, db_session, printer_factory, monkeypatch, tmp_path)
     ]
     slicing_asked = []
 
-    async def fake_sliced(db, plate, color):
-        return sliced if plate.printer_model == "A1" else None
+    async def fake_sliced(db, plate, color, nozzle=None):
+        return sliced if plate.printer_model == "A1" and nozzle is None else None
 
-    async def fake_ask(db, plate, color):
-        slicing_asked.append((plate.printer_model, color))
+    async def fake_ask(db, plate, color, nozzle=None):
+        slicing_asked.append((plate.printer_model, color) + (() if nozzle is None else (nozzle,)))
         return f"plate {plate.plate_index} of file {plate.library_file_id} is being sliced"
 
     async def fake_local(db, lib_file):
@@ -407,6 +407,49 @@ async def test_print_dialog_options_reach_the_queue_item(async_client, db_sessio
     # Slots belong to a chosen printer.
     job = {"component_code": farm["code"], "plate_ids": farm["plates"][:1], "ams_mapping": [0]}
     assert (await async_client.post(f"{API}/jobs", json={"jobs": [job]})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_dual_nozzle_slot_picks_the_nozzle_of_the_slice(async_client, db_session, farm, monkeypatch):
+    """One filament on a dual-nozzle plate on automatic grouping: a job's slice goes on its chosen slot's nozzle.
+    Two jobs of one plate on the two nozzles each wait for their own slice, never the plain one."""
+    a1_two = farm["printers"][1]
+    trays = [{"type": "PLA", "color": "#161616", "global_tray_id": 0, "extruder_id": 1}]  # AMS A on the left
+    trays.append({"type": "PLA", "color": "#161616", "global_tray_id": 4, "extruder_id": 0})  # AMS B, right
+    monkeypatch.setattr(service, "_loaded_trays", lambda pid: trays)
+
+    async def free(db, plate, color):
+        return True
+
+    async def slots(db, plate, color):
+        return [{"slot_id": 1, "type": "PLA", "color": "#161616"}]
+
+    monkeypatch.setattr(service, "_free_nozzle", free)
+    monkeypatch.setattr(service, "unsliced_plate_filaments", slots)
+
+    def job(tray):
+        return {
+            "component_code": farm["code"],
+            "plate_ids": farm["plates"][:1],
+            "printer_id": a1_two,
+            "ams_mapping": [tray],
+        }
+
+    r = await async_client.post(f"{API}/jobs", json={"jobs": [job(0), job(4)]})
+    assert r.status_code == 200, r.text
+    left, right = [await db_session.get(FarmPrintJob, j["id"]) for j in r.json()]
+    await db_session.refresh(left)
+    await db_session.refresh(right)
+    assert (left.queue_options["nozzle"], right.queue_options["nozzle"]) == (1, 0)
+    assert ("A1", "Nero", 1) in farm["slicing"] and ("A1", "Nero", 0) in farm["slicing"]
+    # The plain slice of the plate exists, yet neither job is placed with it.
+    assert (await db_session.execute(select(PrintQueueItem))).first() is None
+    assert left.status == right.status == "waiting"
+
+    # Without a slot for the filament, or with a slot whose nozzle isn't known, the job isn't made.
+    for mapping in ([-1], [9]):
+        bad = {**job(0), "ams_mapping": mapping}
+        assert (await async_client.post(f"{API}/jobs", json={"jobs": [bad]})).status_code == 422
 
 
 @pytest.mark.asyncio
