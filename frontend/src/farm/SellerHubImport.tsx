@@ -8,6 +8,10 @@ import { useToast } from '../contexts/ToastContext';
 import { farmApi, type SellerHubListing } from './api';
 import './i18n';
 
+const LISTINGS_KEY = ['farm', 'sellerhub-listings'];
+/** Light check while the Products page is open: Seller Hub's plan is read again every 5 minutes. */
+const CHECK_EVERY_MS = 5 * 60 * 1000;
+
 function Photo({ row }: { row: SellerHubListing }) {
   const [broken, setBroken] = useState(false);
   return (
@@ -30,15 +34,57 @@ function Photo({ row }: { row: SellerHubListing }) {
   );
 }
 
-export function SellerHubImport({ onClose }: { onClose: () => void }) {
+/** Title, SKUs and (when the product gets another name) the name it will have. */
+function Texts({ row }: { row: SellerHubListing }) {
+  const { t } = useTranslation();
+  return (
+    <span className="min-w-0 flex-1">
+      <span className="block text-sm text-white break-words">{row.title || row.name}</span>
+      <span className="block text-xs text-bambu-gray font-mono break-words">{row.skus.join(' · ')}</span>
+      {row.title && row.name !== row.title && (
+        <span className="block text-xs text-bambu-gray break-words">
+          {t('farm.products.sellerHub.becomes', { name: row.name })}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** The listings without a product that "Ignore" was not pressed on: what the new-products window offers. */
+function useNewListings(): SellerHubListing[] {
+  const list = useQuery({
+    queryKey: LISTINGS_KEY,
+    queryFn: farmApi.getSellerHubListings,
+    retry: false,
+    refetchInterval: CHECK_EVERY_MS,
+  });
+  return (list.data?.listings ?? []).filter((r) => !r.dismissed);
+}
+
+function useImport() {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
-  const list = useQuery({
-    queryKey: ['farm', 'sellerhub-listings'],
-    queryFn: farmApi.getSellerHubListings,
-    retry: false,
+  return useMutation({
+    mutationFn: (keys: string[]) => farmApi.importSellerHubListings(keys),
+    onSuccess: (res) => {
+      const skipped = res.already_owned.length + res.not_found.length;
+      showToast(
+        [t('farm.products.sellerHub.done', { count: res.created.length }), skipped && t('farm.products.sellerHub.skipped', { count: skipped })]
+          .filter(Boolean)
+          .join(' · '),
+        res.created.length ? 'success' : 'info',
+      );
+      queryClient.invalidateQueries({ queryKey: ['farm'] });
+    },
+    onError: (e: Error) => showToast(e.message, 'error'),
   });
+}
+
+export function SellerHubImport({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const list = useQuery({ queryKey: LISTINGS_KEY, queryFn: farmApi.getSellerHubListings, retry: false });
+  const run = useImport();
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const rows = list.data?.listings ?? [];
   // Only rows still on the list count: one imported elsewhere in the meantime drops out.
@@ -52,22 +98,6 @@ export function SellerHubImport({ onClose }: { onClose: () => void }) {
       else next.add(key);
       return next;
     });
-
-  const run = useMutation({
-    mutationFn: () => farmApi.importSellerHubListings(picked),
-    onSuccess: (res) => {
-      const skipped = res.already_owned.length + res.not_found.length;
-      showToast(
-        [t('farm.products.sellerHub.done', { count: res.created.length }), skipped && t('farm.products.sellerHub.skipped', { count: skipped })]
-          .filter(Boolean)
-          .join(' · '),
-        res.created.length ? 'success' : 'info',
-      );
-      setChosen(new Set());
-      queryClient.invalidateQueries({ queryKey: ['farm'] });
-    },
-    onError: (e: Error) => showToast(e.message, 'error'),
-  });
 
   return (
     <section
@@ -113,15 +143,12 @@ export function SellerHubImport({ onClose }: { onClose: () => void }) {
                 <label className="flex items-center gap-3 p-2 cursor-pointer hover:bg-bambu-dark">
                   <input type="checkbox" checked={chosen.has(r.key)} onChange={() => toggle(r.key)} />
                   <Photo row={r} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm text-white break-words">{r.title || r.name}</span>
-                    <span className="block text-xs text-bambu-gray font-mono break-words">{r.skus.join(' · ')}</span>
-                    {r.title && r.name !== r.title && (
-                      <span className="block text-xs text-bambu-gray break-words">
-                        {t('farm.products.sellerHub.becomes', { name: r.name })}
-                      </span>
-                    )}
-                  </span>
+                  <Texts row={r} />
+                  {r.dismissed && (
+                    <span className="text-xs text-bambu-gray shrink-0" title={t('farm.products.sellerHub.dismissedNote')}>
+                      {t('farm.products.sellerHub.dismissed')}
+                    </span>
+                  )}
                 </label>
               </li>
             ))}
@@ -136,7 +163,10 @@ export function SellerHubImport({ onClose }: { onClose: () => void }) {
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => run.mutate()} disabled={picked.length === 0 || run.isPending}>
+        <Button
+          onClick={() => run.mutate(picked, { onSuccess: () => setChosen(new Set()) })}
+          disabled={picked.length === 0 || run.isPending}
+        >
           {run.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
           {t('farm.products.sellerHub.import', { count: picked.length })}
         </Button>
@@ -145,5 +175,88 @@ export function SellerHubImport({ onClose }: { onClose: () => void }) {
         </Button>
       </div>
     </section>
+  );
+}
+
+/**
+ * "New product found on Seller Hub": open by itself while there are new listings (when the page opens and when the
+ * periodic check finds one). Closed with X it stays closed for this visit, unless another new listing appears.
+ */
+export function NewSellerHubProducts() {
+  const { t } = useTranslation();
+  const rows = useNewListings();
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const run = useImport();
+  const [closedOn, setClosedOn] = useState<Set<string> | null>(null);
+  const ignore = useMutation({
+    mutationFn: (keys: string[]) => farmApi.ignoreSellerHubListings(keys),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: LISTINGS_KEY }),
+    onError: (e: Error) => showToast(e.message, 'error'),
+  });
+  const busy = run.isPending || ignore.isPending;
+  if (rows.length === 0 || (closedOn && rows.every((r) => closedOn.has(r.key)))) return null;
+  const close = () => setClosedOn(new Set(rows.map((r) => r.key)));
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="farm-sellerhub-new-title"
+        onKeyDown={(e) => e.key === 'Escape' && close()}
+        className="bg-bambu-dark-secondary rounded-lg w-full max-w-xl max-h-[90vh] flex flex-col border border-bambu-dark-tertiary"
+      >
+        <div className="flex items-start justify-between gap-3 p-4 border-b border-bambu-dark-tertiary">
+          <h2 id="farm-sellerhub-new-title" className="text-white font-semibold">
+            {t('farm.products.sellerHub.newTitle', { count: rows.length })}
+          </h2>
+          <Button variant="ghost" size="sm" onClick={close} aria-label={t('farm.products.sellerHub.close')}>
+            <X className="w-4 h-4" />
+          </Button>
+        </div>
+        <ul className="overflow-y-auto divide-y divide-bambu-dark-tertiary">
+          {rows.map((r) => (
+            <li key={r.key} className="flex flex-wrap items-center gap-3 p-3">
+              <Photo row={r} />
+              <Texts row={r} />
+              <div className="flex gap-2 shrink-0">
+                <Button size="sm" disabled={busy} onClick={() => run.mutate([r.key])}
+                  aria-label={t('farm.products.sellerHub.addOne', { name: r.title || r.name })}>
+                  {t('farm.products.sellerHub.add')}
+                </Button>
+                <Button size="sm" variant="secondary" disabled={busy} onClick={() => ignore.mutate([r.key])}
+                  aria-label={t('farm.products.sellerHub.ignoreOne', { name: r.title || r.name })}>
+                  {t('farm.products.sellerHub.ignore')}
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <div className="flex flex-wrap items-center justify-between gap-2 p-4 border-t border-bambu-dark-tertiary">
+          <p className="text-xs text-bambu-gray">{t('farm.products.sellerHub.newNote')}</p>
+          {rows.length > 1 && (
+            <Button disabled={busy} onClick={() => run.mutate(rows.map((r) => r.key))}>
+              {run.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              {t('farm.products.sellerHub.addAll', { count: rows.length })}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The number of new listings, on the "Import from Seller Hub" button. */
+export function NewSellerHubBadge() {
+  const { t } = useTranslation();
+  const count = useNewListings().length;
+  if (count === 0) return null;
+  const label = t('farm.products.sellerHub.newBadge', { count });
+  return (
+    <span className="ml-1 min-w-5 px-1.5 rounded-full bg-amber-500 text-bambu-dark text-xs font-semibold"
+      title={label} aria-label={label}>
+      {count}
+    </span>
   );
 }

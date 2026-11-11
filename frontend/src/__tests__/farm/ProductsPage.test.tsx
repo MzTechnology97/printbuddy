@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
@@ -201,35 +201,38 @@ describe('ProductsPage', () => {
   });
 });
 
-describe('ProductsPage · import from Seller Hub', () => {
-  let posted: unknown;
+describe('ProductsPage · Seller Hub listings', () => {
+  let posted: unknown[];
+  let ignored: unknown[];
+  let rows: object[];
+  const supporto = {
+    key: 'asin:B0FAKE0001',
+    name: 'Supporto di prova',
+    title: 'Supporto di prova, nero',
+    skus: ['TEST-A1', 'TEST-A1-FBM'],
+    asins: ['B0FAKE0001'],
+    image_url: 'https://m.media-amazon.com/images/I/FAKEIMG01.jpg',
+    dismissed: false,
+  };
+  const gancio = {
+    key: 'asin:B0FAKE0002', name: 'Gancio di prova', title: 'Gancio di prova', skus: ['TEST-B1'], asins: ['B0FAKE0002'],
+    image_url: null, dismissed: false,
+  };
 
   beforeEach(() => {
-    posted = undefined;
+    posted = [];
+    ignored = [];
+    rows = [supporto, gancio];
     server.use(
       http.get('/api/v1/farm/shapes', () => HttpResponse.json([])),
       http.get('/api/v1/farm/products', () => HttpResponse.json({ generated_at: '2026-01-01T00:00:00Z', products })),
       http.get('/api/v1/farm/products/overview', () => HttpResponse.json([])),
       http.get('/api/v1/farm/components', () => HttpResponse.json(components)),
       http.get('/api/v1/farm/import/sellerhub/listings', () =>
-        HttpResponse.json({
-          listings: [
-            {
-              key: 'asin:B0FAKE0001',
-              name: 'Supporto di prova',
-              title: 'Supporto di prova, nero',
-              skus: ['TEST-A1', 'TEST-A1-FBM'],
-              asins: ['B0FAKE0001'],
-              image_url: 'https://m.media-amazon.com/images/I/FAKEIMG01.jpg',
-            },
-            { key: 'asin:B0FAKE0002', name: 'Gancio di prova', title: 'Gancio di prova', skus: ['TEST-B1'], asins: ['B0FAKE0002'], image_url: null },
-          ],
-          excluded_inactive: 2,
-          ignored: 1,
-        }),
+        HttpResponse.json({ listings: rows, excluded_inactive: 2, ignored: 1 }),
       ),
       http.post('/api/v1/farm/import/sellerhub/listings', async ({ request }) => {
-        posted = await request.json();
+        posted.push(await request.json());
         return HttpResponse.json({
           created: [{ key: 'asin:B0FAKE0002', project_id: 9, name: 'Gancio di prova' }],
           already_owned: [],
@@ -237,15 +240,70 @@ describe('ProductsPage · import from Seller Hub', () => {
           covers_added: 0,
         });
       }),
+      http.post('/api/v1/farm/import/sellerhub/listings/ignore', async ({ request }) => {
+        const body = (await request.json()) as { keys: string[] };
+        ignored.push(body);
+        rows = rows.map((r) => ((r as { key: string }).key === body.keys[0] ? { ...r, dismissed: true } : r));
+        return HttpResponse.json({ dismissed: 1 });
+      }),
     );
   });
 
-  it('lists photo, SKU and title, and imports only the ticked listings', async () => {
+  it('opens "New product found on Seller Hub" with photo, title, SKU, Add and Add all', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    const dialog = await screen.findByRole('dialog', { name: '2 new products found on Seller Hub' });
+    expect(within(dialog).getByText('Supporto di prova, nero')).toBeInTheDocument();
+    expect(within(dialog).getByText('TEST-A1 · TEST-A1-FBM')).toBeInTheDocument();
+    expect(dialog.querySelector('img[src*="sellerhub/thumbnail"]')).not.toBeNull();
+    expect(screen.getByLabelText('2 new products on Seller Hub')).toHaveTextContent('2');
+
+    await user.click(within(dialog).getByRole('button', { name: 'Add Gancio di prova' }));
+    await waitFor(() => expect(posted).toEqual([{ keys: ['asin:B0FAKE0002'] }]));
+    await user.click(within(dialog).getByRole('button', { name: 'Add all (2)' }));
+    await waitFor(() => expect(posted).toHaveLength(2));
+    expect(posted[1]).toEqual({ keys: ['asin:B0FAKE0001', 'asin:B0FAKE0002'] });
+  });
+
+  it('Ignore takes it out of the window for good, the panel keeps it marked as ignored', async () => {
+    const user = userEvent.setup();
+    render(<ProductsPage />);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Ignore Supporto di prova, nero' }));
+    await waitFor(() => expect(ignored).toEqual([{ keys: ['asin:B0FAKE0001'] }]));
+    const single = await screen.findByRole('dialog', { name: 'New product found on Seller Hub' });
+    expect(within(single).queryByText('Supporto di prova, nero')).not.toBeInTheDocument();
+    // Only one left: no "Add all".
+    expect(within(single).queryByRole('button', { name: /Add all/ })).not.toBeInTheDocument();
+
+    await user.click(within(single).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Import from Seller Hub/ }));
+    const row = await screen.findByRole('checkbox', { name: /Supporto di prova, nero/ });
+    expect(row.closest('label')).toHaveTextContent('ignored');
+    expect(screen.getByRole('checkbox', { name: /Gancio di prova/ }).closest('label')).not.toHaveTextContent('ignored');
+  });
+
+  it('closed with X it stays closed for the visit and opens again on the next one', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ProductsPage />);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    unmount();
+    render(<ProductsPage />);
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('lists photo, SKU and title in the panel, and imports only the ticked listings', async () => {
+    rows = [supporto, gancio].map((r) => ({ ...r, dismissed: true }));
     const user = userEvent.setup();
     render(<ProductsPage />);
     await user.click(await screen.findByRole('button', { name: /Import from Seller Hub/ }));
 
     const first = await screen.findByRole('checkbox', { name: /Supporto di prova, nero/ });
+    // Everything ignored: no window, no badge.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/new products? on Seller Hub/)).not.toBeInTheDocument();
     expect(first).toHaveAccessibleName(/TEST-A1 · TEST-A1-FBM/);
     expect(screen.getByText('becomes “Supporto di prova”')).toBeInTheDocument();
     // The Amazon photo goes through Printbuddy, never straight to Amazon (CSP).
@@ -259,6 +317,21 @@ describe('ProductsPage · import from Seller Hub', () => {
     expect(button).toBeDisabled();
     await user.click(screen.getByRole('checkbox', { name: /Gancio di prova/ }));
     await user.click(screen.getByRole('button', { name: 'Import 1 product' }));
-    await waitFor(() => expect(posted).toEqual({ keys: ['asin:B0FAKE0002'] }));
+    await waitFor(() => expect(posted).toEqual([{ keys: ['asin:B0FAKE0002'] }]));
+  });
+
+  it('marks a product imported from Seller Hub and still without components as to complete', async () => {
+    rows = [];
+    server.use(
+      http.get('/api/v1/farm/products', () =>
+        HttpResponse.json({
+          generated_at: '2026-01-01T00:00:00Z',
+          products: [{ project_id: 8, name: 'Gancio di prova', skus: ['TEST-B1'], asins: [], updated_at: '2026-01-01T00:00:00Z', parts: [], to_complete: true }],
+        }),
+      ),
+    );
+    render(<ProductsPage />);
+    const badge = await screen.findByText('to complete');
+    expect(badge).toHaveAttribute('title', 'Imported from Seller Hub: add its components');
   });
 });

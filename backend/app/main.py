@@ -6302,6 +6302,9 @@ async def lifespan(app: FastAPI):
     farm_library_scheduler.start()  # fork: periodic sync of watched NAS folders
     farm_job_dispatcher.start()  # fork: places Accoda jobs on free printers
     brand_colour_scheduler.start()  # fork: colours of the filament brands in use
+    from backend.app.farm.products.sellerhub_import import sellerhub_covers_scheduler  # fork: after the farm routes
+
+    sellerhub_covers_scheduler.start()  # fork: product photos from Seller Hub's listings, hourly
     telegram_bot.start()  # fork: Telegram providers that take commands (long polling)
 
     # Start the archive auto-purge sweeper (#1008 follow-up)
@@ -6365,6 +6368,7 @@ async def lifespan(app: FastAPI):
 
     await job_events.stop()
     brand_colour_scheduler.stop()
+    sellerhub_covers_scheduler.stop()
     await telegram_bot.stop()
     archive_purge_service.stop_scheduler()
     obico_detection_service.stop()
