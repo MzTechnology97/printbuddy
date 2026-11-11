@@ -68,6 +68,18 @@ def _value_of(tag: bytes) -> str | None:
         raise InvalidObjectSetting(f"a setting's line is not valid XML: {exc}") from exc
 
 
+def check_filament(new, part: bool, filaments: int) -> str:
+    """An object's (part's) ``extruder``: the list's Fila. column and keys 1-9 (ObjectList ``update_filament_in_config``,
+    ``set_extruder_for_selected_items``): one of the project's filaments, 1-based; a part or modifier may hold 0,
+    "default" (a part prints with its object's filament, a modifier changes none)."""
+    text = str(new).strip()
+    if isinstance(new, bool) or not text.isdigit():
+        raise InvalidObjectSetting(f"extruder: {text!r} is not a filament number")
+    if not (0 if part else 1) <= int(text) <= filaments:
+        raise InvalidObjectSetting(f"extruder: the project has no filament {int(text)} (1 to {filaments})")
+    return str(int(text))
+
+
 def check_value(key: str, new, own: str | None, project, part: bool, slicer: str) -> str:
     """``new`` as the copy writes it for an object (``part``: a part), in the format of its own value ``own`` or
     else the project's; ``InvalidObjectSetting`` with the reason when it can't be one."""
@@ -186,7 +198,11 @@ def apply(settings: bytes, cfg: dict, edits: list[ObjectSetting], slicer: str) -
             a, b = _line(settings, mine[0].start(), mine[0].end())
             settings, after = settings[:a] + settings[b:], None
         else:
-            after = check_value(e.key, e.value, own, cfg.get(e.key), e.part_id is not None, slicer)
+            after = (
+                check_filament(e.value, e.part_id is not None, len(cfg.get("filament_colour") or [None]))
+                if e.key == "extruder"
+                else check_value(e.key, e.value, own, cfg.get(e.key), e.part_id is not None, slicer)
+            )
             if after == own:
                 continue
             attr = f' value="{_escape(after)}"'.encode()

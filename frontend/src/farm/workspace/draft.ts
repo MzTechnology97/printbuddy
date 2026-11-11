@@ -212,6 +212,17 @@ export function useSettingsDraft(
       dispatch({ type: 'own', edit: (o) => withOwn(o, target, { [key]: value }), key: value === undefined ? null : `${target}|${key}`, at: Date.now() }),
     [],
   );
+  /** Several targets' keys in one step (Orca's filament change on an object drops its parts' own). */
+  const setOwnTargets = useCallback(
+    (values: Record<string, Record<string, string | null | undefined>>) =>
+      dispatch({
+        type: 'own',
+        edit: (o) => Object.entries(values).reduce((acc, [target, keys]) => withOwn(acc, target, keys), o),
+        key: null,
+        at: Date.now(),
+      }),
+    [],
+  );
   /** Several keys of one target in one step (Orca's colEditing: all its settings reset). */
   const setOwnMany = useCallback(
     (target: string, values: Record<string, string | null | undefined>) =>
@@ -233,7 +244,7 @@ export function useSettingsDraft(
     [draft, byKey],
   );
   return {
-    settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, draft, set, reset, resetAll, invalid,
+    settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, draft, set, reset, resetAll, invalid,
     count: Object.keys(draft).length + Object.values(own).reduce((n, keys) => n + Object.keys(keys).length, 0),
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };

@@ -159,6 +159,36 @@ class TestApply:
         )
         assert out == text.replace(density, density + b'      <metadata key="wall_loops" value="5"/>\n')
 
+    def test_the_filament_of_an_object_a_part_and_a_modifier(self):
+        # the project has 2 filaments; a part or a modifier may hold 0 ("default"), an object may not
+        out, applied = edit(
+            {"object_id": "2", "key": "extruder", "value": 2},
+            {"object_id": "2", "part_id": "1", "key": "extruder", "value": "0"},
+            {"object_id": "2", "part_id": "3", "key": "extruder", "value": "2"},
+        )
+        assert out == SETTINGS.replace(b'"extruder" value="1"', b'"extruder" value="2"').replace(
+            b'      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n      <metadata key="sparse',
+            b'      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+            b'      <metadata key="extruder" value="0"/>\n      <metadata key="sparse',
+        ).replace(
+            b'value="Box &amp; co"/>\n      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n',
+            b'value="Box &amp; co"/>\n      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n'
+            b'      <metadata key="extruder" value="2"/>\n',
+        )
+        assert [(a["part_id"], a["before"], a["after"]) for a in applied] == [
+            (None, "1", "2"),
+            ("1", None, "0"),
+            ("3", None, "2"),
+        ]
+        for item, error in (
+            ({"object_id": "2", "key": "extruder", "value": "0"}, "no filament 0"),
+            ({"object_id": "2", "key": "extruder", "value": "3"}, "no filament 3"),
+            ({"object_id": "2", "part_id": "1", "key": "extruder", "value": "two"}, "not a filament number"),
+            ({"object_id": "2", "part_id": "5", "key": "extruder", "value": "1"}, "has no settings of its own"),
+        ):
+            with pytest.raises(InvalidObjectSetting, match=error):
+                edit(item)
+
     def test_refuses_a_key_set_twice(self):
         with pytest.raises(InvalidObjectSetting, match="set twice"):
             edit(
