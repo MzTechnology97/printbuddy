@@ -50,18 +50,18 @@ def _extruder(elem: ET.Element) -> ET.Element | None:
     return elem.find("metadata[@key='extruder']")
 
 
+def _extruder_value(elem: ET.Element) -> int:
+    """The ``extruder`` an element sets; 0 when it sets none (or 0: "the default")."""
+    meta = _extruder(elem)
+    return int(meta.get("value") or 0) if meta is not None else 0
+
+
 def _object_filaments(obj: ET.Element) -> set[int]:
-    """Filaments (1-based) an object prints with: its own, and its parts' where they set one."""
-    own = _extruder(obj)
-    default = int(own.get("value") or 1) if own is not None else 1
-    used = {default}
-    for part in obj.findall("part"):
-        if part.get("subtype", "normal_part") != "normal_part":
-            continue  # modifiers and negative volumes print nothing of their own
-        meta = _extruder(part)
-        if meta is not None and int(meta.get("value") or 0):
-            used.add(int(meta.get("value")))
-    return used
+    """Filaments (1-based) an object prints with, as the slicers resolve them (``ModelVolume::extruder_id``):
+    each part's own, else the object's, else filament 1."""
+    own = _extruder_value(obj) or 1
+    parts = [p for p in obj.findall("part") if p.get("subtype", "normal_part") == "normal_part"]  # modifiers print nothing
+    return {_extruder_value(p) or own for p in parts} or {own}
 
 
 def _painted(zf: zipfile.ZipFile) -> bool:

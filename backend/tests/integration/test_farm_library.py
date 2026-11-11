@@ -727,6 +727,25 @@ class TestColourVariantFile:
             variant_filament(src, 1, "Verde", "2e9e44", 80)
         assert variant_filament(src, 2, "Nero", "111111", 80) == 0  # two filaments on the plate: left alone
 
+    def test_filaments_default_as_the_slicers(self):
+        """``ModelVolume::extruder_id``: a part's own extruder, else its object's, else filament 1 (0 = unset)."""
+        import xml.etree.ElementTree as ET
+
+        from backend.app.farm.variants import _object_filaments
+
+        def used(xml: str) -> set[int]:
+            return _object_filaments(ET.fromstring(xml))
+
+        assert used('<object id="2"><metadata key="name" value="A"/></object>') == {1}
+        assert used('<object id="2"><metadata key="extruder" value="0"/><part id="1"/></object>') == {1}
+        assert used('<object id="2"><part id="1"><metadata key="extruder" value="0"/></part></object>') == {1}
+        # every part on its own filament: the object's is printed by none of them
+        assert used(
+            '<object id="2"><metadata key="extruder" value="1"/>'
+            '<part id="1"><metadata key="extruder" value="2"/></part>'
+            '<part id="2" subtype="modifier_part"><metadata key="extruder" value="3"/></part></object>'
+        ) == {2}
+
     def test_plate_slots_before_the_slice(self, tmp_path):
         """The print dialog's slot rows from the unsliced project: the plate's filaments, or the variant's."""
         from backend.app.farm.variants import plate_slots
