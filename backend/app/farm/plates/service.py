@@ -242,7 +242,7 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
 
 
 async def _latest_slices(
-    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None, nozzle: int | None = None
+    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None, nozzle: str | None = None
 ) -> dict[int, LibraryFile]:
     """Sliced outputs of this exact file version, by plate number (the plain ones, or one colour variant).
 

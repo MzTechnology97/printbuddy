@@ -25,6 +25,8 @@ import defusedxml.ElementTree as SafeET
 from defusedxml import DefusedXmlException
 from pydantic import BaseModel, Field
 
+from backend.app.utils.xml_prefixes import declared
+
 MAX_TRANSFORMS = 1000
 MAX_OFFSET = 100_000.0  # mm from the origin: far beyond any bed, short of nonsense
 MIN_SCALE, MAX_SCALE = 1e-3, 1e3  # per axis
@@ -243,7 +245,7 @@ def _inverse(m: list[list[float]]) -> list[list[float]]:
 def _part_settings(settings: bytes) -> list[tuple[str, tuple]]:
     """Every element of model_settings.config with its attributes, in order: what a part's move must leave be."""
     try:
-        root = SafeET.fromstring(settings)
+        root = SafeET.fromstring(declared(settings))  # Orca's <slic3rpe:text> declares no prefix
     except (SafeET.ParseError, DefusedXmlException) as exc:
         raise InvalidPlacement(f"model_settings.config is not valid XML: {exc}") from exc
     return [(el.tag, tuple(sorted(el.attrib.items()))) for el in root.iter()]

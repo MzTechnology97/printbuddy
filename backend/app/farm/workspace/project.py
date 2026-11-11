@@ -30,6 +30,7 @@ from backend.app.farm.detect import (
     _read_header_metadata,
     detect_slicer,
 )
+from backend.app.utils.xml_prefixes import declared
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
 
@@ -155,7 +156,7 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
     if raw is None:
         return {"plates": [], "objects": [], "warnings": []}
     try:
-        root = SafeET.fromstring(raw)
+        root = SafeET.fromstring(declared(raw))  # Orca's <slic3rpe:text> declares no prefix
     except (SafeET.ParseError, DefusedXmlException) as exc:
         return {"plates": [], "objects": [], "warnings": [f"{MODEL_SETTINGS_ENTRY} is not valid XML: {exc}"]}
     keys = set(settings or {})

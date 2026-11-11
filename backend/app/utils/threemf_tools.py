@@ -14,6 +14,8 @@ from pathlib import Path
 
 import defusedxml.ElementTree as ET
 
+from backend.app.utils.xml_prefixes import declared
+
 logger = logging.getLogger(__name__)
 
 # Default filament properties
@@ -750,7 +752,8 @@ def extract_plate_extruder_set_from_3mf(zf: zipfile.ZipFile, plate_id: int) -> s
     if "Metadata/model_settings.config" not in zf.namelist():
         return set()
     try:
-        root = ET.fromstring(zf.read("Metadata/model_settings.config").decode())
+        # Orca writes embossed-text parts as <slic3rpe:text> without declaring the prefix
+        root = ET.fromstring(declared(zf.read("Metadata/model_settings.config")))
     except (ET.ParseError, OSError):
         return set()
 
