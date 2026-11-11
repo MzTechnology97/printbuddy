@@ -50,7 +50,8 @@ export interface WorkspaceObject {
   /** Orca puts the object back on the bed after a move, rotation or scale (model_settings.config's auto_drop) */
   auto_drop?: boolean;
   parts: { id: string | null; name: string | null; type: string | null }[];
-  overrides: { key: string; value: string; part: string | null }[];
+  /** its own settings and its parts' (``part_id``: whose) */
+  overrides: { key: string; value: string; part: string | null; part_id?: string | null }[];
 }
 
 export interface WorkspacePlate {
@@ -122,6 +123,14 @@ export interface InstanceTransform {
   matrix: number[];
 }
 
+/** An object's (``part_id``: a part's) own setting set, changed or dropped (``value`` null): Orca's object tab. */
+export interface ObjectSettingEdit {
+  object_id: string;
+  part_id: string | null;
+  key: string;
+  value: string | null;
+}
+
 /** A part placed anew in its object: its component transform (3MF's 12 numbers), for every instance. */
 export interface PartTransform {
   object_id: string;
@@ -190,9 +199,18 @@ export const workspaceApi = {
     presets: PresetRef[] = [],
     transforms: InstanceTransform[] = [],
     partTransforms: PartTransform[] = [],
+    objectSettings: ObjectSettingEdit[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
-      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets, transforms, part_transforms: partTransforms }),
+      body: JSON.stringify({
+        base_sha256: baseSha256,
+        changes,
+        filename: filename || null,
+        presets,
+        transforms,
+        part_transforms: partTransforms,
+        object_settings: objectSettings,
+      }),
     }),
 };

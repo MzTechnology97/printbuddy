@@ -453,7 +453,7 @@ describe('SettingsPanel', () => {
   });
 
   it("shows an object's settings read only, its own first with the global value", async () => {
-    render(<Harness own={{ wall_loops: '5' }} />);
+    render(<Harness own={{ wall_loops: '5' }} editable={false} />);
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Frequent1', 'Quality', 'Strength1', 'Support']);
     const row = screen.getByTestId('setting-wall_loops');
     expect(row).toHaveTextContent('5');

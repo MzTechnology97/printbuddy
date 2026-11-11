@@ -6,8 +6,10 @@
 // Key, system-preset state, original value and read-only reason are in the row's tooltip.
 // Settings whose parent switch is off are greyed (dependencies.ts). What can change, and the checks, come from
 // the backend (WorkspaceSetting.editable, draft.ts).
-// With ``object``, the same pages show what one object (or part) slices with, read only: its own values first,
-// with the global value under them, a "Frequent" tab first, and only the settings an object can have.
+// With ``object``, the same pages show what one object (or part) slices with, as OrcaSlicer's object and part tabs
+// (TabPrintObject, TabPrintPart): a "Frequent" tab first, only the settings an object (a part) can have, its own
+// values first with the global value under them. A value changed there becomes its own (``onChange``); the reset
+// arrow drops it (``onReset``), and the project's value applies again.
 import { useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Filter, RotateCcw } from 'lucide-react';
@@ -25,9 +27,11 @@ const OWN_GROUP = '__own__';
 // OrcaSlicer's frequent object settings (GUI_Factories.cpp FREQ_SETTINGS_BUNDLE_FFF, first of each group)
 const FREQUENT_KEYS = ['layer_height', 'sparse_infill_density', 'wall_loops', 'enable_support'];
 
-/** One object's (or part's) own settings: key -> the value it slices with. */
+/** One object's (or part's) own settings: key -> the value it slices with (a list per extruder comma separated). */
 export interface ObjectView {
   own: Record<string, string>;
+  /** a part or modifier: the part keys only (TabPrintPart) */
+  part?: boolean;
 }
 
 interface Props {
@@ -49,7 +53,7 @@ interface Props {
   header?: ReactNode;
   /** Only this element of per-filament values (the filament window of one filament). */
   index?: number;
-  /** Show one object's settings, read only. */
+  /** Show one object's (part's) settings; ``onChange`` / ``onReset`` then edit its own. */
   object?: ObjectView;
 }
 
@@ -87,20 +91,23 @@ export function SettingsPanel({
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const tr = (text: string) => orcaText(layout, text, lang);
-  const editable = fileEditable && !object;
+  const editable = fileEditable;
+  const forPart = !!object?.part;
   const pages = useMemo(() => {
     const all = layout.pages[section];
     if (!object) return all;
-    // an object: OrcaSlicer's object pages hold only what an object can have of its own
-    const allowed = new Set(layout.object_keys ?? []);
+    // an object: OrcaSlicer's object pages hold only what an object (a part) can have of its own
+    const allowed = new Set((forPart ? layout.region_keys : null) ?? layout.object_keys ?? []);
     const own = all
       .map((p) => ({
         ...p,
         groups: p.groups.map((g) => ({ ...g, keys: g.keys.filter((k) => allowed.has(k)) })).filter((g) => g.keys.length),
       }))
       .filter((p) => p.groups.length);
-    return [{ title: FREQUENT_TAB, icon: '', groups: [{ title: '', icon: null, keys: FREQUENT_KEYS }] }, ...own];
-  }, [layout, section, object]);
+    const frequent = FREQUENT_KEYS.filter((k) => allowed.has(k)); // a part: density and walls (TabPrintModel::build)
+    return [{ title: FREQUENT_TAB, icon: '', groups: [{ title: '', icon: null, keys: frequent }] }, ...own];
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the pages depend on whether there is an object, not its values
+  }, [layout, section, !!object, forPart]);
   const simple = mode === 'simple';
   const withUnknown = showUnknown && !simple && !object;
   // opens on the first page with something to change (the printer's first pages are mostly read only)
@@ -327,9 +334,12 @@ export function SettingsPanel({
               </h4>
             ) : null;
           lastGroup = group;
-          const own = object?.own[s.key];
+          const ownText = object?.own[s.key];
+          const global = globalValue(draft, s);
+          // an object's value of a list (one per extruder) is written comma separated
+          const own = ownText != null && Array.isArray(global) ? ownText.split(',') : ownText;
           const changed = s.key in draft;
-          const value = own ?? globalValue(draft, s);
+          const value = own ?? global;
           const isGreyed = greyed.has(s.key);
           const settingEditable = editable && s.editable && !isGreyed;
           const isAbsent = s.readonly_reason === 'absent';
@@ -370,7 +380,7 @@ export function SettingsPanel({
                   index={index}
                   disabled={isGreyed && editable && s.editable}
                 />
-                {changed && !object ? (
+                {(object ? own != null : changed) ? (
                   <button
                     onClick={() => onReset(s.key)}
                     title={t('farm.workspace.reset')}

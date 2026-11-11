@@ -1,6 +1,7 @@
 // Fork (printfarm): what the workspace selects (a plate, an object or one of its parts) and the settings each
 // has of its own, from the document (model_settings.config objects, parts and plate metadata).
-import type { WorkspaceObject, WorkspacePlate } from './api';
+import type { ObjectSettingEdit, WorkspaceObject, WorkspacePlate } from './api';
+import type { OwnEdits } from './draft';
 import type { OrcaLayout } from './orcaLayout';
 
 export type Selection =
@@ -26,9 +27,52 @@ export function instancesOf(plates: WorkspacePlate[]): Map<string, { plate: numb
   return out;
 }
 
-/** An object's (part's) own settings: key -> value. */
-export function ownSettings(obj: WorkspaceObject, part?: string | null): Record<string, string> {
-  return Object.fromEntries(obj.overrides.filter((o) => (part ? o.part === part : !o.part || o.part === obj.name)).map((o) => [o.key, o.value]));
+/** Where an object's (``partId``: a part's) own settings are kept in the draft (draft.ts ``OwnEdits``). */
+export const ownTarget = (objectId: string, partId?: string | null): string => (partId ? `${objectId}/${partId}` : objectId);
+
+/** The part Orca's list doesn't show: an object's one model part, named as the object (its settings show with the
+ * object's). */
+export function hiddenPart(obj: WorkspaceObject): string | null {
+  const [only, ...more] = obj.parts;
+  return only && !more.length && (only.type ?? 'normal_part') === 'normal_part' && only.name === obj.name ? only.id : null;
+}
+
+/** One target's own settings as the file has them (``partId``: a part's), the unsaved ``edits`` made on them. */
+export function targetOwn(obj: WorkspaceObject, partId: string | null | undefined, edits?: OwnEdits): Record<string, string> {
+  const saved = obj.overrides.filter((o) => (partId ? o.part_id === partId : !o.part_id)).map((o) => [o.key, o.value]);
+  const out: Record<string, string> = Object.fromEntries(saved);
+  for (const [key, value] of Object.entries(edits?.[ownTarget(obj.id ?? '', partId)] ?? {})) {
+    if (value === null) delete out[key];
+    else out[key] = value;
+  }
+  return out;
+}
+
+/** An object's (``partId``: a part's) own settings: key -> value, the unsaved edits made. An object's view holds
+ * the hidden part's too (``hiddenPart``; ``editTarget`` says whose a key is). */
+export function ownSettings(obj: WorkspaceObject, partId?: string | null, edits?: OwnEdits): Record<string, string> {
+  if (partId) return targetOwn(obj, partId, edits);
+  const hidden = hiddenPart(obj);
+  const mine = targetOwn(obj, null, edits);
+  const part = hidden ? targetOwn(obj, hidden, edits) : {};
+  return { ...mine, ...part }; // the part's value is the one it slices with
+}
+
+/** The target an edit of ``key`` goes to in an object's view: the hidden part when it holds the key (its value
+ * wins over the object's), else the object. */
+export function editTarget(obj: WorkspaceObject, partId: string | null | undefined, key: string, edits?: OwnEdits): string {
+  const id = obj.id ?? '';
+  if (partId) return ownTarget(id, partId);
+  const hidden = hiddenPart(obj);
+  return hidden && key in targetOwn(obj, hidden, edits) ? ownTarget(id, hidden) : ownTarget(id);
+}
+
+/** The own settings edited, as the copy saves them (null: no longer its own). */
+export function ownToSave(edits: OwnEdits): ObjectSettingEdit[] {
+  return Object.entries(edits).flatMap(([target, keys]) => {
+    const [object_id, part_id = null] = target.split('/');
+    return Object.entries(keys).map(([key, value]) => ({ object_id, part_id, key, value }));
+  });
 }
 
 /** The plate's own settings (the keys of ``layout.plate_keys`` it sets). */

@@ -315,6 +315,7 @@ UI_STRINGS = [
     "Click the icon to edit support painting of the object",
     "Click the icon to edit color painting for the object",
     "Click the icon to shift this object to the bed",
+    "Click the icon to reset all settings of the object",  # colEditing (GUI_ObjectList.cpp)
     "Color Painting",
     # the object info box (Plater.cpp), with their placeholders and line ends as OrcaSlicer writes them
     "Number of currently selected parts: %1%\n",
@@ -814,15 +815,16 @@ def options(cfg_src: str, keys: set[str] | None = None, wanted: set[str] = froze
     return out
 
 
-def object_keys(hpp_src: str) -> list[str]:
-    """The keys of PrintObjectConfig and PrintRegionConfig (PrintConfig.hpp): what an object or part can override."""
-    keys: list[str] = []
+def object_keys(hpp_src: str) -> tuple[list[str], list[str]]:
+    """The keys of PrintObjectConfig and PrintRegionConfig (PrintConfig.hpp): what an object can override (both,
+    TabPrintObject), and what a part or modifier can (PrintRegionConfig only, TabPrintPart)."""
+    found: dict[str, list[str]] = {}
     for name in ("PrintObjectConfig", "PrintRegionConfig"):
         m = re.search(rf"PRINT_CONFIG_CLASS_DEFINE\(\s*{name},(.*?)\n\)", hpp_src, re.S)
         if not m:
             raise SystemExit(f"{name} not found in PrintConfig.hpp")
-        keys += re.findall(r"\(\(ConfigOption[\w<>:]+,\s*(\w+)\)\)", _strip_comments(m.group(1)))
-    return sorted(set(keys))
+        found[name] = re.findall(r"\(\(ConfigOption[\w<>:]+,\s*(\w+)\)\)", _strip_comments(m.group(1)))
+    return sorted({*found["PrintObjectConfig"], *found["PrintRegionConfig"]}), sorted(set(found["PrintRegionConfig"]))
 
 
 CTX = "\u0004"  # gettext's separator: a contextual msgid is keyed "context\u0004msgid"
@@ -1084,7 +1086,7 @@ def main() -> None:
         (src / conf["publish"]).read_text(encoding="utf-8") if conf["publish"] else "",
         conf["sections"],
     )
-    per_object = object_keys((src / "src/libslic3r/PrintConfig.hpp").read_text(encoding="utf-8"))
+    per_object, per_part = object_keys((src / "src/libslic3r/PrintConfig.hpp").read_text(encoding="utf-8"))
     sections = preset_sections((src / "src/libslic3r/Preset.cpp").read_text(encoding="utf-8"))
     for section, section_pages in pages.items():  # what Tab.cpp places on a preset's pages is that preset's
         for k in (k for p in section_pages for g in p["groups"] for k in g["keys"]):
@@ -1136,6 +1138,7 @@ def main() -> None:
         "options": {k: {kk: vv for kk, vv in o.items() if kk != "gui"} for k, o in opts.items()},
         "sections": {k: v for k, v in sorted(sections.items()) if k in opts},
         "object_keys": per_object,
+        "region_keys": per_part,
         "plate_keys": PLATE_KEYS,
         "shortcuts": keyboard,
         "it": italian,
@@ -1143,7 +1146,8 @@ def main() -> None:
     text = json.dumps(data, ensure_ascii=False, indent=1) + "\n"
     (OUT / conf["layout"]).write_text(text, encoding="utf-8", newline="\n")
     BACKEND_OUT.mkdir(parents=True, exist_ok=True)
-    backend = {**source, "options": backend_options(opts, sections)}
+    # what an object (a part) may hold of its own: farm/workspace/object_settings.py checks a copy's edits against them
+    backend = {**source, "options": backend_options(opts, sections), "object_keys": per_object, "region_keys": per_part}
     (BACKEND_OUT / f"{slicer}.json").write_text(
         json.dumps(backend, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n",
         encoding="utf-8",

@@ -53,8 +53,9 @@ interface SaveProps {
   filename: string;
   draft: Draft;
   settings: Map<string, WorkspaceSetting>;
-  /** The preset switches the copy gets: a section's title and the preset's name. */
-  switches?: { section: string; name: string }[];
+  /** The preset switches the copy gets: a section's title and the preset's name (the placements and the objects'
+   * own settings too: what changes and how; ``id`` and ``invalid``: a value the copy would refuse). */
+  switches?: { section: string; name: string; id?: string; invalid?: boolean }[];
   invalid: string[];
   saving: boolean;
   error: unknown;
@@ -70,7 +71,7 @@ export function SaveCopyDialog({ filename, draft, settings, switches = [], inval
     <Dialog title={t('farm.workspace.save.title')} intro={t('farm.workspace.save.intro')} onClose={saving ? () => {} : onClose}>
       <ul className="p-4 space-y-1 overflow-y-auto text-sm">
         {switches.map((s, i) => (
-          <li key={i}>
+          <li key={s.id ?? i} className={s.invalid ? 'text-red-400' : ''}>
             <span className="text-white">{s.section}</span> <span className="text-bambu-gray">→ {s.name}</span>
           </li>
         ))}
