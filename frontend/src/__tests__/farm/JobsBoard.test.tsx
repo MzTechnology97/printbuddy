@@ -166,6 +166,28 @@ describe('JobsBoard', () => {
     await user.click(buttons[buttons.length - 1]); // the dialog's
     await waitFor(() => expect(actions).toEqual(['start 7']));
   });
+
+  it('shows the filament deficit of a refused start and can start anyway', async () => {
+    server.use(
+      http.post('/api/v1/queue/:id/start', ({ params, request }) => {
+        const skip = new URL(request.url).searchParams.get('skip_filament_check') === 'true';
+        actions.push(`start ${params.id}${skip ? ' anyway' : ''}`);
+        if (skip) return HttpResponse.json({ id: Number(params.id) });
+        return HttpResponse.json({ detail: { code: 'insufficient_filament',
+          deficit: [{ slot_id: 3, required_grams: 222.4, remaining_grams: 99.7 }] } }, { status: 409 });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<JobsBoard />);
+    await user.click(await screen.findByText('Regalo.gcode.3mf'));
+    await user.click(await screen.findByRole('button', { name: 'Start' }));
+    const buttons = screen.getAllByRole('button', { name: 'Start' });
+    await user.click(buttons[buttons.length - 1]);
+    expect(await screen.findByText(/Slot 3: needs 222 g, 100 g remaining/)).toBeInTheDocument();
+    expect(screen.queryByText('HTTP 409')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Print Anyway' }));
+    await waitFor(() => expect(actions).toEqual(['start 7', 'start 7 anyway']));
+  });
 });
 
 describe('JobsBoard: prints outside the queue', () => {
