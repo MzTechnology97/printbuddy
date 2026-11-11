@@ -159,16 +159,25 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
         root = SafeET.fromstring(declared(raw))  # Orca's <slic3rpe:text> declares no prefix
     except (SafeET.ParseError, DefusedXmlException) as exc:
         return {"plates": [], "objects": [], "warnings": [f"{MODEL_SETTINGS_ENTRY} is not valid XML: {exc}"]}
-    keys = set(settings or {})
+    from backend.app.farm.workspace.object_settings import model_keys  # imports placement, which this module doesn't
+    from backend.app.farm.workspace.settings import IDENTITY
+
+    # a project setting, or one an object can have of its own though the project's file doesn't hold it; never an
+    # identity (an object's and its parts' "name" is theirs, not the preset's)
+    keys = (set(settings or {}) - IDENTITY) | model_keys()[0]
     objects = []
     for obj in root.findall("object"):
         meta = _meta(obj)
-        overrides = [{"key": k, "value": v, "part": None} for k, v in meta.items() if k in keys]
+        overrides = [{"key": k, "value": v, "part": None, "part_id": None} for k, v in meta.items() if k in keys]
         parts = []
         for part in obj.findall("part"):
             pmeta = _meta(part)
             parts.append({"id": part.get("id"), "name": pmeta.get("name"), "type": part.get("subtype")})
-            overrides += [{"key": k, "value": v, "part": pmeta.get("name")} for k, v in pmeta.items() if k in keys]
+            overrides += [
+                {"key": k, "value": v, "part": pmeta.get("name"), "part_id": part.get("id")}
+                for k, v in pmeta.items()
+                if k in keys
+            ]
         objects.append(
             {
                 "id": obj.get("id"),

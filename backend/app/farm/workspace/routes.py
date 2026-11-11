@@ -26,7 +26,8 @@ from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
-from backend.app.farm.workspace import placement, project, settings as ws_settings
+from backend.app.farm.workspace import object_settings, placement, project, settings as ws_settings
+from backend.app.farm.workspace.object_settings import MAX_EDITS as MAX_OBJECT_SETTINGS, ObjectSetting
 from backend.app.farm.workspace.presets import PresetRef, router as presets_router, switch_target
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
@@ -50,6 +51,8 @@ class CopyRequest(BaseModel):
     transforms: list[placement.InstanceTransform] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
     # parts placed anew in their objects: each one's new component transform
     part_transforms: list[placement.PartTransform] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
+    # an object's (part's) own settings set, changed or dropped (OrcaSlicer's object and part tabs)
+    object_settings: list[ObjectSetting] = Field(default_factory=list, max_length=MAX_OBJECT_SETTINGS)
 
 
 async def _library_3mf(db: AsyncSession, file_id: int) -> LibraryFile:
@@ -188,6 +191,7 @@ def _build_copy(
     targets: list[dict],
     transforms: list[placement.InstanceTransform] = (),
     part_transforms: list[placement.PartTransform] = (),
+    own_settings: list[ObjectSetting] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -204,17 +208,24 @@ def _build_copy(
             switched += done
         new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
         replaced, placed = {}, []
+        settings_xml = (
+            project._read_small(zf, project.MODEL_SETTINGS_ENTRY) if part_transforms or own_settings else None
+        )
         if transforms or part_transforms:
             model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
             if part_transforms:
-                settings_xml = project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
                 model, settings_xml, moved = placement.place_parts(model, settings_xml, part_transforms)
                 placed += moved
-                if settings_xml is not None:
-                    replaced[project.MODEL_SETTINGS_ENTRY] = settings_xml
             replaced[project.MODEL_ENTRY] = model
+        if own_settings:
+            if settings_xml is None:
+                raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
+            settings_xml, owned = object_settings.apply(settings_xml, cfg, list(own_settings), slicer)
+            placed += owned
+        if settings_xml is not None and settings_xml != project._read_small(zf, project.MODEL_SETTINGS_ENTRY):
+            replaced[project.MODEL_SETTINGS_ENTRY] = settings_xml
         applied = switched + applied + placed
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
@@ -224,6 +235,8 @@ def _build_copy(
         raise HTTPException(status_code=422, detail=f"Some values were refused: {exc}"[:1000]) from exc
     except placement.InvalidPlacement as exc:
         raise HTTPException(status_code=422, detail=f"The objects can't be placed so: {exc}"[:500]) from exc
+    except object_settings.InvalidObjectSetting as exc:
+        raise HTTPException(status_code=422, detail=f"An object's settings were refused: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -276,7 +289,15 @@ async def save_copy(
             )
         try:
             applied = await asyncio.to_thread(
-                _build_copy, lib_file, data, body.changes, tmp, targets, body.transforms, body.part_transforms
+                _build_copy,
+                lib_file,
+                data,
+                body.changes,
+                tmp,
+                targets,
+                body.transforms,
+                body.part_transforms,
+                body.object_settings,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)

@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import type { SettingValue, WorkspaceDocument, WorkspaceSetting } from './api';
 import type { Draft } from './draft';
 import type { Selection } from './objects';
-import { ObjectsPanel } from './ObjectsPanel';
+import { type OwnEditing, ObjectsPanel } from './ObjectsPanel';
 import { MODES, type Mode, type OrcaLayout, orcaIcon } from './orcaLayout';
 import { EnumSelect } from './SettingControl';
 import { SettingsPanel } from './SettingsPanel';
@@ -72,6 +72,8 @@ interface Props {
   onComparePresets?: () => void;
   /** OrcaSlicer strings for those buttons' tooltips. */
   presetTips?: { save: string; compare: string };
+  /** The objects' own settings can be edited from the Objects view (ObjectsPanel). */
+  own?: OwnEditing;
   /** OrcaSlicer's preset combos: pick another preset for a section (a filament's slot), its list under ``at``. */
   onPickPreset?: (section: 'process' | 'filament' | 'printer', filament: number, at: { x: number; y: number }) => void;
   /** The combos' label (the screen reader's). */
@@ -140,6 +142,7 @@ export function Sidebar({
   presetTips,
   onPickPreset,
   pickLabel,
+  own,
 }: Props) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>('simple');
@@ -253,6 +256,7 @@ export function Sidebar({
             onEmptyMenu={onEmptyMenu}
             selectedIds={selectedIds}
             onToggle={onToggle}
+            own={own}
           />
         </div>
       ) : (

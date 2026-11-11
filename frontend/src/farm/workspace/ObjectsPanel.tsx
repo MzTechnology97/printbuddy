@@ -3,8 +3,9 @@
 // (mesh warning in the name, variable layer height, printable, filament chip, support and colour painting,
 // sinking, a cog for settings of its own; a column only when some object needs it),
 // and under it the settings of what is selected: a plate's "Plate Settings" (model_settings.config plate
-// metadata) or an object's (part's) settings by tab, its own values first. Read only in this version: the
-// copy writer rewrites project_settings.config only; per-object editing comes with phase 2.
+// metadata, read only until the plates' batch) or an object's (part's) settings by tab, its own values first,
+// editable as OrcaSlicer's object and part tabs: a value changed becomes its own, the reset arrow drops it, and
+// the cog of the list (colEditing) drops them all. The copy writes them in model_settings.config.
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight } from 'lucide-react';
@@ -13,7 +14,8 @@ import type { Draft } from './draft';
 import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './orcaLayout';
 import { SettingControl } from './SettingControl';
 import { SettingsPanel } from './SettingsPanel';
-import { type Selection, instancesOf, ownSettings, plateOwn } from './objects';
+import type { OwnEdits } from './draft';
+import { type Selection, editTarget, hiddenPart, instancesOf, ownSettings, plateOwn, targetOwn } from './objects';
 import type { ObjectStats } from './viewTools';
 import '../i18n';
 
@@ -36,9 +38,36 @@ function Chip({ colour, n }: { colour: string | undefined; n: number }) {
   );
 }
 
-function Cog({ title }: { title: string }) {
-  return <img src={orcaIcon('cog')} alt={title} title={title} className="w-3.5 h-3.5 flex-shrink-0 opacity-90" />;
+function Cog({ title, onReset }: { title: string; onReset?: () => void }) {
+  const icon = <img src={orcaIcon('cog')} alt={onReset ? '' : title} title={onReset ? undefined : title} className="w-3.5 h-3.5 opacity-90" />;
+  return onReset ? (
+    // OrcaSlicer's colEditing: a click drops every setting of its own (TabPrintModel::reset_model_config)
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onReset();
+      }}
+      className="w-3.5 h-3.5 flex-shrink-0 rounded hover:bg-bambu-dark-tertiary"
+    >
+      {icon}
+    </button>
+  ) : (
+    <span className="flex-shrink-0">{icon}</span>
+  );
 }
+
+/** Editing the objects' own settings (draft.ts): the unsaved edits and how to make them. */
+export interface OwnEditing {
+  edits: OwnEdits;
+  /** ``value``: the target's new own value; null: not its own any more; undefined: as the file has it */
+  set: (target: string, key: string, value: string | null | undefined) => void;
+  setMany: (target: string, values: Record<string, string | null | undefined>) => void;
+}
+
+const PART_TABS = new Set(['normal_part', 'modifier_part']); // ParamsPanel's TabPrintPart; the others have no tab
 
 /** A column's icon (or its empty cell, keeping the columns in line). */
 function Cell({ icon, title }: { icon?: string | false; title?: string }) {
@@ -63,9 +92,24 @@ interface Props {
   /** the objects selected together (Ctrl / Shift click, or in 3D) */
   selectedIds?: string[];
   onToggle?: (objectId: string) => void;
+  /** the objects' own settings can be edited (a project the copy can save) */
+  own?: OwnEditing;
 }
 
-export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, onSelect, onMenu, onEmptyMenu, selectedIds = [], onToggle }: Props) {
+export function ObjectsPanel({
+  layout,
+  doc,
+  draft,
+  colours,
+  stats,
+  selection,
+  onSelect,
+  onMenu,
+  onEmptyMenu,
+  selectedIds = [],
+  onToggle,
+  own: editing,
+}: Props) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);
   const [query, setQuery] = useState('');
@@ -75,6 +119,28 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
   const q = query.trim().toLowerCase();
   const hit = (text: string | null | undefined) => !q || (text ?? '').toLowerCase().includes(q);
   const ownCount = t('farm.workspace.ownSettingsTitle');
+  const edits = editing?.edits;
+  // the keys a tab shows, the ones its reset drops: the process keys an object (a part) can have (TabPrintModel's m_keys)
+  const tabKeys = (part: boolean) =>
+    new Set(((part ? layout.region_keys : null) ?? layout.object_keys ?? []).filter((k) => layout.sections?.[k] === 'process'));
+  /** Orca's colEditing on an object (with its hidden part) or a part: its own settings dropped, one undo step. */
+  const resetAll = (obj: WorkspaceObject, partId: string | null) => {
+    if (!editing) return;
+    const id = obj.id ?? '';
+    // an object's view holds its hidden part's settings too (objects.ts): both are dropped
+    const hidden = hiddenPart(obj);
+    const targets: [string, string | null][] = partId ? [[id, partId]] : hidden ? [[id, null], [id, hidden]] : [[id, null]];
+    for (const [objectId, part] of targets) {
+      const keys = tabKeys(!!part);
+      const saved = targetOwn({ ...obj, id: objectId }, part);
+      const now = targetOwn({ ...obj, id: objectId }, part, edits);
+      const values: Record<string, string | null | undefined> = {};
+      for (const key of new Set([...Object.keys(saved), ...Object.keys(now)])) {
+        if (keys.has(key)) values[key] = key in saved ? null : undefined;
+      }
+      if (Object.keys(values).length) editing.setMany(part ? `${objectId}/${part}` : objectId, values);
+    }
+  };
   const instances = useMemo(() => instancesOf(doc.plates), [doc.plates]);
   // OrcaSlicer shows a column only when some object needs it (GUI_ObjectList.cpp, update_..._column_visible)
   const all = [...stats.values()];
@@ -183,7 +249,7 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                   {shownObjects.map((obj) => {
                     const id = obj.id ?? '';
                     const objKey = `${plateKey}-o${id}`;
-                    const own = Object.keys(ownSettings(obj)).length > 0;
+                    const own = Object.keys(ownSettings(obj, null, edits)).length > 0;
                     const showParts = obj.parts.length > 1 || obj.parts.some((p) => p.type && p.type !== 'normal_part') || obj.overrides.some((o) => o.part && o.part !== obj.name);
                     const placed = instances.get(id) ?? [];
                     const showInstances = placed.length > 1;
@@ -233,7 +299,14 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                             <Cell icon={s?.paint.color && 'objlist_color_painting'} title={tr('Click the icon to edit color painting for the object')} />
                           )}
                           {cols.sinking && <Cell icon={s?.sinking && 'objlist_sinking'} title={tr('Click the icon to shift this object to the bed')} />}
-                          {own ? <Cog title={ownCount} /> : <span className="w-3.5" aria-hidden />}
+                          {own ? (
+                            <Cog
+                              title={editing ? tr('Click the icon to reset all settings of the object') : ownCount}
+                              onReset={editing ? () => resetAll(obj, null) : undefined}
+                            />
+                          ) : (
+                            <span className="w-3.5" aria-hidden />
+                          )}
                         </div>
                         {showParts && open(objKey) && (
                           <ul role="group">
@@ -241,14 +314,19 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
                               .filter((p) => hit(p.name) || hit(obj.name) || hit(plateName))
                               .map((p) => {
                                 const partSelected = selected?.kind === 'object' && selected.id === id && selected.part === p.name;
-                                const partOwn = obj.overrides.some((o) => o.part === p.name && p.name !== obj.name);
+                                const partOwn = !!p.id && Object.keys(targetOwn(obj, p.id, edits)).length > 0;
                                 const partSel = { ...sel, part: p.name, partId: p.id };
                                 return (
                                   <li key={`${objKey}-${p.id ?? p.name}`} role="treeitem" aria-selected={partSelected} aria-level={3}>
                                     <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, partSel)}>
                                       <img src={orcaIcon(PART_ICONS[p.type ?? 'normal_part'] ?? 'menu_add_part')} alt="" className="w-3.5 h-3.5" aria-hidden />
                                       <span className="flex-1 truncate">{p.name ?? `#${p.id}`}</span>
-                                      {partOwn && <Cog title={ownCount} />}
+                                      {partOwn && (
+                                        <Cog
+                                          title={editing ? tr('Click the icon to reset all settings of the object') : ownCount}
+                                          onReset={editing && p.id ? () => resetAll(obj, p.id) : undefined}
+                                        />
+                                      )}
                                     </div>
                                   </li>
                                 );
@@ -303,28 +381,69 @@ export function ObjectsPanel({ layout, doc, draft, colours, stats, selection, on
         {selectedPlate ? (
           <PlateSettings key={selectedPlate.index} layout={layout} plate={selectedPlate} byKey={byKey} draft={draft} />
         ) : selectedObject && selected?.kind === 'object' ? (
-          <SettingsPanel
-            key={`${selected.id}-${selected.part ?? ''}`}
+          <ObjectSettings
+            key={`${selected.id}-${selected.partId ?? selected.part ?? ''}`}
             layout={layout}
-            section="process"
-            settings={doc.settings}
+            doc={doc}
             draft={draft}
-            editable={false}
-            onChange={() => {}}
-            onReset={() => {}}
-            object={{ own: ownSettings(selectedObject, selected.part) }}
-            header={
-              <p className="text-[12px] text-bambu-gray truncate">
-                {selectedObject.name}
-                {selected.part && selected.part !== selectedObject.name ? ` › ${selected.part}` : ''} · {t('farm.workspace.readOnlyPhase2')}
-              </p>
-            }
+            obj={selectedObject}
+            partId={selected.partId ?? (selected.part ? selectedObject.parts.find((p) => p.name === selected.part)?.id ?? null : null)}
+            editing={editing}
           />
         ) : (
           <p className="px-3 py-3 text-[12px] text-bambu-gray">{t('farm.workspace.selectHint')}</p>
         )}
       </div>
     </div>
+  );
+}
+
+/** One object's (part's) tabs: OrcaSlicer's TabPrintObject (TabPrintPart). */
+function ObjectSettings({
+  layout,
+  doc,
+  draft,
+  obj,
+  partId,
+  editing,
+}: {
+  layout: OrcaLayout;
+  doc: WorkspaceDocument;
+  draft: Draft;
+  obj: WorkspaceObject;
+  partId: string | null;
+  editing?: OwnEditing;
+}) {
+  const { t } = useTranslation();
+  const part = partId ? obj.parts.find((p) => p.id === partId) : undefined;
+  const editable = !!editing && (!part || PART_TABS.has(part.type ?? 'normal_part'));
+  const edits = editing?.edits;
+  /** ``value`` of ``key`` for the target that holds it: undefined when it's the file's own value again. */
+  const put = (key: string, value: string | null) => {
+    if (!editing) return;
+    const target = editTarget(obj, partId, key, edits);
+    const [, targetPart = null] = target.split('/');
+    const saved = targetOwn(obj, targetPart)[key];
+    editing.set(target, key, value === (saved ?? null) ? undefined : value);
+  };
+  return (
+    <SettingsPanel
+      layout={layout}
+      section="process"
+      settings={doc.settings}
+      draft={draft}
+      editable={editable}
+      onChange={(setting, value) => put(setting.key, Array.isArray(value) ? value.join(',') : value)}
+      onReset={(key) => put(key, null)}
+      object={{ own: ownSettings(obj, partId, edits), part: !!partId }}
+      header={
+        <p className="text-[12px] text-bambu-gray truncate">
+          {obj.name}
+          {part && part.name !== obj.name ? ` › ${part.name}` : ''}
+          {!editable && ` · ${t('farm.workspace.readOnly')}`}
+        </p>
+      }
+    />
   );
 }
 

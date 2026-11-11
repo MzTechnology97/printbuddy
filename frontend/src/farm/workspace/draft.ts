@@ -97,6 +97,19 @@ export function withoutKey(draft: Draft, key: string): Draft {
   return next;
 }
 
+/** ``edits`` with ``values`` of one target (undefined: the key's edit dropped, the file's own value again). */
+export function withOwn(edits: OwnEdits, target: string, values: Record<string, string | null | undefined>): OwnEdits {
+  const mine = { ...(edits[target] ?? {}) };
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete mine[key];
+    else mine[key] = value;
+  }
+  const next = { ...edits };
+  if (Object.keys(mine).length) next[target] = mine;
+  else delete next[target];
+  return next;
+}
+
 /** The preset switches made from the sidebar combos (presetSwitch.ts): which presets, and the values they set. */
 export interface Switched {
   refs: PresetRef[];
@@ -108,11 +121,18 @@ export const NO_SWITCH: Switched = { refs: [], values: {} };
 export type Placements = Record<string, number[]>;
 const NO_PLACEMENTS: Placements = {};
 
-/** One undo step: the draft, the preset switches it was made on and the instances placed anew (none: ``undefined``). */
+/** Objects' and parts' own settings edited (objects.ts ``ownTarget``): target -> key -> its new value, or null when
+ * it's no longer its own (Orca's reset arrow: the project's value applies). */
+export type OwnEdits = Record<string, Record<string, string | null>>;
+const NO_OWN: OwnEdits = {};
+
+/** One undo step: the draft, the preset switches it was made on, the instances placed anew and the objects' own
+ * settings edited (none: ``undefined``). */
 export interface DraftStep {
   draft: Draft;
   switched?: Switched;
   placed?: Placements;
+  own?: OwnEdits;
 }
 /** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
 export interface DraftHistory extends DraftStep {
@@ -124,16 +144,18 @@ export interface DraftHistory extends DraftStep {
 export type DraftAction =
   | { type: 'edit'; edit: (d: Draft) => Draft; key: string | null; at: number }
   /** a preset switch (or Undo all): the switches and the draft change together, as one step */
-  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements }
+  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements; own?: OwnEdits }
   /** a move (rotation, scale) of instances: one step */
   | { type: 'place'; placed: Placements }
+  /** an object's (part's) own settings: typing in one field is one step, as an edit */
+  | { type: 'own'; edit: (o: OwnEdits) => OwnEdits; key: string | null; at: number }
   | { type: 'undo' }
   | { type: 'redo' };
 /** Edits of the same setting closer than this make one undo step. */
 export const COALESCE_MS = 1000;
 const HISTORY = 100;
 
-const stepOf = (h: DraftHistory): DraftStep => ({ draft: h.draft, switched: h.switched, placed: h.placed });
+const stepOf = (h: DraftHistory): DraftStep => ({ draft: h.draft, switched: h.switched, placed: h.placed, own: h.own });
 
 export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
   if (a.type === 'undo') {
@@ -146,16 +168,19 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
   }
   if (a.type === 'switch' || a.type === 'place') {
     const next: DraftStep =
-      a.type === 'place' ? { ...stepOf(h), placed: a.placed } : { draft: a.draft, switched: a.switched, placed: a.placed ?? h.placed };
-    const flat = (x: DraftStep) => JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS]);
+      a.type === 'place'
+        ? { ...stepOf(h), placed: a.placed }
+        : { draft: a.draft, switched: a.switched, placed: a.placed ?? h.placed, own: a.own ?? h.own };
+    const flat = (x: DraftStep) => JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS, x.own ?? NO_OWN]);
     if (flat(next) === flat(h)) return h;
     return { ...next, past: [...h.past, stepOf(h)].slice(-HISTORY), future: [], last: null };
   }
-  const next = a.edit(h.draft);
-  if (JSON.stringify(next) === JSON.stringify(h.draft)) return h;
-  const same = a.key != null && h.last?.key === a.key && a.at - h.last.at < COALESCE_MS;
+  const step: DraftStep = a.type === 'own' ? { ...stepOf(h), own: a.edit(h.own ?? NO_OWN) } : { ...stepOf(h), draft: a.edit(h.draft) };
+  if (JSON.stringify([step.draft, step.own ?? NO_OWN]) === JSON.stringify([h.draft, h.own ?? NO_OWN])) return h;
+  const key = a.key == null ? null : `${a.type}:${a.key}`;
+  const same = key != null && h.last?.key === key && a.at - h.last.at < COALESCE_MS;
   const past = same ? h.past : [...h.past, stepOf(h)].slice(-HISTORY);
-  return { draft: next, switched: h.switched, placed: h.placed, past, future: [], last: a.key == null ? null : { key: a.key, at: a.at } };
+  return { ...step, past, future: [], last: key == null ? null : { key, at: a.at } };
 }
 
 /**
@@ -170,6 +195,7 @@ export function useSettingsDraft(
   const draft = history.draft;
   const switched = history.switched ?? NO_SWITCH;
   const placed = history.placed ?? NO_PLACEMENTS;
+  const own = history.own ?? NO_OWN;
   const settings = useMemo(() => (view ? view(source, switched.values) : source), [view, source, switched.values]);
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
   const set = useCallback(
@@ -178,8 +204,20 @@ export function useSettingsDraft(
     [],
   );
   const reset = useCallback((key: string) => dispatch({ type: 'edit', edit: (d) => withoutKey(d, key), key: null, at: Date.now() }), []);
-  // Undo all: the edits, the preset switches and the placements, one step that Undo brings back
-  const resetAll = useCallback(() => dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS }), []);
+  // Undo all: the edits, the preset switches, the placements and the objects' own settings, one step that Undo brings back
+  const resetAll = useCallback(() => dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS, own: NO_OWN }), []);
+  /** ``value``: the target's new own value of ``key``; null: no longer its own; undefined: back to what the file says. */
+  const setOwn = useCallback(
+    (target: string, key: string, value: string | null | undefined) =>
+      dispatch({ type: 'own', edit: (o) => withOwn(o, target, { [key]: value }), key: value === undefined ? null : `${target}|${key}`, at: Date.now() }),
+    [],
+  );
+  /** Several keys of one target in one step (Orca's colEditing: all its settings reset). */
+  const setOwnMany = useCallback(
+    (target: string, values: Record<string, string | null | undefined>) =>
+      dispatch({ type: 'own', edit: (o) => withOwn(o, target, values), key: null, at: Date.now() }),
+    [],
+  );
   const place = useCallback((next: Placements) => dispatch({ type: 'place', placed: next }), []);
   const switchTo = useCallback((next: Switched, nextDraft: Draft) => dispatch({ type: 'switch', switched: next, draft: nextDraft }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
@@ -195,7 +233,8 @@ export function useSettingsDraft(
     [draft, byKey],
   );
   return {
-    settings, switched, switchTo, placed, place, draft, set, reset, resetAll, invalid, count: Object.keys(draft).length,
+    settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, draft, set, reset, resetAll, invalid,
+    count: Object.keys(draft).length + Object.values(own).reduce((n, keys) => n + Object.keys(keys).length, 0),
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };
 }

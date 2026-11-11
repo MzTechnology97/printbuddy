@@ -21,7 +21,7 @@ import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
 import { type LiveState, usePresetSwitch } from './presetSwitch';
-import { toLocaleDecimal, useSettingsDraft } from './draft';
+import { formatValue, toLocaleDecimal, useSettingsDraft, valueErrors } from './draft';
 import { useMoveGizmo } from './moveGizmo';
 import {
   IDENTITY,
@@ -74,7 +74,7 @@ import { facePlanes, laidOnFace, useLayOnFace } from './layOnFace';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { type Selection, instancesOf } from './objects';
+import { type Selection, instancesOf, ownToSave } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -233,7 +233,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   const doc = useMemo(() => ({ ...source, settings }), [source, settings]);
   const navigate = useNavigate();
@@ -241,7 +241,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const { showToast } = useToast();
   const { trackJob } = useSliceJobTracker();
   const fileId = doc.file.id;
-  const count = edits + switched.refs.length + Object.keys(placed).length; // unsaved: edits, preset switches, placements
+  // unsaved: edits (the objects' own settings among them), preset switches, placements
+  const count = edits + switched.refs.length + Object.keys(placed).length;
+  const ownEditing = useMemo(() => ({ edits: own, set: setOwn, setMany: setOwnMany }), [own, setOwn, setOwnMany]);
   livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
@@ -291,6 +293,28 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     return Array.isArray(value) ? value : value ? [value] : [];
   }, [doc.settings]);
   const byKey = useMemo(() => new Map(doc.settings.map((s) => [s.key, s])), [doc.settings]);
+  // the objects' own settings edited, as the save dialog lists them; one the backend would refuse holds the save
+  const ownRows = useMemo(
+    () =>
+      ownToSave(own).map((e) => {
+        const obj = doc.objects.find((o) => o.id === e.object_id);
+        const part = e.part_id ? obj?.parts.find((p) => p.id === e.part_id) : undefined;
+        const setting = byKey.get(e.key);
+        const label = setting ? orcaText(layout, layout.options[e.key]?.label ?? setting.label, i18n.language) : e.key;
+        const value = e.value == null || !setting ? null : Array.isArray(setting.value) ? e.value.split(',') : e.value;
+        const where = `${obj?.name ?? e.object_id}${part && part.name !== obj?.name ? ` › ${part.name}` : ''}`;
+        return {
+          id: `${e.object_id}/${e.part_id ?? ''}:${e.key}`,
+          section: `${where}: ${label}`,
+          name:
+            value == null || !setting
+              ? t('farm.workspace.save.projectValue')
+              : formatValue(setting, value, t('farm.workspace.inherit'), i18n.language),
+          invalid: !!setting && value != null && valueErrors(setting, value).some((err) => err !== null),
+        };
+      }),
+    [own, doc.objects, byKey, layout, i18n.language, t],
+  );
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -1010,7 +1034,16 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
 
   const saveMutation = useMutation({
     mutationFn: (name: string) =>
-      workspaceApi.saveCopy(fileId, doc.sha256, draft, name || undefined, switched.refs, placementsToSave(placed).transforms, placementsToSave(placed).parts),
+      workspaceApi.saveCopy(
+        fileId,
+        doc.sha256,
+        draft,
+        name || undefined,
+        switched.refs,
+        placementsToSave(placed).transforms,
+        placementsToSave(placed).parts,
+        ownToSave(own),
+      ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
@@ -1284,6 +1317,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             presetTips={presetTips('process')}
             onPickPreset={doc.editable && !presetSwitch.busy ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
             pickLabel={(name) => t('farm.workspace.presets.switch.pick', { name })}
+            own={doc.editable ? ownEditing : undefined}
           />
         </aside>
         <main className={`${pane === 'view' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-w-0 relative`}>
@@ -1534,8 +1568,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 name: placementText(spec),
               };
             }),
+            // the objects' (parts') own settings: the new value, or the project's again
+            ...ownRows,
           ]}
-          invalid={invalid}
+          invalid={[...invalid, ...ownRows.filter((r) => r.invalid).map((r) => r.id)]}
           saving={saveMutation.isPending}
           error={saveMutation.isError ? saveMutation.error : null}
           onSave={(name) => saveMutation.mutate(name)}

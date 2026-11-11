@@ -57,8 +57,12 @@ export interface OrcaLayout {
   slicer?: string;
   pages: Record<Section, OrcaPage[]>;
   options: Record<string, OrcaOption>;
+  /** The preset each key belongs to (Preset.cpp's option lists, and the pages Tab.cpp places it on) */
+  sections?: Record<string, Section>;
   /** Settings an object or part can have of its own (PrintObjectConfig + PrintRegionConfig) */
   object_keys: string[];
+  /** ...a part or modifier can (PrintRegionConfig: TabPrintPart) */
+  region_keys?: string[];
   /** A plate's own settings: key in model_settings.config -> the option it sets */
   plate_keys: Record<string, string>;
   /** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp, Shortcuts.cpp) */
@@ -77,7 +81,8 @@ export async function loadOrcaLayout(slicer?: string | null): Promise<OrcaLayout
   if (slicer !== 'bambu_studio') return orca;
   const bambu = await layoutModules['./orca-assets/settings-layout-bambu.json']();
   // the 3D view, its keys and their dialog are OrcaSlicer's for every project
-  return { ...bambu, shortcuts: orca.shortcuts, it: { ...orca.it, ...bambu.it } };
+  // shortcut: Bambu Studio's data predates the part keys: OrcaSlicer's (as the backend checks them, object_settings.py)
+  return { ...bambu, region_keys: bambu.region_keys ?? orca.region_keys, shortcuts: orca.shortcuts, it: { ...orca.it, ...bambu.it } };
 }
 
 /** Orca's modes, each showing the ones before it; develop only with the DEV switch. */
