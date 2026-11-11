@@ -48,6 +48,8 @@ interface MeshData {
   extruder: number; // Per-mesh extruder index for coloring
   /** fork (printfarm): the component's object id = the part's id in model_settings.config */
   partId?: string;
+  /** fork (printfarm): its component's transform (12 numbers) as the file has it; the vertices are already placed by it */
+  partSpec?: number[];
   /** fork (printfarm): triangles with painted supports / colours (the slicers' paint_supports, paint_color) */
   paint?: { supports: boolean; color: boolean };
 }
@@ -120,9 +122,12 @@ function parseTransform3MF(transformStr: string | null): THREE.Matrix4 {
 // Alias for backwards compatibility
 const parseTransform = parseTransform3MF;
 
-async function parseMeshFromDoc(doc: Document, defaultExtruder: number = 0): Promise<MeshData[]> {
+async function parseMeshFromDoc(doc: Document, defaultExtruder: number = 0, objectId?: string | null): Promise<MeshData[]> {
   const meshes: MeshData[] = [];
-  const meshElements = doc.getElementsByTagName('mesh');
+  // fork (printfarm): a component names one object of its model file (Bambu Studio keeps every part of an object
+  // in one object_N.model); reading every mesh there gave each part all the others too
+  const named = objectId ? Array.from(doc.getElementsByTagName('object')).find((o) => o.getAttribute('id') === objectId) : undefined;
+  const meshElements = named ? named.getElementsByTagName('mesh') : doc.getElementsByTagName('mesh');
 
   for (let j = 0; j < meshElements.length; j++) {
     const meshEl = meshElements[j];
@@ -469,11 +474,13 @@ export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData>
           const partKey = compObjectId ? `${objectId}:${compObjectId}` : null;
           const compExtruder = partKey ? (partExtruderMap.get(partKey) ?? defaultExtruder) : defaultExtruder;
 
-          const extMeshes = await parseMeshFromDoc(extDoc, compExtruder);
+          const extMeshes = await parseMeshFromDoc(extDoc, compExtruder, compObjectId);
 
           // Apply component transform if present
           const compTransformStr = compEl.getAttribute('transform');
           const compTransform = parseTransform(compTransformStr);
+          const specValues = (compTransformStr ?? '').trim().split(/\s+/).map(Number);
+          const partSpec = specValues.length === 12 && specValues.every(Number.isFinite) ? specValues : [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
 
           for (const mesh of extMeshes) {
             if (compTransformStr) {
@@ -484,9 +491,9 @@ export async function parse3MF(arrayBuffer: ArrayBuffer): Promise<Parsed3MFData>
                 v.applyMatrix4(compTransform);
                 transformedVertices.push(v.x, v.y, v.z);
               }
-              meshes.push({ vertices: transformedVertices, triangles: mesh.triangles, extruder: mesh.extruder, paint: mesh.paint, partId: compObjectId ?? undefined });
+              meshes.push({ vertices: transformedVertices, triangles: mesh.triangles, extruder: mesh.extruder, paint: mesh.paint, partId: compObjectId ?? undefined, partSpec });
             } else {
-              meshes.push({ ...mesh, partId: compObjectId ?? undefined });
+              meshes.push({ ...mesh, partId: compObjectId ?? undefined, partSpec });
             }
           }
         }
@@ -612,13 +619,17 @@ export function buildModelGroup(
   const activeBuildItems = plateFilteredItems.length > 0 ? plateFilteredItems : buildItems;
 
   const byPart = new Map<string, Map<number, THREE.BufferGeometry[]>>();
+  const partSpecs = new Map<string, number[] | undefined>(); // fork (printfarm): each part's component transform
 
   // If we have build items, use them for positioning
   if (activeBuildItems.length > 0) {
     for (const item of activeBuildItems) {
       const objectData = objects.get(item.objectId);
       if (!objectData) continue;
-      if (perItem) byPart.clear();
+      if (perItem) {
+        byPart.clear();
+        partSpecs.clear();
+      }
 
       for (const meshData of objectData.meshes) {
         // Use mesh's extruder, or item override, or object default
@@ -644,6 +655,7 @@ export function buildModelGroup(
 
         const target = perItem ? byPart : null;
         if (target && !target.has(meshData.partId ?? '')) target.set(meshData.partId ?? '', new Map());
+        if (target) partSpecs.set(meshData.partId ?? '', meshData.partSpec);
         const perExtruder = target ? target.get(meshData.partId ?? '')! : geometriesByExtruder;
         if (!perExtruder.has(extruder)) {
           perExtruder.set(extruder, []);
@@ -666,7 +678,7 @@ export function buildModelGroup(
         };
         for (const [partId, perExtruder] of byPart) {
           const partGroup = new THREE.Group();
-          partGroup.userData = { partId: partId || null };
+          partGroup.userData = { partId: partId || null, transform: partSpecs.get(partId) };
           addMergedMeshes(partGroup, perExtruder, getMaterial);
           itemGroup.add(partGroup);
         }

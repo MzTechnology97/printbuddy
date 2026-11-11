@@ -66,7 +66,7 @@ describe('an instance placed anew (placement.ts)', () => {
     expect(slicerBox(view, ['1:1'])).toEqual([150, 110, 0, 160, 120, 10]); // the other instance stays
     expect(heightAboveBed(view, ['1:0'])).toBeCloseTo(2);
     expect(withMoved(view, placed, ['1:0'], [60, -5, -2])).toEqual({});
-    expect(placementsToSave(placed)).toEqual([{ object_id: '1', instance: 0, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1, 40, 115, 2] }]);
+    expect(placementsToSave(placed)).toEqual({ transforms: [{ object_id: '1', instance: 0, matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1, 40, 115, 2] }], parts: [] });
     applyPlacements(view, {});
     expect(slicerBox(view, ['1:0'])).toEqual([100, 110, 0, 110, 120, 10]);
   });

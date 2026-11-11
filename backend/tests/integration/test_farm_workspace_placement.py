@@ -179,3 +179,89 @@ class TestSaveCopy:
         doc = await open_ws(async_client, f.id)
         resp = await save(async_client, doc, {}, transforms=[transform])
         assert resp.status_code == 422, resp.text
+
+
+class TestPlaceParts:
+    """A part is its object's component: its transform in 3dmodel.model and its matrix in model_settings.config."""
+
+    MODEL = (
+        b'<model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '
+        b'xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"><resources>'
+        b'<object id="2" type="model"><components>'
+        b'<component p:path="/3D/Objects/object_1.model" objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0"/>'
+        b'<component p:path="/3D/Objects/object_1.model" objectid="3" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>'
+        b"</components></object></resources>"
+        b'<build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 100 100 0"/></build></model>'
+    )
+    SETTINGS = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\r\n<config>\r\n  <object id="2">\r\n'
+        b'    <part id="1" subtype="normal_part"><metadata key="name" value="A"/>'
+        b'<metadata key="matrix" value="1 0 0 5 0 1 0 0 0 0 1 0 0 0 0 1"/></part>\r\n'
+        b'    <part id="3" subtype="modifier_part"><metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/></part>\r\n'
+        b'  </object>\r\n  <assemble><assemble_item object_id="2" instance_id="0" transform="1 0 0 0 1 0 0 0 1 9 9 9"/></assemble>\r\n</config>'
+    )
+
+    def test_the_component_and_its_matrix_move_together_and_nothing_else(self):
+        moved = placement.PartTransform(object_id="2", part_id="1", matrix=[1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 2, 0])
+        model, settings, placed = placement.place_parts(self.MODEL, self.SETTINGS, [moved])
+        assert model == self.MODEL.replace(
+            b'objectid="1" transform="1 0 0 0 1 0 0 0 1 5 0 0"', b'objectid="1" transform="1 0 0 0 1 0 0 0 1 15 2 0"'
+        )
+        # Orca writes matrix = the part's matrix x its source transform: the change (+10, +2) times the old one
+        assert settings == self.SETTINGS.replace(
+            b'value="1 0 0 5 0 1 0 0 0 0 1 0 0 0 0 1"', b'value="1 0 0 15 0 1 0 2 0 0 1 0 0 0 0 1"'
+        )
+        assert placed == [
+            {
+                "key": "part_transform",
+                "object_id": "2",
+                "part_id": "1",
+                "before": "1 0 0 0 1 0 0 0 1 5 0 0",
+                "after": "1 0 0 0 1 0 0 0 1 15 2 0",
+                "matrix": "1 0 0 15 0 1 0 2 0 0 1 0 0 0 0 1",
+            }
+        ]
+
+    def test_a_turned_part_turns_its_matrix(self):
+        turned = placement.PartTransform(object_id="2", part_id="3", matrix=[0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0])
+        _, settings, _ = placement.place_parts(self.MODEL, self.SETTINGS, [turned])
+        # 90° about Z on column vectors, written row by row
+        assert b'value="0 -1 0 0 1 0 0 0 0 0 1 0 0 0 0 1"' in settings
+
+    def test_a_part_without_a_matrix_or_settings_leaves_them(self):
+        moved = placement.PartTransform(object_id="2", part_id="1", matrix=[1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 2, 0])
+        model, settings, placed = placement.place_parts(self.MODEL, None, [moved])
+        assert settings is None and placed[0]["matrix"] is None
+        no_matrix = self.SETTINGS.replace(b'<metadata key="matrix" value="1 0 0 5 0 1 0 0 0 0 1 0 0 0 0 1"/>', b"")
+        assert placement.place_parts(self.MODEL, no_matrix, [moved])[1] == no_matrix
+
+    @pytest.mark.parametrize(
+        ("part", "error"),
+        [
+            ({"object_id": "2", "part_id": "9", "matrix": MOVED}, "no part 9"),
+            ({"object_id": "7", "part_id": "1", "matrix": MOVED}, "not one element"),
+            ({"object_id": "2", "part_id": "1", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0]}, "mirrors"),
+        ],
+    )
+    def test_refuses_what_it_cannot_place(self, part, error):
+        with pytest.raises(placement.InvalidPlacement, match=error):
+            placement.place_parts(self.MODEL, self.SETTINGS, [placement.PartTransform(**part)])
+        twice = [placement.PartTransform(object_id="2", part_id="1", matrix=MOVED)] * 2
+        with pytest.raises(placement.InvalidPlacement, match="placed twice"):
+            placement.place_parts(self.MODEL, self.SETTINGS, twice)
+
+    async def test_a_copy_with_a_part_moved(self, async_client, db_session):
+        original = make_project("bambu")
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        part = {"object_id": "2", "part_id": "1", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0, 0]}
+        resp = await save(async_client, doc, {}, part_transforms=[part])
+        assert resp.status_code == 200, resp.text
+        assert [c["key"] for c in resp.json()["changes"]] == ["part_transform"]
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        before, after = entries(original), entries(library.to_absolute_path(row.file_path).read_bytes())
+        assert [n for n in before if before[n] != after[n]] == [project.MODEL_ENTRY]  # no matrix in this project
+        assert (
+            b'<component transform="1 0 0 0 1 0 0 0 1 3 0 0" p:path="/3D/Objects/object_1.model" objectid="1"/>'
+            in after[project.MODEL_ENTRY]
+        )

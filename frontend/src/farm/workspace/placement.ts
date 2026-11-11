@@ -47,7 +47,9 @@ export function fileSpec(item: THREE.Object3D): Spec {
   return (item.userData.transform as Spec | undefined) ?? IDENTITY;
 }
 
-/** Each item group moved from where the file put it to its placement (or back, when it has none). */
+/** Each item group moved from where the file put it to its placement (or back, when it has none), and in it each
+ * part placed anew (``objectId/partId``: the part's component transform, the same in every instance) moved by
+ * M₀·(C·C₀⁻¹)·M₀⁻¹, its change seen from where the file puts the instance. */
 export function applyPlacements(view: ViewerScene, placed: Placed) {
   for (const item of items(view)) {
     const spec = placed[keyOf(item)];
@@ -58,6 +60,18 @@ export function applyPlacements(view: ViewerScene, placed: Placed) {
       item.matrix.copy(SWAP).multiply(change).multiply(SWAP);
     }
     item.matrixWorldNeedsUpdate = true;
+    for (const group of item.children) {
+      if (group.userData.partId == null) continue;
+      const part = placed[`${item.userData.objectId}/${group.userData.partId}`];
+      group.matrixAutoUpdate = false;
+      if (!part) group.matrix.identity();
+      else {
+        const file = fromSpec(fileSpec(item));
+        const change = file.clone().multiply(fromSpec(part)).multiply(fromSpec((group.userData.transform as Spec | undefined) ?? IDENTITY).invert()).multiply(file.invert());
+        group.matrix.copy(SWAP).multiply(change).multiply(SWAP);
+      }
+      group.matrixWorldNeedsUpdate = true;
+    }
   }
   view.model.updateMatrixWorld(true);
 }
@@ -115,10 +129,24 @@ export function withMoved(view: ViewerScene, placed: Placed, keys: string[], d: 
   return next;
 }
 
-/** The placements to save: each instance placed anew, as the copy takes it. */
-export function placementsToSave(placed: Placed): { object_id: string; instance: number; matrix: number[] }[] {
-  return Object.entries(placed).map(([key, matrix]) => {
-    const [object_id, instance] = key.split(':');
-    return { object_id, instance: Number(instance), matrix };
-  });
+/** The placements to save, as the copy takes them: each instance placed anew, and each part. */
+export function placementsToSave(placed: Placed): {
+  transforms: { object_id: string; instance: number; matrix: number[] }[];
+  parts: { object_id: string; part_id: string; matrix: number[] }[];
+} {
+  const entries = Object.entries(placed);
+  return {
+    transforms: entries
+      .filter(([key]) => !key.includes('/'))
+      .map(([key, matrix]) => {
+        const [object_id, instance] = key.split(':');
+        return { object_id, instance: Number(instance), matrix };
+      }),
+    parts: entries
+      .filter(([key]) => key.includes('/'))
+      .map(([key, matrix]) => {
+        const [object_id, part_id] = key.split('/');
+        return { object_id, part_id, matrix };
+      }),
+  };
 }

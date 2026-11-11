@@ -122,6 +122,13 @@ export interface InstanceTransform {
   matrix: number[];
 }
 
+/** A part placed anew in its object: its component transform (3MF's 12 numbers), for every instance. */
+export interface PartTransform {
+  object_id: string;
+  part_id: string;
+  matrix: number[];
+}
+
 export interface PresetRef {
   section: 'process' | 'filament' | 'printer';
   /** the filament slot (from 0) */
@@ -182,9 +189,10 @@ export const workspaceApi = {
     filename?: string,
     presets: PresetRef[] = [],
     transforms: InstanceTransform[] = [],
+    partTransforms: PartTransform[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
-      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets, transforms }),
+      body: JSON.stringify({ base_sha256: baseSha256, changes, filename: filename || null, presets, transforms, part_transforms: partTransforms }),
     }),
 };

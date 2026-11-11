@@ -48,6 +48,8 @@ class CopyRequest(BaseModel):
     presets: list[PresetRef] = Field(default_factory=list, max_length=66)
     # instances placed anew (Move / Rotate / Scale): each one's new build item transform
     transforms: list[placement.InstanceTransform] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
+    # parts placed anew in their objects: each one's new component transform
+    part_transforms: list[placement.PartTransform] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
 
 
 async def _library_3mf(db: AsyncSession, file_id: int) -> LibraryFile:
@@ -184,6 +186,7 @@ def _build_copy(
     dest: Path,
     targets: list[dict],
     transforms: list[placement.InstanceTransform] = (),
+    part_transforms: list[placement.PartTransform] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -200,8 +203,17 @@ def _build_copy(
             switched += done
         new_cfg, applied = ws_settings.apply_changes(cfg, changes, slicer)
         replaced, placed = {}, []
-        if transforms:
-            replaced[project.MODEL_ENTRY], placed = placement.place(project.read_model(zf), transforms)
+        if transforms or part_transforms:
+            model = project.read_model(zf)
+            if transforms:
+                model, placed = placement.place(model, transforms)
+            if part_transforms:
+                settings_xml = project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
+                model, settings_xml, moved = placement.place_parts(model, settings_xml, part_transforms)
+                placed += moved
+                if settings_xml is not None:
+                    replaced[project.MODEL_SETTINGS_ENTRY] = settings_xml
+            replaced[project.MODEL_ENTRY] = model
         applied = switched + applied + placed
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
@@ -262,7 +274,9 @@ async def save_copy(
                 status_code=409, detail="The file changed since it was opened: reload it, then edit again"
             )
         try:
-            applied = await asyncio.to_thread(_build_copy, lib_file, data, body.changes, tmp, targets, body.transforms)
+            applied = await asyncio.to_thread(
+                _build_copy, lib_file, data, body.changes, tmp, targets, body.transforms, body.part_transforms
+            )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
             source_info = (lib_file.file_metadata or {}).get("workspace") or {}
