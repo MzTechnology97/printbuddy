@@ -242,13 +242,14 @@ def parse_plates(path: Path) -> tuple[list[ParsedPlate], float | None]:
 
 
 async def _latest_slices(
-    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None
+    db: AsyncSession, lib_file: LibraryFile, sha256: str | None, colour: str | None = None, nozzle: int | None = None
 ) -> dict[int, LibraryFile]:
     """Sliced outputs of this exact file version, by plate number (the plain ones, or one colour variant).
 
     Any folder: NAS outputs live in the project's ``Printbuddy`` subfolder. An output sliced
     without a plate number is the project's default plate (1); "all plates" (0) is no single plate.
-    ``colour`` is a variant's ``sliced_color`` (see ``farm.variants``).
+    ``colour`` is a variant's ``sliced_color`` (see ``farm.variants``); ``nozzle`` a forced slice's
+    ``sliced_nozzle`` (``farm.slicing.slice_embedded``), never taken for a plain one or another nozzle's.
     """
     rows = (
         await db.execute(LibraryFile.active().where(LibraryFile.source_type == "sliced").order_by(LibraryFile.id))
@@ -264,6 +265,7 @@ async def _latest_slices(
             meta.get("sliced_from_library_file_id") == lib_file.id
             and meta.get("sliced_from_sha256") == sha256
             and ((meta.get("sliced_color") or "").strip().lower() or None) == colour
+            and meta.get("sliced_nozzle") == nozzle
         ):
             plate = 1 if meta.get("sliced_plate") is None else meta["sliced_plate"]
             if plate:

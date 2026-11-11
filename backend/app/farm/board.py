@@ -326,7 +326,8 @@ async def _slice_progress(db: AsyncSession, jobs: list[FarmPrintJob]) -> dict[in
         running = []
         for pid in job.plate_ids or []:
             plate = plates.get(pid)
-            now = slice_progress(plate.library_file_id, plate.plate_index, job.color) if plate else None
+            nozzle = (job.queue_options or {}).get("nozzle")
+            now = slice_progress(plate.library_file_id, plate.plate_index, job.color, nozzle) if plate else None
             if now:
                 running.append(now)
         if running:  # the furthest one: the plate the job will most likely get
@@ -568,19 +569,20 @@ def _back_to_waiting(job: FarmPrintJob, note: str) -> None:
 
 async def _slice_again(db: AsyncSession, job: FarmPrintJob, slicing, *, force: bool) -> int:
     asked = 0
+    nozzle = (job.queue_options or {}).get("nozzle")  # the chosen slot's nozzle: its own slice, its own failures
     for plate_id in job.plate_ids or []:
         plate = await db.get(FarmPlate, plate_id)
         if plate is None:
             continue
         if force:  # the 3MF read again from the NAS; the old slice is never used meanwhile
-            asked += await slicing.force_slice(db, plate, job.color)
+            asked += await slicing.force_slice(db, plate, job.color, nozzle)
             continue
-        key = slicing._queue_key(plate.library_file_id, plate.plate_index, job.color)
+        key = slicing._queue_key(plate.library_file_id, plate.plate_index, job.color, nozzle)
         slicing._failed.pop(key, None)
         slicing._forget_asked(key)
-        if await slicing.variant_slice(db, plate, job.color) is not None:
+        if await slicing.variant_slice(db, plate, job.color, nozzle) is not None:
             continue  # already sliced: nothing to retry for this plate
-        if await slicing.ask_variant_slicing(db, plate, job.color):
+        if await slicing.ask_variant_slicing(db, plate, job.color, nozzle=nozzle):
             asked += 1
     return asked
 
