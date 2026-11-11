@@ -150,6 +150,15 @@ class TestApply:
         with pytest.raises(InvalidObjectSetting, match=error):
             edit(item)
 
+    def test_a_part_with_embossed_text_is_written_as_the_others(self):
+        # OrcaSlicer writes the text's settings as <slic3rpe:text>, the prefix never declared: kept byte for byte
+        density = b'      <metadata key="sparse_infill_density" value="40%"/>\n'
+        text = SETTINGS.replace(density, density + b'      <slic3rpe:text text="HELLO" font_descriptor="Arial"/>\n')
+        out, _ = object_settings.apply(
+            text, CFG, [ObjectSetting(object_id="2", part_id="1", key="wall_loops", value="5")], "orcaslicer"
+        )
+        assert out == text.replace(density, density + b'      <metadata key="wall_loops" value="5"/>\n')
+
     def test_refuses_a_key_set_twice(self):
         with pytest.raises(InvalidObjectSetting, match="set twice"):
             edit(

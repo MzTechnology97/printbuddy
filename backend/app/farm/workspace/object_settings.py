@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.farm.workspace import settings as ws_settings
 from backend.app.farm.workspace.placement import _KEY, _METADATA, _OBJECT, _PART, _VALUE, _attr, _element
+from backend.app.utils.xml_prefixes import declared
 
 MAX_EDITS = 2000
 PART_TYPES = ("normal_part", "modifier_part")  # ParamsPanel shows TabPrintPart for these; the others have no tab
@@ -102,7 +103,7 @@ def check_value(key: str, new, own: str | None, project, part: bool, slicer: str
 def _structure(settings: bytes) -> tuple[list, dict]:
     """``(everything but the objects' and parts' metadata, that metadata by (object, part))``."""
     try:
-        root = SafeET.fromstring(settings)
+        root = SafeET.fromstring(declared(settings))  # Orca's <slic3rpe:text> declares no prefix
     except (SafeET.ParseError, DefusedXmlException) as exc:
         raise InvalidObjectSetting(f"model_settings.config is not valid XML: {exc}") from exc
     rest: list = []
