@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import database
-from backend.app.farm import library_problems, notify
+from backend.app.farm import library_problems, notify, variants
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.models.library import LibraryFile
 
@@ -42,7 +42,8 @@ async def sliced_plates(db: AsyncSession, project_ids: set[int]) -> dict[int, li
         meta = out.file_metadata or {}
         pid = meta.get("sliced_from_library_file_id")
         if meta.get("used_embedded_settings") and pid in project_ids and "extracted_from_library_file_id" not in meta:
-            plate, colour, nozzle = meta.get("sliced_plate"), meta.get("sliced_color"), meta.get("sliced_nozzle")
+            plate, colour = meta.get("sliced_plate"), meta.get("sliced_color")
+            nozzle = variants.as_nozzle_key(meta.get("sliced_nozzle"))
             extra = () if nozzle is None else (nozzle,)
             found.setdefault(pid, {})[(plate_key(plate), colour, *extra)] = (plate, colour, *extra)
     return {pid: list(plates.values()) for pid, plates in found.items()}

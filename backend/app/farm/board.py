@@ -21,7 +21,7 @@ from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.config import settings
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
-from backend.app.farm import job_events
+from backend.app.farm import job_events, variants
 from backend.app.farm.job_events import FarmJobEvent
 from backend.app.farm.jobs.models import FarmPrintJob
 from backend.app.farm.models import FarmLibraryFile
@@ -326,7 +326,7 @@ async def _slice_progress(db: AsyncSession, jobs: list[FarmPrintJob]) -> dict[in
         running = []
         for pid in job.plate_ids or []:
             plate = plates.get(pid)
-            nozzle = (job.queue_options or {}).get("nozzle")
+            nozzle = variants.job_nozzles(job.queue_options)
             now = slice_progress(plate.library_file_id, plate.plate_index, job.color, nozzle) if plate else None
             if now:
                 running.append(now)
@@ -569,7 +569,7 @@ def _back_to_waiting(job: FarmPrintJob, note: str) -> None:
 
 async def _slice_again(db: AsyncSession, job: FarmPrintJob, slicing, *, force: bool) -> int:
     asked = 0
-    nozzle = (job.queue_options or {}).get("nozzle")  # the chosen slot's nozzle: its own slice, its own failures
+    nozzle = variants.job_nozzles(job.queue_options)  # the chosen slots' nozzles: its own slice, its own failures
     for plate_id in job.plate_ids or []:
         plate = await db.get(FarmPlate, plate_id)
         if plate is None:

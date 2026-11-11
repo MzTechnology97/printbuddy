@@ -1,5 +1,6 @@
 /**
- * Printfarm (fork): the slot grid of the Accoda dialog, on a dual-nozzle X2D and a K2 with CFS. Made-up data.
+ * Printfarm (fork): the slot grid of the Accoda dialog, on a dual-nozzle X2D, a K2 with CFS and the Klipper printers
+ * with only an external spool (K1, SV08, Sovol Zero). Made-up data.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -9,6 +10,7 @@ import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
 import { SlotGrid } from '../../farm/SlotGrid';
+import { PrinterSlots } from '../../farm/PrinterSlots';
 
 const tray = (id: number, type: string, color: string, sub = '') => ({
   id, tray_type: type, tray_color: color, tray_sub_brands: sub, remain: 50, tray_info_idx: '',
@@ -87,5 +89,53 @@ describe('SlotGrid', () => {
     await waitFor(() => expect(screen.getByText('CFS T1')).toBeInTheDocument());
     expect(screen.getByTitle(/^A2 · /)).toBeEnabled(); // chosen by hand even if it is PLA
     expect(screen.getByTitle(/^A2 · /)).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('shows a Klipper printer without units its external spool alone, and lets the filament take it', async () => {
+    status({ connected: true, ams: [], vt_tray: [tray(254, 'PETG', '000000FF', 'PETG HF')] }); // K1, SV08, Sovol Zero
+    const onMappings = vi.fn();
+    render(
+      <SlotGrid printerId={4} mappings={{}} onMappings={onMappings} filamentReqs={{ filaments: [
+        { slot_id: 1, type: 'PETG', color: '#000000', used_grams: 0, used_meters: 0 },
+      ] }} />,
+    );
+    await waitFor(() => expect(screen.getByText('External spool')).toBeInTheDocument());
+    expect(screen.queryByText(/^AMS|^CFS/)).not.toBeInTheDocument();
+    const ext = screen.getByTitle(/^Ext · /);
+    expect(ext).toBeEnabled();
+    await userEvent.click(ext);
+    expect(onMappings).toHaveBeenCalledWith({ 1: 254 });
+  });
+
+  it('shows a filament with no slot to take when a Klipper printer reports nothing, and blocks nothing', async () => {
+    status({ connected: true, ams: [], vt_tray: [] });
+    render(
+      <SlotGrid printerId={5} mappings={{}} onMappings={vi.fn()} filamentReqs={{ filaments: [
+        { slot_id: 1, type: 'PETG', color: '#000000', used_grams: 0, used_meters: 0 },
+      ] }} />,
+    );
+    await waitFor(() => expect(screen.getByText('no slot')).toBeInTheDocument());
+    expect(screen.queryAllByRole('button', { pressed: true })).toHaveLength(0);
+  });
+
+  it('sends no slot mapping before one is chosen by hand, on a K1 too', async () => {
+    status({ connected: true, ams: [], vt_tray: [tray(254, 'PETG', '000000FF')] });
+    server.use(
+      http.get('/api/v1/farm/plates/:id/filaments', () =>
+        HttpResponse.json({ plate_id: 7, sliced: false, filaments: [{ slot_id: 1, type: 'PETG', color: '#000000', used_grams: 0 }] }),
+      ),
+      http.get('/api/v1/settings/', () => HttpResponse.json({})),
+      http.get('/api/v1/farm/plan/settings', () => HttpResponse.json({ tolerance: 80 })),
+      http.get('/api/v1/farm/printer-spools', () => HttpResponse.json([])),
+    );
+    const onAmsMapping = vi.fn();
+    render(
+      <PrinterSlots printerId={4} plateId={7} plateLabel="test.3mf · plate 1" color="Nero" colorHex="000000"
+        mappings={{}} onMappings={vi.fn()} onAmsMapping={onAmsMapping} />,
+    );
+    await waitFor(() => expect(screen.getByTitle(/^Ext · /)).toBeInTheDocument());
+    expect(screen.queryByText(/the slots can be chosen once it is/)).not.toBeInTheDocument();
+    expect(screen.getByText(/the filaments come from the 3MF/)).toBeInTheDocument();
+    expect(onAmsMapping.mock.calls.every(([m]) => m === undefined)).toBe(true); // the dispatcher maps it: nothing held
   });
 });

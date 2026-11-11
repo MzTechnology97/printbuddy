@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -74,6 +75,84 @@ def _painted(zf: zipfile.ZipFile) -> bool:
     )
 
 
+def paint_states(code: str) -> set[int]:
+    """The filaments (1-based) one triangle's ``paint_color`` paints, as OrcaSlicer reads it (Model.cpp
+    ``set_triangle_from_string``, TriangleSelector ``deserialize``): its hex digits from the last, a nibble each.
+    A nibble whose two low bits are 0 is a leaf, its state the two high bits (3: one more nibble, state = 3 + it,
+    or with 15 another one, state = 18 + it); else it splits into (low bits + 1) children, read depth first.
+    State 0 is unpainted (the part's own filament). Malformed data: what was read before it."""
+    try:
+        nibbles = [int(c, 16) for c in reversed(code.strip())]
+    except ValueError:
+        return set()
+    states: set[int] = set()
+    i, pending = 0, 1
+    while pending and i < len(nibbles):
+        n = nibbles[i]
+        i += 1
+        if n & 0b11:
+            pending += n & 0b11  # this node becomes (sides + 1) children
+            continue
+        pending -= 1
+        state = n >> 2
+        if state == 3:
+            if i >= len(nibbles):
+                break
+            state, i = nibbles[i] + 3, i + 1
+            if state == 18:
+                if i >= len(nibbles):
+                    break
+                state, i = nibbles[i] + 18, i + 1
+        if state:
+            states.add(state)
+    return states
+
+
+_MODEL_OBJECT = re.compile(rb"""<object\b[^>]*\bid\s*=\s*["'](\d+)["'][^>]*>""")
+_COMPONENT = re.compile(rb"""<component\b[^>]*>""")
+_PATH = re.compile(rb"""\bp:path\s*=\s*["']([^"']+)["']""")
+_OBJECTID = re.compile(rb"""\bobjectid\s*=\s*["'](\d+)["']""")
+_PAINT = re.compile(rb"""\bpaint_color\s*=\s*["']([0-9A-Fa-f]+)["']""")
+
+
+def _object_body(data: bytes, object_id: str) -> bytes:
+    """The ``<object id=...>`` element of a model file, as bytes (empty when it has none)."""
+    for m in _MODEL_OBJECT.finditer(data):
+        if m.group(1).decode() == object_id:
+            end = data.find(b"</object>", m.end())
+            return data[m.start() : end if end >= 0 else len(data)]
+    return b""
+
+
+def paint_filaments(zf: zipfile.ZipFile, object_ids: list[str]) -> set[int]:
+    """The filaments the paint of these objects (``3D/3dmodel.model`` ids) uses: their meshes' ``paint_color``,
+    inline or in the files their components point to (``p:path``)."""
+    try:
+        main = zf.read("3D/3dmodel.model")
+    except KeyError:
+        return set()
+    files: dict[str, bytes] = {"3D/3dmodel.model": main}
+    used: set[int] = set()
+    for oid in dict.fromkeys(object_ids):
+        body = _object_body(main, oid)
+        meshes = [body]
+        for comp in _COMPONENT.finditer(body):
+            path, target = _PATH.search(comp.group(0)), _OBJECTID.search(comp.group(0))
+            if target is None:
+                continue
+            name = path.group(1).decode().lstrip("/") if path else "3D/3dmodel.model"
+            if name not in files:
+                try:
+                    files[name] = zf.read(name)
+                except KeyError:
+                    files[name] = b""
+            meshes.append(_object_body(files[name], target.group(1).decode()))
+        for mesh in meshes:
+            for code in set(_PAINT.findall(mesh)):
+                used |= paint_states(code.decode())
+    return used
+
+
 def plate_filaments(source: bytes | Path, plate: int) -> set[int]:
     """The filaments the objects of a plate print with; a painted model counts as several."""
     with _zip(source) as zf:
@@ -99,9 +178,9 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
     slot rows (``extract_filament_requirements`` without grams): ``filament`` when the colour variant moves
     the plate there, else its own, plus the support filaments when supports are on.
 
-    None when the slice can't be foreseen: a painted plate (its colours aren't in the extruders), or a
-    dual-nozzle project left on automatic grouping with several filaments (the slicer picks each one's nozzle).
-    With one filament there the row has no nozzle: either nozzle's slots may take it.
+    A painted plate adds the filaments its paint uses (``paint_filaments``). On a dual-nozzle project left on
+    automatic grouping the rows say no nozzle: each filament may take a slot of either nozzle, and the slice is then
+    forced onto the nozzles chosen (``free_nozzle``, ``force_nozzle``). None when the project can't be read.
     """
     from backend.app.utils.threemf_tools import extract_nozzle_mapping_from_3mf
 
@@ -110,15 +189,14 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
             cfg = json.loads(zf.read(PROJECT_SETTINGS_ENTRY))
         except (KeyError, ValueError):
             return None
-        if _painted(zf):
-            return None
         auto = _dual_auto(cfg)
         nozzles = {} if auto else extract_nozzle_mapping_from_3mf(zf) or {}
         try:
             objects = _plate_objects(ET.fromstring(zf.read(MODEL_SETTINGS_ENTRY)), plate)
         except KeyError:
             objects = []
-    used = {filament} if filament else plate_filaments(source, plate)
+        painted = paint_filaments(zf, [o.get("id") for o in objects]) if _painted(zf) else set()
+    used = {filament} if filament else plate_filaments(source, plate) | painted
     on = {"1", "true"}
     supports = str(cfg.get("enable_support", "")).lower() in on or any(
         str(m.get("value", "")).lower() in on for o in objects for m in o.findall("metadata[@key='enable_support']")
@@ -130,8 +208,6 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
             except (TypeError, ValueError):
                 pass
     used.discard(0)
-    if auto and len(used) != 1:
-        return None
     types, colours = cfg.get("filament_type") or [], cfg.get("filament_colour") or []
     slots = []
     for slot in sorted(used):
@@ -150,8 +226,8 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
 
 
 def free_nozzle(source: bytes | Path, plate: int, filament: int) -> bool:
-    """A dual-nozzle project on automatic grouping whose plate prints with one filament, supports included:
-    the slot chosen for it picks the nozzle, and the slice is forced there (``force_nozzle``)."""
+    """A dual-nozzle project on automatic grouping: the slot chosen for each filament of the plate (supports
+    included) picks that filament's nozzle, and the slice is forced so (``force_nozzle``)."""
     with _zip(source) as zf:
         try:
             cfg = json.loads(zf.read(PROJECT_SETTINGS_ENTRY))
@@ -160,28 +236,93 @@ def free_nozzle(source: bytes | Path, plate: int, filament: int) -> bool:
     return _dual_auto(cfg) and bool(plate_slots(source, plate, filament))
 
 
-def force_nozzle(model_bytes: bytes, plate: int, nozzle: int) -> bytes:
-    """A copy of the 3MF whose plate prints on ``nozzle`` (the printer's extruder id: 0 right, 1 left).
+def nozzle_key(choice: dict[int, int]) -> str:
+    """Each filament's nozzle (slot -> the printer's extruder id: 0 right, 1 left) as the job, the queue and the
+    output keep it: ``"1=1,2=0"``, the filaments in order."""
+    return ",".join(f"{slot}={nozzle}" for slot, nozzle in sorted(choice.items()))
 
-    The slicers' Manual filament grouping, on the plate and in the project: every filament on the logical
-    extruder (``filament_map``, 1-based) that ``physical_extruder_map`` turns into that nozzle.
+
+def as_nozzle_key(value) -> str | None:
+    """A job's or an output's forced nozzles as ``nozzle_key``: one nozzle alone (as the first version kept it, for
+    a plate on one filament) puts every filament there (``"*=n"``)."""
+    if value is None or value == "":
+        return None
+    return f"*={value}" if isinstance(value, int) else str(value)
+
+
+def job_nozzles(options: dict | None) -> str | None:
+    """A farm job's chosen nozzles (``nozzle_key``, ``queue_options["nozzles"]``); a job queued with one nozzle for
+    its one filament (the first version): all there."""
+    options = options or {}
+    return options.get("nozzles") or as_nozzle_key(options.get("nozzle"))
+
+
+def nozzles_label(key: str) -> str:
+    """The nozzles a slice is forced onto, as an output's name and the messages say them."""
+    side = {0: "right", 1: "left"}
+    choice = parse_nozzle_key(key)
+    if len(set(choice.values())) == 1:
+        return f"{side.get(next(iter(choice.values())), 'other')} nozzle"
+    return "filament " + ", ".join(f"{slot} {side.get(n, n)}" for slot, n in sorted(choice.items(), key=str))
+
+
+def parse_nozzle_key(key: str) -> dict[int | str, int]:
+    """``nozzle_key`` read back; ``"*=n"`` puts every filament on nozzle n (a job queued when one filament was all
+    a plate could choose for). ValueError when it isn't one."""
+    out: dict[int | str, int] = {}
+    for pair in key.split(","):
+        slot, _, nozzle = pair.partition("=")
+        out["*" if slot == "*" else int(slot)] = int(nozzle)
+    if not out:
+        raise ValueError("no nozzle chosen")
+    return out
+
+
+def force_nozzle(model_bytes: bytes, plate: int, key: str) -> bytes:
+    """A copy of the 3MF whose plate prints each filament on its chosen nozzle (``nozzle_key``).
+
+    The slicers' Manual filament grouping, on the plate and in the project: each filament on the logical extruder
+    (``filament_map``, 1-based) that ``physical_extruder_map`` turns into its nozzle. A filament not chosen keeps
+    its map (the plate's, else the project's): the plate doesn't print it.
     """
+    choice = parse_nozzle_key(key)
     with zipfile.ZipFile(io.BytesIO(model_bytes)) as zin:
         cfg = json.loads(zin.read(PROJECT_SETTINGS_ENTRY))
         physical = [int(e) for e in cfg.get("physical_extruder_map") or []]
-        if nozzle not in physical:
-            raise ValueError(f"the project has no nozzle {nozzle} (physical_extruder_map {physical})")
-        logical = str(physical.index(nozzle) + 1)
+        for nozzle in choice.values():
+            if nozzle not in physical:
+                raise ValueError(f"the project has no nozzle {nozzle} (physical_extruder_map {physical})")
         count = len(cfg.get("filament_colour") or cfg.get("filament_map") or [0])
-        cfg["filament_map_mode"] = "Manual"
-        cfg["filament_map"] = [logical] * count
         root = ET.fromstring(zin.read(MODEL_SETTINGS_ENTRY))
-        for plate_elem in root.findall("plate"):
+        plate_elem = next(
+            (
+                el
+                for el in root.findall("plate")
+                if {m.get("key"): m.get("value") for m in el.findall("metadata")}.get("plater_id") == str(plate)
+            ),
+            None,
+        )
+        plate_maps = (
+            ({m.get("key"): m.get("value") for m in plate_elem.findall("metadata")}.get("filament_maps") or "").split()
+            if plate_elem is not None
+            else []
+        )
+        project_maps = [str(v) for v in cfg.get("filament_map") or []]
+
+        def logical(slot: int) -> str:
+            nozzle = choice.get(slot, choice.get("*"))
+            if nozzle is not None:
+                return str(physical.index(nozzle) + 1)
+            kept = plate_maps if len(plate_maps) >= slot else project_maps
+            return kept[slot - 1] if len(kept) >= slot else "1"
+
+        values = [logical(slot) for slot in range(1, count + 1)]
+        cfg["filament_map_mode"] = "Manual"
+        cfg["filament_map"] = values
+        if plate_elem is not None:
             metas = plate_elem.findall("metadata")
             meta = {m.get("key"): m for m in metas}
-            if "plater_id" not in meta or meta["plater_id"].get("value") != str(plate):
-                continue
-            for key, value in (("filament_map_mode", "Manual"), ("filament_maps", " ".join([logical] * count))):
+            for key, value in (("filament_map_mode", "Manual"), ("filament_maps", " ".join(values))):
                 if key in meta:
                     meta[key].set("value", value)
                 else:  # after the plate's other metadata, before its instances
@@ -197,6 +338,17 @@ def force_nozzle(model_bytes: bytes, plate: int, nozzle: int) -> bytes:
             for info in zin.infolist():
                 zout.writestr(info, changed.get(info.filename) or zin.read(info.filename))
     return out.getvalue()
+
+
+def wrong_nozzles(output: bytes, key: str) -> dict[int, int | None] | None:
+    """The filaments of a slice not on the nozzle chosen for them (``nozzle_key``), with the nozzle they are on;
+    None when every one is. A slice that doesn't say (no slice_info, no ``group_id``) is never on the right one."""
+    choice = parse_nozzle_key(key)
+    on = sliced_nozzles(output)
+    if not on:
+        return {0: None}
+    wrong = {slot: n for slot, n in on.items() if n is None or n != choice.get(slot, choice.get("*"))}
+    return wrong or None
 
 
 def sliced_nozzles(output: bytes) -> dict[int, int | None]:

@@ -410,46 +410,62 @@ async def test_print_dialog_options_reach_the_queue_item(async_client, db_sessio
 
 
 @pytest.mark.asyncio
-async def test_dual_nozzle_slot_picks_the_nozzle_of_the_slice(async_client, db_session, farm, monkeypatch):
-    """One filament on a dual-nozzle plate on automatic grouping: a job's slice goes on its chosen slot's nozzle.
-    Two jobs of one plate on the two nozzles each wait for their own slice, never the plain one."""
+async def test_dual_nozzle_slots_pick_each_filaments_nozzle(async_client, db_session, farm, monkeypatch):
+    """A dual-nozzle plate on automatic grouping (PETG + PLA supports): each filament's slice goes on the nozzle of
+    its chosen slot, on two nozzles or one. Jobs of one plate with other nozzles wait for their own slice, never the
+    plain one."""
     a1_two = farm["printers"][1]
-    trays = [{"type": "PLA", "color": "#161616", "global_tray_id": 0, "extruder_id": 1}]  # AMS A on the left
-    trays.append({"type": "PLA", "color": "#161616", "global_tray_id": 4, "extruder_id": 0})  # AMS B, right
+    trays = [{"type": "PETG", "color": "#161616", "global_tray_id": 1, "extruder_id": 1}]  # AMS A on the left
+    trays.append({"type": "PLA", "color": "#9B9EA0", "global_tray_id": 128, "extruder_id": 0})  # AMS HT-A, right
+    trays.append({"type": "PLA", "color": "#9B9EA0", "global_tray_id": 2, "extruder_id": 1})  # AMS A again
     monkeypatch.setattr(service, "_loaded_trays", lambda pid: trays)
 
     async def free(db, plate, color):
         return True
 
     async def slots(db, plate, color):
-        return [{"slot_id": 1, "type": "PLA", "color": "#161616"}]
+        return [{"slot_id": 1, "type": "PETG", "color": "#161616"}, {"slot_id": 2, "type": "PLA", "color": "#9B9EA0"}]
 
     monkeypatch.setattr(service, "_free_nozzle", free)
     monkeypatch.setattr(service, "unsliced_plate_filaments", slots)
 
-    def job(tray):
+    def job(mapping):
         return {
             "component_code": farm["code"],
             "plate_ids": farm["plates"][:1],
             "printer_id": a1_two,
-            "ams_mapping": [tray],
+            "ams_mapping": mapping,
         }
 
-    r = await async_client.post(f"{API}/jobs", json={"jobs": [job(0), job(4)]})
+    r = await async_client.post(f"{API}/jobs", json={"jobs": [job([1, 128]), job([1, 2])]})
     assert r.status_code == 200, r.text
-    left, right = [await db_session.get(FarmPrintJob, j["id"]) for j in r.json()]
-    await db_session.refresh(left)
-    await db_session.refresh(right)
-    assert (left.queue_options["nozzle"], right.queue_options["nozzle"]) == (1, 0)
-    assert ("A1", "Nero", 1) in farm["slicing"] and ("A1", "Nero", 0) in farm["slicing"]
+    apart, together = [await db_session.get(FarmPrintJob, j["id"]) for j in r.json()]
+    await db_session.refresh(apart)
+    await db_session.refresh(together)
+    assert (apart.queue_options["nozzles"], together.queue_options["nozzles"]) == ("1=1,2=0", "1=1,2=1")
+    assert ("A1", "Nero", "1=1,2=0") in farm["slicing"] and ("A1", "Nero", "1=1,2=1") in farm["slicing"]
     # The plain slice of the plate exists, yet neither job is placed with it.
     assert (await db_session.execute(select(PrintQueueItem))).first() is None
-    assert left.status == right.status == "waiting"
+    assert apart.status == together.status == "waiting"
 
-    # Without a slot for the filament, or with a slot whose nozzle isn't known, the job isn't made.
-    for mapping in ([-1], [9]):
-        bad = {**job(0), "ams_mapping": mapping}
-        assert (await async_client.post(f"{API}/jobs", json={"jobs": [bad]})).status_code == 422
+    # A filament without a slot, or a slot whose nozzle isn't known: the job isn't made.
+    for mapping in ([1], [1, -1], [1, 9]):
+        assert (await async_client.post(f"{API}/jobs", json={"jobs": [job(mapping)]})).status_code == 422
+
+    # A job queued when one filament was all a plate could choose for (queue_options "nozzle"): all on that nozzle.
+    old = FarmPrintJob(
+        component_code=farm["code"],
+        color="Nero",
+        plate_ids=farm["plates"][:1],
+        expected_pieces=15,
+        printer_id=a1_two,
+        queue_options={"ams_mapping": [1], "nozzle": 1},
+    )
+    db_session.add(old)
+    await db_session.commit()
+    farm["slicing"].clear()
+    await service.dispatch_once(db_session)
+    assert ("A1", "Nero", "*=1") in farm["slicing"]
 
 
 @pytest.mark.asyncio

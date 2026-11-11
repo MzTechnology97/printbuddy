@@ -189,23 +189,18 @@ def plate_key(plate: int | None) -> int:
     return 1 if plate is None else plate
 
 
-def nozzle_name(nozzle: int) -> str:
-    """The printer's extruder id as the slicers name it: 0 right, 1 left."""
-    return {0: "right nozzle", 1: "left nozzle"}.get(nozzle, f"nozzle {nozzle}")
-
-
-def output_name(base: str, plate: int | None, colour: str | None = None, nozzle: int | None = None) -> str:
+def output_name(base: str, plate: int | None, colour: str | None = None, nozzle: str | None = None) -> str:
     key = plate_key(plate)
     name = base if key == 1 else f"{base} - all plates" if key == 0 else f"{base} - plate {key}"
     if colour:
         name = f"{name} - {colour}"
     if nozzle is not None:
-        name = f"{name} - {nozzle_name(nozzle)}"
+        name = f"{name} - {variants.nozzles_label(nozzle)}"
     return f"{name}.gcode.3mf"
 
 
 async def previous_output(
-    db: AsyncSession, project_id: int, plate: int | None, colour: str | None = None, nozzle: int | None = None
+    db: AsyncSession, project_id: int, plate: int | None, colour: str | None = None, nozzle: str | None = None
 ) -> LibraryFile | None:
     """The output a new slice of this project plate (in this colour variant, on this forced nozzle) replaces
     (the latest one)."""
@@ -263,7 +258,7 @@ async def slice_embedded(
     job_id: int | None = None,
     colour: str | None = None,
     from_nas: bool = False,
-    nozzle: int | None = None,
+    nozzle: str | None = None,
 ) -> SliceResponse:
     """Slice with embedded settings and save the ``.gcode.3mf`` next to the source.
 
@@ -271,8 +266,9 @@ async def slice_embedded(
     colour: if its objects are on another one, a copy moved to it is sliced, saved as its own output
     (see ``variants``); otherwise this is the plain output.
 
-    With ``nozzle`` (a dual-nozzle plate on one filament, a slot chosen for it: ``variants.free_nozzle``)
-    the copy is forced onto that nozzle and saved as its own output, only when the slice really is on it.
+    With ``nozzle`` (a dual-nozzle plate on automatic grouping, a slot chosen for each filament:
+    ``variants.free_nozzle``; ``variants.nozzle_key``) the copy is forced so and saved as its own output, only when
+    every filament of the slice really is on its nozzle.
     """
     slicer = resolve_slicer(state)
     # NAS projects are fetched into the cache now, on use; a forced slice reads the NAS again
@@ -295,7 +291,7 @@ async def slice_embedded(
         try:
             model_bytes = await asyncio.to_thread(variants.force_nozzle, model_bytes, plate_key(plate), nozzle)
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail=f"cannot force the {nozzle_name(nozzle)}: {exc}") from exc
+            raise HTTPException(status_code=409, detail=f"cannot force the nozzles ({nozzle}): {exc}") from exc
 
     progress_request_id = on_progress = None
     if job_id is not None:
@@ -323,13 +319,13 @@ async def slice_embedded(
     finally:
         await service.close()
     if nozzle is not None:
-        # The slot was chosen on that nozzle: a slice anywhere else is never saved (nor printed).
-        on = await asyncio.to_thread(variants.sliced_nozzles, result.content)
-        if not on or any(n != nozzle for n in on.values()):
+        # Each slot was chosen on its nozzle: a slice with a filament anywhere else is never saved (nor printed).
+        wrong = await asyncio.to_thread(variants.wrong_nozzles, result.content, nozzle)
+        if wrong:
             raise HTTPException(
                 status_code=409,
-                detail=f"the slice is not all on the {nozzle_name(nozzle)} of the chosen slot "
-                f"(filament: nozzle {on or 'unknown'}), not saved",
+                detail=f"the slice is not on the nozzles of the chosen slots ({variants.nozzles_label(nozzle)}): "
+                f"filament: nozzle {wrong}, not saved",
             )
 
     base_name = lib_file.filename.removesuffix(".3mf")
@@ -475,7 +471,7 @@ async def _variant_filament(
 
 
 async def variant_slice(
-    db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: int | None = None
+    db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: str | None = None
 ) -> LibraryFile | None:
     """The sliced output of this plate in the component's colour, for the current project version.
 
@@ -503,7 +499,7 @@ async def variant_slice(
 
 
 async def ask_variant_slicing(
-    db: AsyncSession, plate: FarmPlate, color: str | None, from_nas: bool = False, nozzle: int | None = None
+    db: AsyncSession, plate: FarmPlate, color: str | None, from_nas: bool = False, nozzle: str | None = None
 ) -> bool:
     """``ask_slicing`` for the component's colour (and the chosen slot's nozzle): a missing colour, or a slice
     that isn't on that nozzle, fails the slice job with its reason.
@@ -548,7 +544,9 @@ async def ask_variant_slicing(
         queue_slice_ended(key[0], name, key[1], color, state.slicer if state else None, nozzle=nozzle)
         return response.model_dump()
 
-    label = ", ".join(([color] if colour_key(color) else []) + ([nozzle_name(nozzle)] if nozzle is not None else []))
+    label = ", ".join(
+        ([color] if colour_key(color) else []) + ([variants.nozzles_label(nozzle)] if nozzle is not None else [])
+    )
     task = await slice_dispatch.enqueue(kind="library_file", source_id=key[0], source_name=f"{name} ({label})", run=run)
     if getattr(task, "id", None):
         _slice_jobs[key] = task.id
@@ -606,7 +604,7 @@ def explain(reason: str) -> str:
     return next((text for marker, text in _EXPLAINED if marker in reason), reason)
 
 
-def _queue_key(file_id: int, plate: int | None, colour: str | None, nozzle: int | None = None) -> tuple:
+def _queue_key(file_id: int, plate: int | None, colour: str | None, nozzle: str | None = None) -> tuple:
     """(file, plate, colour) of a queue slice; a slice forced onto a nozzle adds it (``slice_embedded``)."""
     key = (file_id, plate_key(plate), colour_key(colour))
     return key if nozzle is None else (*key, nozzle)
@@ -617,7 +615,7 @@ _slice_jobs: dict[tuple, int] = {}  # queue key -> the slice_dispatch job of its
 _from_nas: set[tuple] = set()
 
 
-def slice_progress(file_id: int, plate: int | None, colour: str | None, nozzle: int | None = None) -> dict | None:
+def slice_progress(file_id: int, plate: int | None, colour: str | None, nozzle: str | None = None) -> dict | None:
     """How far the slicer is with this plate's queue slice (``slice_dispatch`` progress), while it runs."""
     from backend.app.services.slice_dispatch import slice_dispatch
 
@@ -634,7 +632,7 @@ def slice_progress(file_id: int, plate: int | None, colour: str | None, nozzle: 
     return {"percent": percent, "stage": snap.get("stage")}
 
 
-async def force_slice(db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: int | None = None) -> bool:
+async def force_slice(db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: str | None = None) -> bool:
     """Slice the plate again from the 3MF read fresh from the NAS, even when a slice exists.
 
     The current slice is marked superseded at once: jobs of this plate wait for the new one and are never
@@ -670,7 +668,7 @@ def queue_slice_ended(
     colour: str | None,
     slicer: str | None,
     error=None,
-    nozzle: int | None = None,
+    nozzle: str | None = None,
 ) -> None:
     """A slice asked for the queue ended (also notified, ``notify.slicing_done``).
 
@@ -683,7 +681,7 @@ def queue_slice_ended(
     asked = _asked_at(key)
     took = round(time.monotonic() - asked) if asked is not None else None
     where = f"{filename}, plate {key[1]}" + (f" in {colour}" if colour else "")
-    where += f" on the {nozzle_name(nozzle)}" if nozzle is not None else ""
+    where += f" ({variants.nozzles_label(nozzle)})" if nozzle is not None else ""
     name = SLICER_NAMES.get(slicer, slicer or "an unknown slicer")
     if error is None:
         _failed.pop(key, None)
@@ -782,7 +780,7 @@ async def _forget_old_version(db: AsyncSession, file_id: int) -> None:
             store.pop(key)
 
 
-async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: int | None = None) -> str:
+async def queue_slice_note(db: AsyncSession, plate: FarmPlate, color: str | None, nozzle: str | None = None) -> str:
     """Ask for the plate's slice in the component's colour (``ask_variant_slicing``) and say what the job waits for.
 
     "is being sliced", or why the last slice failed and when it is tried again: a sidecar that couldn't be
