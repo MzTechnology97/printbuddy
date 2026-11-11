@@ -8,7 +8,7 @@ import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Circle, Clock, Copy, FileBox, Loader2, Printer as PrinterIcon,
   RefreshCw, RotateCcw, Play, XCircle,
 } from 'lucide-react';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { Button } from '../components/Button';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { useToast } from '../contexts/ToastContext';
@@ -206,11 +206,19 @@ function supportText(d: FarmBoardDetail): string {
   ].join('\n');
 }
 
+interface FilamentDeficit {
+  slot_id: number;
+  required_grams: number;
+  remaining_grams: number | null;
+}
+
 function Details({ row }: { row: FarmBoardRow }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [confirmStart, setConfirmStart] = useState(false);
+  // The start's 409 "insufficient_filament": the per-slot deficit, to start anyway as the Queue page does.
+  const [deficit, setDeficit] = useState<FilamentDeficit[] | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ['farm', 'board', row.key],
     queryFn: () => farmApi.getBoardDetail(row.key),
@@ -235,9 +243,16 @@ function Details({ row }: { row: FarmBoardRow }) {
     onError: (e: Error) => showToast(e.message, 'error'),
   });
   const start = useMutation({
-    mutationFn: () => api.startQueueItem(row.queue_item_id!),
-    onSuccess: () => { setConfirmStart(false); done(t('farm.board.done.start')); },
-    onError: (e: Error) => showToast(e.message, 'error'),
+    mutationFn: (skipFilamentCheck: boolean) => api.startQueueItem(row.queue_item_id!, { skipFilamentCheck }),
+    onSuccess: () => { setConfirmStart(false); setDeficit(null); done(t('farm.board.done.start')); },
+    onError: (e: Error) => {
+      setConfirmStart(false);
+      if (e instanceof ApiError && e.status === 409 && e.code === 'insufficient_filament') {
+        setDeficit((e.detail?.deficit ?? []) as FilamentDeficit[]);
+        return;
+      }
+      showToast(e.message, 'error');
+    },
   });
   if (isLoading || !data) return <Loader2 className="w-5 h-5 animate-spin text-bambu-green" />;
   const has = (a: string) => row.actions.includes(a);
@@ -300,7 +315,17 @@ function Details({ row }: { row: FarmBoardRow }) {
       {confirmStart && (
         <ConfirmModal title={t('farm.board.startTitle')} message={t('farm.board.startMessage', { printer: row.printer ?? '' })}
           confirmText={t('farm.board.action.start')} isLoading={start.isPending}
-          onConfirm={() => start.mutate()} onCancel={() => setConfirmStart(false)} />
+          onConfirm={() => start.mutate(false)} onCancel={() => setConfirmStart(false)} />
+      )}
+      {deficit && (
+        <ConfirmModal title={t('queue.filamentShort.confirmTitle')}
+          message={[t('queue.filamentShort.confirmIntro'), '', ...deficit.map((d) => t('queue.filamentShort.lineItem', {
+            slot: d.slot_id,
+            required: Math.round(d.required_grams),
+            remaining: d.remaining_grams == null ? t('queue.filamentShort.unknown') : Math.round(d.remaining_grams),
+          }))].join('\n')}
+          confirmText={t('queue.filamentShort.printAnyway')} variant="warning" isLoading={start.isPending}
+          onConfirm={() => start.mutate(true)} onCancel={() => setDeficit(null)} />
       )}
     </div>
   );
