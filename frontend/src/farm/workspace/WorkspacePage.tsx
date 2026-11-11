@@ -30,6 +30,7 @@ import {
   applyPlacements,
   currentSpec,
   fromSpec,
+  itemKey,
   moved,
   placementsToSave,
   positionOf,
@@ -44,16 +45,32 @@ import {
   boundingSphere,
   boxOf,
   changed,
-  changedPart,
+  changedParts,
   inObjectAxes,
+  isPartKey,
   partWorld,
   targetKey,
   rotationAbout,
   rotationOf,
   rotationSync,
+  targetPoints,
   withLinearOf,
   withoutRotation,
 } from './transforms';
+import {
+  ALIGN_BUTTONS,
+  DISTRIBUTE_BUTTONS,
+  type AlignSelection,
+  type AlignType,
+  alignMoves,
+  alignSuffix,
+  alignTargets,
+  canAlign,
+  drawAlignPreview,
+  isPartsSelection,
+  modelTargets,
+} from './align';
+import { facePlanes, laidOnFace, useLayOnFace } from './layOnFace';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
@@ -349,11 +366,21 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const selectedId = selection?.kind === 'object' ? selection.id : null;
   const shownIds = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
   const instances = useMemo(() => instancesOf(doc.plates), [doc.plates]);
-  // what the 3D view lights: the objects selected together, else the object (its instance, its part) selected
+  // the parts selected together, the selection's own first (Alt+click adds another part of the same instance while no
+  // tool or Move is open: Orca's Volume selection)
+  const [moreParts, setMoreParts] = useState<{ inst: string; parts: string[] }>({ inst: '', parts: [] });
+  const partInst = !selectedIds.length && selection?.kind === 'object' && selection.partId ? itemKey(selection.id, selection.instance ?? 0) : null;
+  const partIds =
+    partInst && selection?.kind === 'object' && selection.partId
+      ? [selection.partId, ...(moreParts.inst === partInst ? moreParts.parts.filter((p) => p !== selection.partId) : [])]
+      : [];
+  // what the 3D view lights: the objects selected together, else the object (its instance, its parts) selected
   const targets: Target[] = selectedIds.length
     ? selectedIds.map((objectId) => ({ objectId }))
     : selection?.kind === 'object'
-      ? [{ objectId: selection.id, instance: selection.instance ?? null, partId: selection.partId ?? null }]
+      ? partIds.length > 1
+        ? partIds.map((partId) => ({ objectId: selection.id, instance: selection.instance ?? null, partId }))
+        : [{ objectId: selection.id, instance: selection.instance ?? null, partId: selection.partId ?? null }]
       : [];
   const targetsKey = JSON.stringify(targets);
   // OrcaSlicer's Move, Rotate and Scale (their gizmos and windows): the instances selected (one, or every instance of
@@ -374,24 +401,33 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const autoDrop = (objectId: string) => doc.objects.find((o) => o.id === objectId)?.auto_drop !== false;
   // a part (one instance shows it; every instance has it, as Orca's ModelVolume): the tools work on its transform
   // as that instance shows it (M·C), and the copy saves its own (C)
-  const partTarget =
-    doc.editable && !doc.cannot_place && view && !selectedIds.length && selection?.kind === 'object' && selection.partId
-      ? targetKey(selection.id, selection.instance ?? 0, selection.partId)
-      : null;
+  const partTargets =
+    doc.editable && !doc.cannot_place && view && partInst && selection?.kind === 'object'
+      ? partIds.map((p) => targetKey(selection.id, selection.instance ?? 0, p))
+      : [];
+  const partTarget = partTargets.length === 1 ? partTargets[0] : null;
   const part = view && partTarget ? partWorld(view, placed, partTarget) : null;
-  const partInstance = view && partTarget ? currentSpec(view, placed, partTarget.split('/')[0]) : null;
-  const tkeys = partTarget && part ? [partTarget] : moveKeys; // what the tools, gizmos and boxes work on
-  const lead = part ? part.world : view && moveKeys.length ? currentSpec(view, placed, moveKeys[0]) : null;
+  const partInstance = view && partTargets.length ? currentSpec(view, placed, partTargets[0].split('/')[0]) : null;
+  const tkeys = partTargets.length ? partTargets : moveKeys; // what the tools, gizmos and boxes work on
+  const lead = part
+    ? part.world
+    : view && partTargets.length
+      ? (partWorld(view, placed, partTargets[0])?.world ?? null)
+      : view && moveKeys.length
+        ? currentSpec(view, placed, moveKeys[0])
+        : null;
   const single = tkeys.length === 1;
-  const objectCs = cs !== 'world' && single; // Object coordinates for one instance (or part); several on the bed's axes
-  const axes = part ? partInstance : lead; // the Object axes: the instance's (a part's too, as Orca's Instance)
-  const partFrame = part && partInstance && cs === 'object' ? rotationOf(partInstance) : undefined;
+  // Object coordinates for one instance, one part or the parts of one instance; several instances on the bed's axes
+  const objectCs = cs !== 'world' && (single || partTargets.length > 1);
+  const axes = partTargets.length ? partInstance : lead; // the Object axes: the instance's (a part's too, as Orca's Instance)
+  // the instance's axes for parts in Object coordinates (several parts have no Part axes of their own)
+  const partFrame = partTargets.length && partInstance && (cs === 'object' || (cs === 'part' && !part)) ? rotationOf(partInstance) : undefined;
   /** A change shown while dragging (no bed rule yet, as Orca's drag) or made (``done``: one undo step). */
   const transform = (change: Change, done: boolean) => {
     if (!view) return;
     const drop = done ? autoDrop : () => false;
-    const next = partTarget && part
-      ? changedPart(view, placed, partTarget, (w) => change.apply(w, partTarget), change.drop, drop)
+    const next = partTargets.length
+      ? changedParts(view, placed, partTargets, (w, t) => change.apply(w, t), change.drop === 'move' ? 'move' : 'transform', drop)
       : changed(view, placed, change, drop);
     applyPlacements(view, next);
     if (done) place(next);
@@ -491,6 +527,90 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   /** A part's scale or size typed (change_scale_value / change_size_value on a volume): by that much from now. */
   const partScale = (axis: 0 | 1 | 2, factor: number) =>
     scaleTo(() => [0, 1, 2].map((i) => (uniform || i === axis ? factor : 1)) as [number, number, number]);
+  // Lay on Face (F): one whole instance (GLGizmoFlatten::on_is_activable), on the faces of its model parts' hull
+  const modelPart = (objectId: string, partId: string) => {
+    const type = doc.objects.find((o) => o.id === objectId)?.parts.find((p) => p.id === partId)?.type;
+    return !type || type === 'normal_part';
+  };
+  const flattenKey = !partTargets.length && moveKeys.length === 1 ? moveKeys[0] : null;
+  const flattenSpec = view && flattenKey ? currentSpec(view, placed, flattenKey) : null;
+  const flattenAt = flattenSpec?.join(',') ?? '';
+  // the faces change with the instance's scale (LᵀL) and its parts, not with where it is or how it is turned
+  const gram = flattenSpec
+    ? [0, 1, 2].flatMap((i) => [0, 1, 2].map((j) => [0, 1, 2].reduce((sum, k) => sum + flattenSpec[3 * i + k] * flattenSpec[3 * j + k], 0).toFixed(6)))
+    : [];
+  const flattenShape = `${gram.join(',')}|${JSON.stringify(Object.entries(placed).filter(([k]) => flattenKey && k.startsWith(`${flattenKey.split(':')[0]}/`)))}`;
+  const planes = useMemo(
+    () => {
+      if (tool !== 'flatten' || !view || !flattenKey || !flattenSpec) return null;
+      return facePlanes(targetPoints(view, placed, modelTargets(view, flattenKey, modelPart), fromSpec(flattenSpec).invert()), flattenSpec);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the instance's shape: ``flattenShape``
+    [tool, view, flattenKey, flattenShape],
+  );
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the instance's transform, by value
+  const flattenInstance = useMemo(() => flattenSpec, [flattenAt]);
+  useLayOnFace(view, planes, flattenInstance, (normal) => {
+    // do_rotate("Gizmo-Place on Face"): the other instances turned alike, the object on the bed even when it was sinking
+    if (flattenKey) transform({ keys: [flattenKey], apply: (spec) => laidOnFace(spec, normal), sync: 'general', drop: 'flatten' }, true);
+  });
+  // Align and distribute: within the selection, or to the plate (the instance, for parts) holding it
+  const plateAt = (key: string) => {
+    const [objectId, inst] = key.split(':');
+    const plate = instances.get(objectId)?.find((i) => i.index === Number(inst))?.plate;
+    return plate == null ? -1 : doc.plates.findIndex((p) => p.index === plate);
+  };
+  const alignSelection = (keys: string[], parts: string[], inObject: boolean): AlignSelection | null =>
+    view && (keys.length || parts.length)
+      ? { view, placed, instances: keys, parts, modelPart, objectCs: inObject, autoDrop, plateOf: plateAt, plateCount: doc.plates.length }
+      : null;
+  const runAlign = (sel: AlignSelection, type: AlignType, toParent: boolean) => {
+    const moves = alignMoves(sel, type, toParent);
+    const keys = Object.keys(moves ?? {});
+    if (!view || !moves || !keys.length) return;
+    // a part through Selection::translate on its volume, an instance on its instance; then do_move's bed rule
+    const next = keys.some(isPartKey)
+      ? changedParts(view, placed, keys, (w, k) => moved(w, moves[k]), 'move', autoDrop)
+      : changed(view, placed, { keys, apply: (spec, k) => moved(spec, moves[k]), sync: 'none', drop: 'move' }, autoDrop);
+    applyPlacements(view, next);
+    place(next);
+  };
+  const moveAlign = tool === 'move' ? alignSelection(partTargets.length ? [] : moveKeys, partTargets, objectCs) : null;
+  const canWithin = !!moveAlign && canAlign(moveAlign, { axis: 0, kind: 'min' }, false);
+  const [alignParent, setAlignParent] = useState(false);
+  const [alignHover, setAlignHover] = useState<AlignType | null>(null);
+  // reset_align_state: within the selection whenever it can be aligned within, as the tool opens or the selection grows
+  useEffect(() => {
+    setAlignParent(!canWithin);
+    setAlignHover(null);
+  }, [tool, canWithin]);
+  const toParent = alignParent || !canWithin;
+  useEffect(
+    () => {
+      if (view) drawAlignPreview(view, moveAlign, alignHover, toParent);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the selection by key, and where it is now
+    [view, alignHover, toParent, placed, tkeys.join('|'), cs],
+  );
+  /** A button of the Move window or a menu item: enabled, else why not (the helper's reason, or too few items). */
+  const alignButton = (sel: AlignSelection, b: { type: AlignType; label: string; icon: string }, parent: boolean) => {
+    const enabled = canAlign(sel, b.type, parent);
+    const { targets, why } = alignTargets(sel, b.type, b.type.kind === 'distribute' ? false : parent);
+    const reason = enabled ? null : (why ?? (targets.length ? 'Select at least 3 parts or objects' : null));
+    return { type: b.type, icon: `${b.icon}_dark`, label: tr(b.label) + alignSuffix(b.type), enabled, why: reason ? tr(reason) : null };
+  };
+  /** The object menus' Align/Distribute (MenuFactory::append_menu_item_align_distribute): within the selection, World. */
+  const alignMenu = (sel: AlignSelection | null): MenuItem[] | string => {
+    if (!sel || !canAlign(sel, { axis: 0, kind: 'min' }, false)) return t('farm.workspace.align.nothing');
+    const rows = [...DISTRIBUTE_BUTTONS, ...ALIGN_BUTTONS].map((b) => alignButton(sel, b, false));
+    return rows.map((r, i) => ({
+      label: r.label,
+      icon: r.icon,
+      separator: i === 3 || i === 6 || i === 9,
+      onClick: r.enabled ? () => runAlign(sel, r.type, false) : undefined,
+      hint: r.why ?? undefined,
+    }));
+  };
   useEffect(() => {
     if (!view) return;
     applyPlacements(view, placed);
@@ -503,7 +623,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
   const why = doc.cannot_place ? t('farm.workspace.move.tooLarge') : orcaText(layout, 'Please select at least one object.', i18n.language);
   const ready: true | string = tkeys.length ? true : why;
-  const toolReady: Record<string, true | string> = doc.editable ? { move: ready, rotate: ready, scale: ready } : {};
+  const toolReady: Record<string, true | string> = doc.editable
+    ? { move: ready, rotate: ready, scale: ready, flatten: flattenKey ? true : tkeys.length ? t('farm.workspace.flatten.single') : why }
+    : {};
   /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
   const placementText = (spec: Spec) => {
     const n = (v: number) => toLocaleDecimal(Number(v.toFixed(2)).toString(), i18n.language);
@@ -579,7 +701,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   };
   const openEmptyMenu = (at: { x: number; y: number }) =>
     setMenu({ at, items: emptyMenu(tr, canvas.labels, { labels: () => setCanvas((c) => ({ ...c, labels: !c.labels })) }) });
-  const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>) => {
+  const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>, menuInstances?: string[]) => {
     if (sel.kind === 'object' && sel.instance != null && !sel.part) {
       // an instance node of the list (the 3D view's right click opens the object's menu)
       setMenu({ at, items: instanceMenu(tr, 1) });
@@ -588,10 +710,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (sel.kind === 'object' && selectedIds.length > 1 && selectedIds.includes(sel.id)) {
       setMenu({
         at,
-        items: multiMenu(tr, t('farm.workspace.deleteKey'), selectedIds.every((id) => stats.get(id)?.printable ?? true), {
-          zoom: () => fitTo(view!, null),
-          deselect,
-        }),
+        items: multiMenu(
+          tr,
+          t('farm.workspace.deleteKey'),
+          selectedIds.every((id) => stats.get(id)?.printable ?? true),
+          { zoom: () => fitTo(view!, null), deselect },
+          doc.editable && !doc.cannot_place ? alignMenu(alignSelection(selectedItems(view, selectedIds, null), [], false)) : undefined,
+        ),
       });
       return;
     }
@@ -626,18 +751,24 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const objSel = { kind: 'object' as const, id: sel.id, plate: sel.plate };
     setMenu({
       at,
-      items: objectMenu(tr, t('farm.workspace.deleteKey'), stats.get(sel.id)?.printable ?? true, {
-        select: () => select(objSel),
-        zoom: () => {
-          select(objSel);
-          zoomTo(sel.id);
+      items: objectMenu(
+        tr,
+        t('farm.workspace.deleteKey'),
+        stats.get(sel.id)?.printable ?? true,
+        {
+          select: () => select(objSel),
+          zoom: () => {
+            select(objSel);
+            zoomTo(sel.id);
+          },
+          info: () => select(objSel),
+          settings: () => {
+            setPerObject(true);
+            select(sel);
+          },
         },
-        info: () => select(objSel),
-        settings: () => {
-          setPerObject(true);
-          select(sel);
-        },
-      }),
+        doc.editable && !doc.cannot_place ? alignMenu(alignSelection(menuInstances ?? selectedItems(view, [sel.id], null), [], false)) : undefined,
+      ),
     });
   };
   useCanvasClicks(
@@ -649,8 +780,18 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         return;
       }
       if (hit && e.altKey && hit.partId) {
+        const partName = (id: string) => doc.objects.find((o) => o.id === hit.objectId)?.parts.find((p) => p.id === id)?.name ?? null;
+        const inst = itemKey(hit.objectId, hit.instance ?? 0);
+        if ((tool == null || tool === 'move') && partIds.length && partInst === inst) {
+          // Alt+click on another part of the selected parts' instance adds it, on a selected one takes it out (not the last)
+          const ids = partIds.includes(hit.partId) ? (partIds.length > 1 ? partIds.filter((p) => p !== hit.partId) : partIds) : [...partIds, hit.partId];
+          setMoreParts({ inst, parts: ids.slice(1) });
+          if (ids[0] !== partIds[0]) select({ kind: 'object', id: hit.objectId, plate: selectedPlate, instance: hit.instance, partId: ids[0], part: partName(ids[0]) });
+          return;
+        }
         // Alt+click selects the part under the pointer
-        const part = doc.objects.find((o) => o.id === hit.objectId)?.parts.find((p) => p.id === hit.partId);
+        const part = { name: partName(hit.partId) };
+        setMoreParts({ inst: '', parts: [] });
         setSelectedIds([]);
         select({ kind: 'object', id: hit.objectId, plate: selectedPlate, instance: hit.instance, partId: hit.partId, part: part?.name ?? null });
       } else if (hit && (e.ctrlKey || e.metaKey)) {
@@ -669,11 +810,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       const at = { x: e.clientX, y: e.clientY };
       if (hit) {
         const sel = { kind: 'object' as const, id: hit.objectId, plate: selectedPlate };
-        if (!selectedIds.includes(hit.objectId)) {
+        const mine = !selectedIds.includes(hit.objectId);
+        if (mine) {
           setSelectedIds([]);
           select({ ...sel, instance: hit.instance });
         }
-        openMenu(at, sel);
+        // the 3D view's right click selects the instance under the pointer: the menu's Align/Distribute works on it
+        openMenu(at, sel, mine ? [itemKey(hit.objectId, hit.instance ?? 0)] : undefined);
       } else if (view && currentPlate != null && onBed(view, e.clientX, e.clientY)) openMenu(at, { kind: 'plate', plate: currentPlate });
       else openEmptyMenu(at);
     },
@@ -827,6 +970,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     else if ((e.key === 'm' || e.key === 'M') && toolReady.move === true) toggleTool('move');
     else if ((e.key === 'r' || e.key === 'R') && toolReady.rotate === true) toggleTool('rotate');
     else if ((e.key === 's' || e.key === 'S') && toolReady.scale === true) toggleTool('scale');
+    else if ((e.key === 'f' || e.key === 'F') && toolReady.flatten === true) toggleTool('flatten');
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
       else deselect();
@@ -1181,6 +1325,20 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                     transform({ keys: moveKeys, apply: (spec) => moved(spec, [0, 0, -low]), sync: 'none', drop: 'move' }, true);
                   }}
                   onDone={() => toggleTool('move')}
+                  align={
+                    moveAlign
+                      ? {
+                          canWithin,
+                          toParent,
+                          parentLabel: isPartsSelection(moveAlign, true) ? 'Object' : 'Plate',
+                          onToParent: setAlignParent,
+                          align: ALIGN_BUTTONS.map((b) => alignButton(moveAlign, b, toParent)),
+                          distribute: DISTRIBUTE_BUTTONS.map((b) => alignButton(moveAlign, b, false)),
+                          onRun: (type) => runAlign(moveAlign, type, toParent),
+                          onHover: setAlignHover,
+                        }
+                      : undefined
+                  }
                 />
               )}
               {tool === 'rotate' && view && tkeys.length > 0 && (

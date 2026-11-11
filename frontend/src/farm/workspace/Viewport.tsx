@@ -307,8 +307,54 @@ function Done({ layout, onDone, left }: { layout: OrcaLayout; onDone: () => void
   );
 }
 
+type AlignAxisType = { axis: 0 | 1 | 2; kind: 'min' | 'center' | 'max' | 'distribute' };
+/** An align or distribute button: its icon, label (with its axis) and, greyed, why. */
+export interface AlignButtonSpec {
+  type: AlignAxisType;
+  icon: string;
+  label: string;
+  enabled: boolean;
+  why: string | null;
+}
+/** The Move window's align half (align.ts). */
+export interface MoveAlign {
+  /** the selection can be aligned within itself (two items): "Selection" is offered */
+  canWithin: boolean;
+  toParent: boolean;
+  /** what the parent is: the plate, or the object holding the parts */
+  parentLabel: 'Plate' | 'Object';
+  onToParent: (toParent: boolean) => void;
+  align: AlignButtonSpec[];
+  distribute: AlignButtonSpec[];
+  onRun: (type: AlignAxisType) => void;
+  /** the button under the pointer, for the 3D view's preview (null: none) */
+  onHover: (type: AlignAxisType | null) => void;
+}
+
+function AlignButton({ b, onRun, onHover }: { b: AlignButtonSpec; onRun: (t: AlignAxisType) => void; onHover: (t: AlignAxisType | null) => void }) {
+  // greyed but still hovered, as Orca's: its tooltip says why
+  return (
+    <button
+      type="button"
+      aria-label={b.label}
+      aria-disabled={!b.enabled}
+      title={b.why ? `${b.label}
+${b.why}` : b.label}
+      onClick={() => b.enabled && onRun(b.type)}
+      onMouseEnter={() => onHover(b.enabled ? b.type : null)}
+      onMouseLeave={() => onHover(null)}
+      onFocus={() => onHover(b.enabled ? b.type : null)}
+      onBlur={() => onHover(null)}
+      className={`rounded p-0.5 ${b.enabled ? 'hover:bg-bambu-dark-tertiary' : 'opacity-30 cursor-default'}`}
+    >
+      <img src={orcaIcon(b.icon)} alt="" className="w-4 h-4" aria-hidden />
+    </button>
+  );
+}
+
 /** OrcaSlicer's Move window (GizmoObjectManipulation::do_render_move_window): the coordinate system, the position
- * (World) or a move along the object's own axes (Object: "Relative", from 0), Drop and Done. */
+ * (World) or a move along the object's own axes (Object: "Relative", from 0); align and distribute, within the
+ * selection or to its plate (object); Drop and Done. */
 export function MoveWindow({
   layout,
   position,
@@ -319,6 +365,7 @@ export function MoveWindow({
   onPosition,
   onDrop,
   onDone,
+  align,
 }: {
   layout: OrcaLayout;
   position: Vec3T;
@@ -330,12 +377,48 @@ export function MoveWindow({
   onPosition: (axis: 0 | 1 | 2, value: number) => void;
   onDrop: () => void;
   onDone: () => void;
+  align?: MoveAlign;
 }) {
   const tr = useOrcaText(layout);
   return (
     <GizmoWindow label={tr('Move')}>
       <CoordinatesCombo layout={layout} value={cs} onChange={(v) => onCs?.(v)} />
       <Row caption={tr(relative ? 'Relative' : 'Position')} values={relative ? [0, 0, 0] : position} unit={tr('mm')} onCommit={onPosition} />
+      {align && (
+        <div className="space-y-1 border-t border-bambu-dark-tertiary pt-2">
+          <div className="flex items-center gap-2">
+            <select
+              className="w-24 rounded bg-bambu-dark border border-bambu-dark-tertiary px-1 py-0.5"
+              title={tr('Reference for alignment')}
+              aria-label={tr('Reference for alignment')}
+              value={align.toParent ? 'parent' : 'selection'}
+              onChange={(e) => align.onToParent(e.target.value === 'parent')}
+            >
+              {align.canWithin && <option value="selection">{tr('Selection')}</option>}
+              <option value="parent">{tr(align.parentLabel)}</option>
+            </select>
+            {([0, 1, 2] as const).map((axis) => (
+              <span key={axis} className="flex w-24 justify-center gap-0.5">
+                {align.align
+                  .filter((b) => b.type.axis === axis)
+                  .map((b) => (
+                    <AlignButton key={b.type.kind} b={b} onRun={align.onRun} onHover={align.onHover} />
+                  ))}
+              </span>
+            ))}
+          </div>
+          {!align.toParent && (
+            <div className="flex items-center gap-2">
+              <span className="w-24 truncate text-bambu-gray">{tr('Distribute')}</span>
+              {align.distribute.map((b) => (
+                <span key={b.type.axis} className="flex w-24 justify-center">
+                  <AlignButton b={b} onRun={align.onRun} onHover={align.onHover} />
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <Done
         layout={layout}
         onDone={onDone}
