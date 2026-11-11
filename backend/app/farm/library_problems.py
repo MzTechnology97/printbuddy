@@ -78,10 +78,11 @@ def _now() -> datetime:
 def read_project(path) -> dict[int, int]:
     """Blocking: the number of objects on each plate."""
     from backend.app.farm import variants
+    from backend.app.utils.xml_prefixes import declared
 
     with zipfile.ZipFile(path) as zf:
         try:
-            root = ET.fromstring(zf.read(variants.MODEL_SETTINGS_ENTRY))
+            root = ET.fromstring(declared(zf.read(variants.MODEL_SETTINGS_ENTRY)))
         except KeyError:
             return {}
     plates = [

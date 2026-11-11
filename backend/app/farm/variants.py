@@ -18,6 +18,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from backend.app.farm.detect import PROJECT_SETTINGS_ENTRY
+from backend.app.utils.xml_prefixes import declared
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ def plate_filaments(source: bytes | Path, plate: int) -> set[int]:
     """The filaments the objects of a plate print with; a painted model counts as several."""
     with _zip(source) as zf:
         try:
-            root = ET.fromstring(zf.read(MODEL_SETTINGS_ENTRY))
+            root = ET.fromstring(declared(zf.read(MODEL_SETTINGS_ENTRY)))
         except KeyError:
             return set()
         used = set().union(*(_object_filaments(o) for o in _plate_objects(root, plate)))
@@ -192,7 +193,7 @@ def plate_slots(source: bytes | Path, plate: int, filament: int) -> list[dict] |
         auto = _dual_auto(cfg)
         nozzles = {} if auto else extract_nozzle_mapping_from_3mf(zf) or {}
         try:
-            objects = _plate_objects(ET.fromstring(zf.read(MODEL_SETTINGS_ENTRY)), plate)
+            objects = _plate_objects(ET.fromstring(declared(zf.read(MODEL_SETTINGS_ENTRY))), plate)
         except KeyError:
             objects = []
         painted = paint_filaments(zf, [o.get("id") for o in objects]) if _painted(zf) else set()
@@ -293,7 +294,7 @@ def force_nozzle(model_bytes: bytes, plate: int, key: str) -> bytes:
             if nozzle not in physical:
                 raise ValueError(f"the project has no nozzle {nozzle} (physical_extruder_map {physical})")
         count = len(cfg.get("filament_colour") or cfg.get("filament_map") or [0])
-        root = ET.fromstring(zin.read(MODEL_SETTINGS_ENTRY))
+        root = ET.fromstring(declared(zin.read(MODEL_SETTINGS_ENTRY)))
         plate_elem = next(
             (
                 el
@@ -416,7 +417,7 @@ def variant_filament(source: bytes | Path, plate: int, colour_name: str, hex_: s
 def move_plate_to(model_bytes: bytes, plate: int, filament: int) -> bytes:
     """A copy of the 3MF where the objects (and their parts) of the plate print with ``filament``."""
     with zipfile.ZipFile(io.BytesIO(model_bytes)) as zin:
-        root = ET.fromstring(zin.read(MODEL_SETTINGS_ENTRY))
+        root = ET.fromstring(declared(zin.read(MODEL_SETTINGS_ENTRY)))
         for obj in _plate_objects(root, plate):
             for elem in [obj, *obj.findall("part")]:
                 meta = _extruder(elem)
