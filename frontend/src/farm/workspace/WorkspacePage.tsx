@@ -84,11 +84,13 @@ import {
   applyPlateOps,
   parseRanges,
   plateEdits,
-  plateAfterMove,
+  landing,
   plateMeta,
+  plateNow,
   plateToSave,
   remapPlateEdits,
   spiralEdits,
+  withAdded,
   withMoved,
 } from './plates';
 import type { TargetEdits } from './objectGrid';
@@ -259,7 +261,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     () => ({
       ...source,
       settings,
-      plates: applyPlateOps(withMoved(source.plates, onPlate), plateOps).map((p) => ({ ...p, name: plateMeta(p, own).plater_name || null })),
+      plates: withAdded(applyPlateOps(withMoved(source.plates, onPlate), plateOps), onPlate).map((p) => ({
+        ...p,
+        name: plateMeta(p, own).plater_name || null,
+      })),
     }),
     [source, settings, plateOps, own, onPlate],
   );
@@ -586,7 +591,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         if (isPartKey(key) || JSON.stringify(next[key]) === JSON.stringify(placed[key])) continue;
         const b = boxOf(view, next, [key]);
         if (!b) continue;
-        const now = plateAfterMove(b, moved[key] ?? filePlate(key), source.plates.length, view.bed);
+        const now = landing(b, moved[key] ?? filePlate(key), source.plates.length, doc.plates, view.bed);
         if (now === filePlate(key)) delete moved[key];
         else moved[key] = now;
       }
@@ -1227,7 +1232,14 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         ownToSave(own),
         plateToSave(own),
         plateOps,
-        Object.entries(onPlate).map(([key, p]) => ({ object_id: key.split(':')[0], instance: Number(key.split(':')[1]), plate: p })),
+        // on a plate added since: numbered as it is after the changes (on none when it was removed again)
+        Object.entries(onPlate).map(([key, p]) => {
+          const [object_id, instance] = key.split(':');
+          const now = typeof p === 'number' ? p : plateNow(p, doc.plates);
+          return typeof p === 'number' || !now
+            ? { object_id, instance: Number(instance), plate: now }
+            : { object_id, instance: Number(instance), plate: now, new_plate: true };
+        }),
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1784,7 +1796,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 name:
                   onPlate[key] === undefined
                     ? placementText(spec)
-                    : `${placementText(spec)} · ${onPlate[key] ? `${tr('Plate')} ${onPlate[key]}` : tr('Outside')}`,
+                    : `${placementText(spec)} · ${plateNow(onPlate[key], doc.plates) ? `${tr('Plate')} ${plateNow(onPlate[key], doc.plates)}` : tr('Outside')}`,
               };
             }),
             // the objects' (parts') own settings: the new value, or the project's again

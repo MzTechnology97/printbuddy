@@ -247,14 +247,25 @@ def _build_copy(
         if instance_plates or plate_ops:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no plates file to write to")
+        onto = [m for m in instance_plates if m.new_plate]
         if instance_plates:
-            # where the placements put them, on the file's plates: then they move with those plates
-            settings_xml, assigned = plate_structure.assign(settings_xml, model, list(instance_plates))
+            # where the placements put them, on the file's plates: then they move with those plates; those put on a
+            # plate the changes add are on none until it is there
+            on_file = [
+                m if not m.new_plate else m.model_copy(update={"plate": 0, "new_plate": False}) for m in instance_plates
+            ]
+            settings_xml, assigned = plate_structure.assign(settings_xml, model, on_file)
+            new = {(m.object_id, m.instance): m.plate for m in onto}
+            for a in assigned:
+                if (a["object_id"], a["instance"]) in new:
+                    a.update(after=new[(a["object_id"], a["instance"])], new_plate=True)
             placed += assigned
+        if onto and not plate_ops:
+            raise HTTPException(status_code=422, detail="The plates can't be changed so: no plate is added")
         if plate_ops:
             # after the placements: the plates' instances move with their plates from where they were put
             settings_xml, new_cfg, model, restructured = plate_structure.apply(
-                settings_xml, new_cfg, list(plate_ops), model, original_model
+                settings_xml, new_cfg, list(plate_ops), model, original_model, onto
             )
             placed += restructured
         if model is not None and model != original_model:

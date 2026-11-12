@@ -70,11 +70,13 @@ class PlateOp(BaseModel):
 
 class InstancePlate(BaseModel):
     """The plate an instance lies on after it was moved, numbered as the file's plates are (before any plate is added,
-    removed or moved); 0: no plate."""
+    removed or moved); 0: no plate. ``new_plate``: a plate the plate changes add (Add plate, Duplicate), numbered as
+    the plates are after them; the instance is where it was put, there, and doesn't move with any plate."""
 
     object_id: str = Field(pattern=r"^[0-9]{1,9}$")
     instance: int = Field(ge=0, le=100_000)
     plate: int = Field(ge=0, le=MAX_PLATES)
+    new_plate: bool = False
 
 
 def _blocks(settings: bytes) -> tuple[int, int, list[bytes]]:
@@ -254,11 +256,18 @@ def _shifted(spec: tuple[float, ...], d: tuple[float, float]) -> list[float]:
 
 
 def _move_instances(
-    model: bytes, where: dict[tuple[str, int], int], delta: dict, out_delta: tuple[float, float]
+    model: bytes,
+    where: dict[tuple[str, int], int],
+    delta: dict,
+    out_delta: tuple[float, float],
+    keep: set[tuple[str, int]] = frozenset(),
 ) -> bytes:
-    """``model`` with every instance moved as its plate moves (``moves``), each build item's other bytes kept."""
+    """``model`` with every instance (but those in ``keep``) moved as its plate moves (``moves``), each build item's
+    other bytes kept."""
     wanted = []
     for (object_id, instance), spec in _instances(model).items():
+        if (object_id, instance) in keep:
+            continue
         p = where.get((object_id, instance))
         d = out_delta if p is None else delta[p]
         if abs(d[0]) > 1e-9 or abs(d[1]) > 1e-9:
@@ -442,13 +451,18 @@ def _copies(
 
 
 def apply(
-    settings: bytes, cfg: dict, ops: list[PlateOp], model: bytes | None = None, original: bytes | None = None
+    settings: bytes,
+    cfg: dict,
+    ops: list[PlateOp],
+    model: bytes | None = None,
+    original: bytes | None = None,
+    onto: list[InstancePlate] = (),
 ) -> tuple[bytes, dict, bytes | None, list[dict]]:
     """``model_settings.config``, the project settings and the model (its instances moved with their plates and the
     duplicates' copies added, when given) with the plates added, removed, moved and duplicated, and what changed:
     ``{key: "plate", op, plate, plates}`` (``plates``: how many there are after it; a duplicate's ``objects``: how
     many it copied). ``original``: the model before its placements, where a duplicate's instances not placed by then
-    were."""
+    were. ``onto``: instances (on no plate before) put on a plate the changes add, listed there as they are."""
     if len(ops) > MAX_OPS:
         raise InvalidPlateStructure(f"too many plate changes at once (at most {MAX_OPS})")
     _, _, blocks = _blocks(settings)
@@ -504,17 +518,27 @@ def apply(
 
     entries: dict[str, list[bytes]] = {}
     copies: list[tuple[str, str, list[tuple[float, ...]]]] = []
+    where = _membership(settings)
+    put: dict[int, list[tuple[str, int]]] = {}  # instances put on a new plate, by its number after the changes
+    for m in onto:
+        key = (m.object_id, m.instance)
+        if not m.new_plate or not 1 <= m.plate <= len(sources) or isinstance(sources[m.plate - 1], int):
+            raise InvalidPlateStructure(f"plate {m.plate} is not a plate these changes add")
+        if key in where or any(key in v for v in put.values()):
+            raise InvalidPlateStructure(f"object {m.object_id} instance {m.instance} is on another plate")
+        if model is not None and key not in _instances(model):
+            raise InvalidPlateStructure(f"object {m.object_id} has no instance {m.instance}")
+        put.setdefault(m.plate, []).append(key)
+    template = next((blk[a:b] for blk in blocks for _, a, b in _entries(blk)), None)
+    identify = _identify_id(settings)
     if model is not None:
-        where = _membership(settings)
         delta, out_delta, copied = moves(count0, ops, _bed(cfg))
         if original is not None:  # the instances not placed when the plate was duplicated: where the file has them
             first = _instances(original)
             then = {d: first | placed for d, placed in then.items()}
         copies = _copies(model, where, delta, copied, chosen, then)  # from before their plates move
-        model = _move_instances(model, where, delta, out_delta)
+        model = _move_instances(model, where, delta, out_delta, {k for keys in put.values() for k in keys})
         if copies:
-            template = next((blk[a:b] for blk in blocks for _, a, b in _entries(blk)), None)
-            identify = _identify_id(settings)
             try:
                 model, settings, new_ids = copy_objects(model, settings, [(oid, specs) for _, oid, specs in copies])
             except (InvalidCopy, InvalidPlacement) as exc:
@@ -531,9 +555,17 @@ def apply(
     start, end, blocks = _blocks(settings)  # the copies' objects are before the plates: the same blocks
     empty = _empty(blocks[-1])
     new_blocks = []
+    added: dict[int, int] = {}  # each new plate: how many instances it lists
     for n, s in enumerate(sources, 1):
-        block = blocks[s] if isinstance(s, int) else _with_entries(empty, entries.get(s, [])) if s else empty
-        new_blocks.append(_numbered(block, n))
+        if isinstance(s, int):
+            new_blocks.append(_numbered(blocks[s], n))
+            continue
+        listed = entries.get(s, []) if s else []
+        for key in put.get(n, []):
+            identify = identify + 1 if identify else 0
+            listed = [*listed, _entry(template, blocks[-1], key, identify or None)]
+        added[n] = len(listed)
+        new_blocks.append(_numbered(_with_entries(empty, listed), n))
     out = settings[:start] + b"".join(new_blocks) + settings[end:]
     # read back: the same document around the plates, each plate the block it came from but for its number, a
     # duplicate listing its copies
@@ -543,6 +575,9 @@ def apply(
     for n, (block, s) in enumerate(zip(check, sources, strict=True), 1):
         if _value_of(_plater_id(block).group(0)) != str(n) or (isinstance(s, int) and _dump(block) != _dump(blocks[s])):
             raise InvalidPlateStructure("a plate changed beyond its number")
-        if not isinstance(s, int) and len(_entries(block)) != len(entries.get(s or "", [])):
-            raise InvalidPlateStructure("a new plate doesn't list its copies")
+        if not isinstance(s, int) and len(_entries(block)) != added[n]:
+            raise InvalidPlateStructure("a new plate doesn't list its instances")
+    listed = _membership(out)
+    if any(listed.get(k) != n - 1 for n, keys in put.items() for k in keys):
+        raise InvalidPlateStructure("an instance isn't listed on the new plate it was put on")
     return out, cfg, model, applied

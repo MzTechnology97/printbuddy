@@ -238,6 +238,30 @@ class TestDuplicate:
         assert plates(out)[2:] == [[("5", 0)], [("6", 0)]]
         assert item(model, "6") == [357.2, -247.2]  # plate 4: second row, second column
 
+    def test_an_instance_put_on_a_new_plate_is_listed_there_where_it_was_put(self):
+        # plate 1's object put where a third plate will be (the second row), then the plate added and plate 1 removed
+        on_file, _ = plate_structure.assign(SETTINGS, MODEL, [InstancePlate(object_id="2", instance=0, plate=0)])
+        onto = [InstancePlate(object_id="2", instance=0, plate=2, new_plate=True)]
+        ops = [PlateOp(op="add"), PlateOp(op="remove", plate=1)]
+        out, _, model, _ = plate_structure.apply(on_file, CFG, ops, MODEL, MODEL, onto)
+        assert plates(out) == [[("4", 0), ("4", 1)], [("2", 0)]]
+        assert item(model, "2") == [50.0, 60.0]  # where it was put: it doesn't move with any plate
+        assert item(model, "4") == [92.8, 60.0]  # plate 2 took plate 1's place
+        assert b'<metadata key="identify_id" value="308"/>' in out[out.index(b'"plater_id" value="2"') :]
+
+    @pytest.mark.parametrize(
+        ("onto", "error"),
+        [
+            ({"object_id": "2", "instance": 0, "plate": 1, "new_plate": True}, "not a plate these changes add"),
+            ({"object_id": "4", "instance": 0, "plate": 3, "new_plate": True}, "on another plate"),
+            ({"object_id": "2", "instance": 5, "plate": 3, "new_plate": True}, "no instance 5"),
+        ],
+    )
+    def test_putting_one_on_a_new_plate_is_refused(self, onto, error):
+        on_file, _ = plate_structure.assign(SETTINGS, MODEL, [InstancePlate(object_id="2", instance=0, plate=0)])
+        with pytest.raises(InvalidPlateStructure, match=error):
+            plate_structure.apply(on_file, CFG, [PlateOp(op="add")], MODEL, MODEL, [InstancePlate(**onto)])
+
     def test_refused_without_the_model_or_past_36_plates(self):
         with pytest.raises(InvalidPlateStructure, match="without the model"):
             plate_structure.apply(SETTINGS, CFG, [PlateOp(op="duplicate", plate=1)])
@@ -281,6 +305,35 @@ class TestSaveCopy:
         assert {"key": "plate_object", "object_id": "2", "instance": 0, "before": 1, "after": 2} in resp.json()[
             "changes"
         ]
+
+    async def test_an_object_moved_onto_a_plate_added_before_saving(self, async_client, db_session):
+        original = make_project("orca", project_settings(printable_area=CFG["printable_area"]))
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        # a third plate added (the second row, y -307.2 to -51.2) and object 2 moved onto it
+        resp = await save(
+            async_client,
+            doc,
+            {},
+            transforms=[{"object_id": "2", "instance": 0, "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 50, -200, 5]}],
+            instance_plates=[{"object_id": "2", "instance": 0, "plate": 3, "new_plate": True}],
+            plate_structure=[{"op": "add"}],
+        )
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        copy = await open_ws(async_client, row.id)
+        assert [(p["index"], p["object_ids"]) for p in copy["plates"]] == [(1, []), (2, ["4"]), (3, ["2"])]
+        moved = [c for c in resp.json()["changes"] if c["key"] == "plate_object"]
+        assert moved == [
+            {"key": "plate_object", "object_id": "2", "instance": 0, "before": 1, "after": 3, "new_plate": True}
+        ]
+        model = entries(library.to_absolute_path(row.file_path).read_bytes())[project.MODEL_ENTRY]
+        assert b'objectid="2" transform="1 0 0 0 1 0 0 0 1 50 -200 5"' in model
+        # without a plate added there is none to put it on
+        resp = await save(
+            async_client, doc, {}, instance_plates=[{"object_id": "2", "instance": 0, "plate": 3, "new_plate": True}]
+        )
+        assert resp.status_code == 422 and "no plate is added" in resp.json()["detail"]
 
     async def test_an_unknown_instance_saves_nothing(self, async_client, db_session):
         f = await add_file(db_session, make_project("orca"))
