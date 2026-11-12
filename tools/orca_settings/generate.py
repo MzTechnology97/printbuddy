@@ -273,6 +273,10 @@ UI_STRINGS = [
     # the plate's settings (PlateSettingsDialog.cpp, ConfigManipulation.cpp's spiral mode question)
     "Plate name",
     "Unlock current plate",
+    # Auto orientation (OrientJob.cpp's notices, the plate menu's Auto Rotate)
+    "This plate is locked.\nCannot auto-orient on this plate.",
+    "All the selected objects are on a locked plate.\nCannot auto-orient these objects.",
+    "Auto Rotate",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",
     "Same as Global",

@@ -54,6 +54,8 @@ export function plateMenu(
      * last plate */
     name?: () => void;
     lock?: () => void;
+    /** Auto Rotate: the plate's objects oriented (absent: nothing on it, or a file that can't be saved) */
+    orient?: () => void;
     locked?: boolean;
     remove?: () => void;
   },
@@ -64,7 +66,7 @@ export function plateMenu(
     { label: tr('Plate Settings'), onClick: on.settings },
     { label: tr('Delete All'), separator: true },
     { label: tr('Arrange'), separator: true },
-    { label: tr('Auto Rotate') },
+    { label: tr('Auto Rotate'), onClick: on.orient },
     { label: tr('Order By'), submenu: true },
     { label: tr('Edit'), submenu: true },
     { label: tr('Edit Plate Name'), separator: true, onClick: on.name },

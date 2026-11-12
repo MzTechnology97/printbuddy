@@ -858,10 +858,12 @@ export interface PlateActions {
   onLock: () => void;
   onName: () => void;
   onFront?: () => void;
+  /** Auto orient objects on current plate (absent: the plate is empty, or the model can't be rewritten) */
+  onOrient?: () => void;
 }
 
-/** The plate's own buttons (PartPlate.cpp): remove (not the last plate), lock / unlock, its name, to the front (not
- * the first), its settings; orient and arrange come with the objects' arranging (later). Without ``plate`` (a file
+/** The plate's own buttons (PartPlate.cpp): remove (not the last plate), auto orient, lock / unlock, its name, to the
+ * front (not the first), its settings; arrange comes later. Without ``plate`` (a file
  * that can't be saved) only "Customize current plate" works, showing the plate's settings. */
 export function PlateButtons({ layout, onSettings, plate }: { layout: OrcaLayout; onSettings: () => void; plate?: PlateActions }) {
   const tr = useOrcaText(layout);
@@ -871,6 +873,7 @@ export function PlateButtons({ layout, onSettings, plate }: { layout: OrcaLayout
     lock: plate?.onLock,
     name: plate?.onName,
     front: plate && plate.index > 1 ? plate.onFront : undefined,
+    orient: plate?.onOrient,
   };
   return (
     <div className="absolute right-2 top-12 flex flex-col gap-1" role="toolbar" aria-label={tr('Plate')}>
