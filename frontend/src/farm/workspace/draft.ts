@@ -2,7 +2,7 @@
 // The backend checks every value again (farm/workspace/settings.py); this only spares a round trip.
 import { useCallback, useMemo, useReducer } from 'react';
 import type { PresetRef, SettingValue, WorkspaceSetting } from './api';
-import type { PlateOp } from './plates';
+import type { PlateOp, PlateRef } from './plates';
 
 export const NIL = 'nil';
 export type Draft = Record<string, SettingValue>;
@@ -127,8 +127,8 @@ const NO_PLACEMENTS: Placements = {};
 export type OwnEdits = Record<string, Record<string, string | null>>;
 const NO_OWN: OwnEdits = {};
 const NO_OPS: PlateOp[] = [];
-/** The instances a move put on another plate: ``objectId:instance`` -> the file's plate it lies on (0: none). */
-export type OnPlate = Record<string, number>;
+/** The instances a move put on another plate: ``objectId:instance`` -> the plate it lies on (plates.ts PlateRef). */
+export type OnPlate = Record<string, PlateRef>;
 const NO_PLATE: OnPlate = {};
 
 /** One undo step: the draft, the preset switches it was made on, the instances placed anew, the objects' own

@@ -105,11 +105,11 @@ export const MAX_PLATES = 36; // PartPlate.hpp MAX_PLATE_COUNT
  * setting either). */
 export function applyPlateOps(plates: WorkspacePlate[], ops: PlateOp[]): WorkspacePlate[] {
   const list = plates.map((p) => ({ ...p, source: p.source === undefined ? p.index : p.source }));
-  for (const o of ops) {
+  for (const [k, o] of ops.entries()) {
     if (o.op === 'add' || o.op === 'duplicate') {
       const source = o.op === 'duplicate' ? (list[o.plate - 1]?.source ?? null) : null;
       const copies = o.op === 'duplicate' && source !== null ? o.objects : undefined;
-      list.push({ index: 0, name: null, object_ids: [], instances: [], metadata: { plater_name: '', locked: 'false' }, source, copies });
+      list.push({ index: 0, name: null, object_ids: [], instances: [], metadata: { plater_name: '', locked: 'false' }, source, copies, added: k });
     } else {
       const [p] = list.splice(o.plate - 1, 1);
       if (o.op === 'front' && p) list.unshift(p);
@@ -118,40 +118,79 @@ export function applyPlateOps(plates: WorkspacePlate[], ops: PlateOp[]): Workspa
   return list.map((p, i) => ({ ...p, index: i + 1, metadata: { ...p.metadata, plater_id: String(i + 1) } }));
 }
 
-/** The instances moved onto another plate (``objectId:instance`` -> the file's plate it lies on, 0 none) listed there. */
-export function withMoved(plates: WorkspacePlate[], onPlate: Record<string, number>): WorkspacePlate[] {
+/** The plate an instance lies on after a move: one of the file's (numbered as the file has them, 0 none), or one added
+ * before the copy is saved (``op``: the plate change that added it, so later changes don't renumber it). */
+export type PlateRef = number | { op: number };
+
+const instanceKey = (i: { object_id: string; instance_id: string | null }) => `${i.object_id}:${Number(i.instance_id ?? 0)}`;
+const listed = (p: WorkspacePlate, keys: string[]) => {
+  const instances = [...p.instances, ...keys.map((k) => ({ object_id: k.split(':')[0], instance_id: k.split(':')[1] }))];
+  return { ...p, instances, object_ids: [...new Set(instances.map((i) => i.object_id))] };
+};
+
+/** The file's plates with the instances moved onto another plate (``objectId:instance`` -> PlateRef) taken off theirs
+ * and listed on the file's plate they lie on (on one added since: ``withAdded``). */
+export function withMoved(plates: WorkspacePlate[], onPlate: Record<string, PlateRef>): WorkspacePlate[] {
   const keys = Object.keys(onPlate);
   if (!keys.length) return plates;
-  const key = (i: { object_id: string; instance_id: string | null }) => `${i.object_id}:${Number(i.instance_id ?? 0)}`;
-  return plates.map((p) => {
-    const instances = [
-      ...p.instances.filter((i) => onPlate[key(i)] === undefined),
-      ...keys.filter((k) => onPlate[k] === p.index).map((k) => ({ object_id: k.split(':')[0], instance_id: k.split(':')[1] })),
-    ];
-    return { ...p, instances, object_ids: [...new Set(instances.map((i) => i.object_id))] };
-  });
+  return plates.map((p) =>
+    listed(
+      { ...p, instances: p.instances.filter((i) => onPlate[instanceKey(i)] === undefined) },
+      keys.filter((k) => onPlate[k] === p.index),
+    ),
+  );
 }
 
-/** OrcaSlicer's notify_instance_update: a moved instance stays on its plate while its box touches it, else goes on
- * the first plate it touches (0: none). Plates as the file lays ``count`` of them out (compute_origin), numbered
- * from 1; the box in the slicer's x / y. Shortcut: the bed from (0, 0) and every height; a bed with its origin
- * elsewhere would need its printable area here. */
-export function plateAfterMove(
+/** The plates after their changes (applyPlateOps) with the instances moved onto a plate added since listed on it. */
+export function withAdded(plates: WorkspacePlate[], onPlate: Record<string, PlateRef>): WorkspacePlate[] {
+  const keys = Object.keys(onPlate).filter((k) => typeof onPlate[k] === 'object');
+  if (!keys.length) return plates;
+  return plates.map((p) => (p.added === undefined ? p : listed(p, keys.filter((k) => (onPlate[k] as { op: number }).op === p.added))));
+}
+
+/** Whether ``box`` (the slicer's x / y) touches plate ``n`` (from 1) of ``count`` as OrcaSlicer lays them out
+ * (compute_origin; get_build_volume's box and epsilon). Shortcut: the bed from (0, 0) and every height; a bed with its
+ * origin elsewhere would need its printable area here. */
+export function touches(
   box: { min: { x: number; y: number }; max: { x: number; y: number } },
-  current: number,
+  n: number,
   count: number,
   bed: { x: number; y: number },
-): number {
+): boolean {
   const root = Math.sqrt(count);
   const cols = root > Math.round(root) ? Math.round(root) + 1 : Math.round(root);
   const EPS = 1e-4; // BuildVolume::SceneEpsilon
-  const touches = (n: number) => {
-    const x = ((n - 1) % cols) * bed.x * 1.2, y = -Math.floor((n - 1) / cols) * bed.y * 1.2;
-    return box.max.x >= x - EPS && box.min.x <= x + bed.x + EPS && box.max.y >= y - EPS && box.min.y <= y + bed.y + EPS;
-  };
-  if (current > 0 && touches(current)) return current;
-  for (let n = 1; n <= count; n++) if (touches(n)) return n;
-  return 0;
+  const x = ((n - 1) % cols) * bed.x * 1.2, y = -Math.floor((n - 1) / cols) * bed.y * 1.2;
+  return box.max.x >= x - EPS && box.min.x <= x + bed.x + EPS && box.max.y >= y - EPS && box.min.y <= y + bed.y + EPS;
+}
+
+/** OrcaSlicer's notify_instance_update: a moved instance stays on its plate while its box touches it, else goes on the
+ * first plate it touches, else on none (0). The file's plates as the file lays them out (``fileCount``), where its
+ * instances are until the copy is saved; then the plates added since (``plates``: all of them after the changes),
+ * where they are drawn. */
+export function landing(
+  box: { min: { x: number; y: number }; max: { x: number; y: number } },
+  current: PlateRef,
+  fileCount: number,
+  plates: WorkspacePlate[],
+  bed: { x: number; y: number },
+): PlateRef {
+  const added = plates.filter((p) => p.added !== undefined);
+  const onAdded = (p: WorkspacePlate) => touches(box, p.index, plates.length, bed);
+  const stays =
+    typeof current === 'number'
+      ? current > 0 && touches(box, current, fileCount, bed)
+      : added.some((p) => p.added === current.op && onAdded(p));
+  if (stays) return current;
+  for (let n = 1; n <= fileCount; n++) if (touches(box, n, fileCount, bed)) return n;
+  const p = added.find(onAdded);
+  return p ? { op: p.added! } : 0;
+}
+
+/** The number ``ref``'s plate has after the changes (0: none, or a plate added and removed again). */
+export function plateNow(ref: PlateRef, plates: WorkspacePlate[]): number {
+  if (typeof ref === 'number') return ref === 0 ? 0 : (plates.find((p) => p.source === ref && !p.copies)?.index ?? 0);
+  return plates.find((p) => p.added === ref.op)?.index ?? 0;
 }
 
 /** The plates' own settings edited (``plate:N``), numbered as the plates are after ``op``; a removed plate's go. */
