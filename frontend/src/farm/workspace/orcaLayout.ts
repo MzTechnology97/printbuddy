@@ -67,6 +67,9 @@ export interface OrcaLayout {
   plate_keys: Record<string, string>;
   /** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp, Shortcuts.cpp) */
   shortcuts?: ShortcutPage[];
+  /** The object table's settings by category (GUI_Factories.cpp OBJECT_ / PART_CATEGORY_SETTINGS): an object shows
+   * both lists of a category, a part the part's only. ``label``: the table's own label instead of the option's. */
+  table_settings?: Record<'object' | 'part', Record<string, { key: string; label?: string; priority: number }[]>>;
   /** English (as in OrcaSlicer) -> Italian (its it.po); a contextual string under "context\u0004text" */
   it: Record<string, string>;
 }
@@ -82,7 +85,13 @@ export async function loadOrcaLayout(slicer?: string | null): Promise<OrcaLayout
   const bambu = await layoutModules['./orca-assets/settings-layout-bambu.json']();
   // the 3D view, its keys and their dialog are OrcaSlicer's for every project
   // shortcut: Bambu Studio's data predates the part keys: OrcaSlicer's (as the backend checks them, object_settings.py)
-  return { ...bambu, region_keys: bambu.region_keys ?? orca.region_keys, shortcuts: orca.shortcuts, it: { ...orca.it, ...bambu.it } };
+  return {
+    ...bambu,
+    region_keys: bambu.region_keys ?? orca.region_keys,
+    shortcuts: orca.shortcuts,
+    table_settings: orca.table_settings, // OrcaSlicer's object table, for every project
+    it: { ...orca.it, ...bambu.it },
+  };
 }
 
 /** Orca's modes, each showing the ones before it; develop only with the DEV switch. */

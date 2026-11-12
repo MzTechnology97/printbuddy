@@ -179,6 +179,9 @@ ICONS = [
     "objlist_color_painting",
     "objlist_sinking",
     "help",
+    # the object table (ParamsPanel's "View all object's settings", GUI_ObjectTable.cpp's reset icon)
+    "table",
+    "lock_normal",
 ]
 # Strings of the 3D view's toolbars, canvas buttons, plate buttons and right-click menus (GLCanvas3D.cpp,
 # GLGizmosManager.cpp, PartPlate.cpp, GUI_Factories.cpp, Plater.cpp, MainFrame.cpp), for their Italian
@@ -248,6 +251,27 @@ UI_STRINGS = [
     "Copy Process Settings",
     "Paste Process Settings",
     "Edit in Parameter Table",
+    # the object table (GUI_ObjectTable.cpp, GUI_ObjectTableSettings.cpp, ParamsPanel.cpp)
+    "View all object's settings",
+    "Object/Part Settings",
+    "Plate",
+    "Name",
+    "Layer height",
+    "Wall loops",
+    "Infill density(%)",
+    "Brim",
+    "Outer wall speed",
+    "Outer brim only",
+    "Inner brim only",
+    "Outer and inner brim",
+    "No-brim",
+    "Outside",
+    "Reset parameter",
+    "One cell can only be copied to one or more cells in the same column.",
+    "Copying multiple cells is not supported.",
+    "Quality",
+    "Strength",
+    "Speed",
     "More",
     "Select All",
     "Select All Plates",
@@ -829,6 +853,24 @@ def object_keys(hpp_src: str) -> tuple[list[str], list[str]]:
     return sorted({*found["PrintObjectConfig"], *found["PrintRegionConfig"]}), sorted(set(found["PrintRegionConfig"]))
 
 
+def table_settings(factories_src: str) -> dict[str, dict[str, list[dict]]]:
+    """The object table's settings by category (GUI_Factories.cpp ``OBJECT_CATEGORY_SETTINGS``,
+    ``PART_CATEGORY_SETTINGS``): ``{"object": {category: [{key, label?, priority}]}, "part": ...}`` in their order
+    (``get_visible_options`` sorts them by priority; the table keeps equal ones in this order)."""
+    out: dict[str, dict[str, list[dict]]] = {}
+    src = _strip_comments(factories_src)
+    for kind, name in (("object", "OBJECT_CATEGORY_SETTINGS"), ("part", "PART_CATEGORY_SETTINGS")):
+        m = re.search(rf"SettingsFactory::{name}\s*=\s*\{{(.*?)\}};", src, re.S)
+        if not m:
+            raise SystemExit(f"{name} not found in GUI_Factories.cpp")
+        cats: dict[str, list[dict]] = {}
+        for cat, body in re.findall(r'\{\s*L\("([^"]+)"\)\s*,\s*\{((?:[^{}]|\{[^{}]*\})*)\}', m.group(1)):
+            rows = re.findall(r'\{\s*"(\w+)"\s*,\s*(?:L\("([^"]*)"\)|"([^"]*)")\s*,\s*(\d+)\s*\}', body)
+            cats[cat] = [{"key": k, **({"label": a or b} if a or b else {}), "priority": int(n)} for k, a, b, n in rows]
+        out[kind] = cats
+    return out
+
+
 CTX = "\u0004"  # gettext's separator: a contextual msgid is keyed "context\u0004msgid"
 
 
@@ -1089,6 +1131,8 @@ def main() -> None:
         conf["sections"],
     )
     per_object, per_part = object_keys((src / "src/libslic3r/PrintConfig.hpp").read_text(encoding="utf-8"))
+    factories = src / "src/slic3r/GUI/GUI_Factories.cpp"
+    table = table_settings(factories.read_text(encoding="utf-8")) if factories.is_file() else None
     sections = preset_sections((src / "src/libslic3r/Preset.cpp").read_text(encoding="utf-8"))
     for section, section_pages in pages.items():  # what Tab.cpp places on a preset's pages is that preset's
         for k in (k for p in section_pages for g in p["groups"] for k in g["keys"]):
@@ -1119,6 +1163,7 @@ def main() -> None:
     )
     wanted = {p["title"] for s in pages.values() for p in s} | set(UI_STRINGS) | keyboard_strings
     wanted |= {g["title"] for s in pages.values() for p in s for g in p["groups"]}
+    wanted |= {r["label"] for kind in (table or {}).values() for rows in kind.values() for r in rows if "label" in r}
     for o in opts.values():
         wanted |= {o["label"], o.get("tooltip", ""), o.get("unit", "")} | {e["label"] for e in o.get("enum", [])}
     italian = {s: po[s] for s in sorted(wanted) if s in po}
@@ -1142,6 +1187,7 @@ def main() -> None:
         "object_keys": per_object,
         "region_keys": per_part,
         "plate_keys": PLATE_KEYS,
+        **({"table_settings": table} if table else {}),
         "shortcuts": keyboard,
         "it": italian,
     }

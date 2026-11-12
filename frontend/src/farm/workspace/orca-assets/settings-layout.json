@@ -11856,6 +11856,494 @@
   "first_layer_print_sequence": "first_layer_print_sequence",
   "other_layers_print_sequence": "other_layers_print_sequence"
  },
+ "table_settings": {
+  "object": {
+   "Quality": [
+    {
+     "key": "layer_height",
+     "priority": 1
+    },
+    {
+     "key": "seam_position",
+     "priority": 2
+    },
+    {
+     "key": "slice_closing_radius",
+     "priority": 3
+    },
+    {
+     "key": "resolution",
+     "priority": 4
+    },
+    {
+     "key": "xy_hole_compensation",
+     "priority": 5
+    },
+    {
+     "key": "xy_contour_compensation",
+     "priority": 6
+    },
+    {
+     "key": "elefant_foot_compensation",
+     "priority": 7
+    },
+    {
+     "key": "make_overhang_printable_angle",
+     "priority": 8
+    },
+    {
+     "key": "make_overhang_printable_hole_size",
+     "priority": 9
+    },
+    {
+     "key": "wall_sequence",
+     "priority": 10
+    },
+    {
+     "key": "precise_z_height",
+     "priority": 10
+    }
+   ],
+   "Support": [
+    {
+     "key": "brim_type",
+     "priority": 1
+    },
+    {
+     "key": "brim_width",
+     "priority": 2
+    },
+    {
+     "key": "leading_brim_length",
+     "priority": 3
+    },
+    {
+     "key": "extra_brim_width",
+     "priority": 4
+    },
+    {
+     "key": "brim_object_gap",
+     "priority": 5
+    },
+    {
+     "key": "brim_flow_ratio",
+     "priority": 6
+    },
+    {
+     "key": "brim_use_efc_outline",
+     "priority": 7
+    },
+    {
+     "key": "enable_support",
+     "priority": 8
+    },
+    {
+     "key": "support_type",
+     "priority": 9
+    },
+    {
+     "key": "support_threshold_angle",
+     "priority": 10
+    },
+    {
+     "key": "support_threshold_overlap",
+     "priority": 11
+    },
+    {
+     "key": "support_on_build_plate_only",
+     "priority": 12
+    },
+    {
+     "key": "support_filament",
+     "priority": 13
+    },
+    {
+     "key": "support_interface_filament",
+     "priority": 14
+    },
+    {
+     "key": "support_expansion",
+     "priority": 15
+    },
+    {
+     "key": "support_style",
+     "priority": 16
+    },
+    {
+     "key": "tree_support_brim_width",
+     "priority": 17
+    },
+    {
+     "key": "tree_support_branch_angle",
+     "priority": 18
+    },
+    {
+     "key": "tree_support_branch_angle_organic",
+     "priority": 19
+    },
+    {
+     "key": "tree_support_wall_count",
+     "priority": 20
+    },
+    {
+     "key": "tree_support_branch_diameter_angle",
+     "priority": 21
+    },
+    {
+     "key": "support_bottom_z_distance",
+     "priority": 22
+    },
+    {
+     "key": "support_top_z_distance",
+     "priority": 23
+    },
+    {
+     "key": "support_base_pattern",
+     "priority": 24
+    },
+    {
+     "key": "support_base_pattern_spacing",
+     "priority": 25
+    },
+    {
+     "key": "support_interface_top_layers",
+     "priority": 26
+    },
+    {
+     "key": "support_interface_bottom_layers",
+     "priority": 27
+    },
+    {
+     "key": "support_interface_spacing",
+     "priority": 28
+    },
+    {
+     "key": "support_bottom_interface_spacing",
+     "priority": 29
+    },
+    {
+     "key": "support_object_xy_distance",
+     "priority": 30
+    },
+    {
+     "key": "bridge_no_support",
+     "priority": 31
+    },
+    {
+     "key": "max_bridge_length",
+     "priority": 32
+    },
+    {
+     "key": "support_critical_regions_only",
+     "priority": 33
+    },
+    {
+     "key": "support_remove_small_overhang",
+     "priority": 34
+    },
+    {
+     "key": "support_object_first_layer_gap",
+     "priority": 35
+    }
+   ],
+   "Speed": [
+    {
+     "key": "support_speed",
+     "priority": 12
+    },
+    {
+     "key": "support_interface_speed",
+     "priority": 13
+    }
+   ]
+  },
+  "part": {
+   "Quality": [
+    {
+     "key": "ironing_type",
+     "priority": 8
+    },
+    {
+     "key": "ironing_flow",
+     "priority": 9
+    },
+    {
+     "key": "ironing_spacing",
+     "priority": 10
+    },
+    {
+     "key": "ironing_inset",
+     "priority": 11
+    },
+    {
+     "key": "bridge_flow",
+     "priority": 11
+    },
+    {
+     "key": "make_overhang_printable",
+     "priority": 11
+    },
+    {
+     "key": "bridge_density",
+     "priority": 1
+    },
+    {
+     "key": "ironing_expansion",
+     "priority": 14
+    },
+    {
+     "key": "zaa_enabled",
+     "priority": 1
+    },
+    {
+     "key": "zaa_minimize_perimeter_height",
+     "priority": 2
+    },
+    {
+     "key": "zaa_dont_alternate_fill_direction",
+     "priority": 3
+    },
+    {
+     "key": "zaa_min_z",
+     "priority": 4
+    }
+   ],
+   "Strength": [
+    {
+     "key": "wall_loops",
+     "priority": 1
+    },
+    {
+     "key": "top_shell_layers",
+     "label": "Top solid layers",
+     "priority": 1
+    },
+    {
+     "key": "top_shell_thickness",
+     "label": "Top minimum shell thickness",
+     "priority": 1
+    },
+    {
+     "key": "top_surface_density",
+     "label": "Top Surface Density",
+     "priority": 1
+    },
+    {
+     "key": "top_color_penetration_layers",
+     "priority": 1
+    },
+    {
+     "key": "bottom_shell_layers",
+     "label": "Bottom solid layers",
+     "priority": 1
+    },
+    {
+     "key": "bottom_shell_thickness",
+     "label": "Bottom minimum shell thickness",
+     "priority": 1
+    },
+    {
+     "key": "bottom_surface_density",
+     "label": "Bottom Surface Density",
+     "priority": 1
+    },
+    {
+     "key": "bottom_color_penetration_layers",
+     "priority": 1
+    },
+    {
+     "key": "sparse_infill_density",
+     "priority": 1
+    },
+    {
+     "key": "fill_multiline",
+     "priority": 1
+    },
+    {
+     "key": "sparse_infill_pattern",
+     "priority": 1
+    },
+    {
+     "key": "adaptive_infill_mode",
+     "priority": 1
+    },
+    {
+     "key": "adaptive_infill_interior_density",
+     "priority": 1
+    },
+    {
+     "key": "adaptive_infill_gradient",
+     "priority": 1
+    },
+    {
+     "key": "sparse_infill_smooth_factor",
+     "priority": 1
+    },
+    {
+     "key": "lateral_lattice_angle_1",
+     "priority": 1
+    },
+    {
+     "key": "lateral_lattice_angle_2",
+     "priority": 1
+    },
+    {
+     "key": "infill_overhang_angle",
+     "priority": 1
+    },
+    {
+     "key": "lightning_overhang_angle",
+     "priority": 1
+    },
+    {
+     "key": "lightning_prune_angle",
+     "priority": 1
+    },
+    {
+     "key": "lightning_straightening_angle",
+     "priority": 1
+    },
+    {
+     "key": "infill_anchor",
+     "priority": 1
+    },
+    {
+     "key": "infill_anchor_max",
+     "priority": 1
+    },
+    {
+     "key": "top_surface_pattern",
+     "priority": 1
+    },
+    {
+     "key": "top_surface_expansion",
+     "priority": 1
+    },
+    {
+     "key": "top_surface_expansion_margin",
+     "priority": 1
+    },
+    {
+     "key": "top_surface_expansion_direction",
+     "priority": 1
+    },
+    {
+     "key": "bottom_surface_pattern",
+     "priority": 1
+    },
+    {
+     "key": "internal_solid_infill_pattern",
+     "priority": 1
+    },
+    {
+     "key": "align_infill_direction_to_model",
+     "priority": 1
+    },
+    {
+     "key": "extra_solid_infills",
+     "priority": 1
+    },
+    {
+     "key": "infill_combination",
+     "priority": 1
+    },
+    {
+     "key": "infill_combination_max_layer_height",
+     "priority": 1
+    },
+    {
+     "key": "infill_wall_overlap",
+     "priority": 1
+    },
+    {
+     "key": "top_bottom_infill_wall_overlap",
+     "priority": 1
+    },
+    {
+     "key": "solid_infill_direction",
+     "priority": 1
+    },
+    {
+     "key": "top_layer_direction",
+     "priority": 1
+    },
+    {
+     "key": "bottom_layer_direction",
+     "priority": 1
+    },
+    {
+     "key": "infill_direction",
+     "priority": 1
+    },
+    {
+     "key": "bridge_angle",
+     "priority": 1
+    },
+    {
+     "key": "internal_bridge_angle",
+     "priority": 1
+    },
+    {
+     "key": "minimum_sparse_infill_area",
+     "priority": 1
+    }
+   ],
+   "Speed": [
+    {
+     "key": "outer_wall_speed",
+     "priority": 1
+    },
+    {
+     "key": "inner_wall_speed",
+     "priority": 2
+    },
+    {
+     "key": "sparse_infill_speed",
+     "priority": 3
+    },
+    {
+     "key": "top_surface_speed",
+     "priority": 4
+    },
+    {
+     "key": "internal_solid_infill_speed",
+     "priority": 5
+    },
+    {
+     "key": "enable_overhang_speed",
+     "priority": 6
+    },
+    {
+     "key": "overhang_1_4_speed",
+     "priority": 7
+    },
+    {
+     "key": "overhang_2_4_speed",
+     "priority": 8
+    },
+    {
+     "key": "overhang_3_4_speed",
+     "priority": 9
+    },
+    {
+     "key": "overhang_4_4_speed",
+     "priority": 10
+    },
+    {
+     "key": "bridge_speed",
+     "priority": 11
+    },
+    {
+     "key": "gap_infill_speed",
+     "priority": 12
+    },
+    {
+     "key": "internal_bridge_speed",
+     "priority": 13
+    }
+   ]
+  }
+ },
  "shortcuts": [
   {
    "title": "Global",
@@ -13261,14 +13749,17 @@
   "Billow": "Ondulato",
   "Both": "Entrambi",
   "Bottom Only": "Solo inferiore",
+  "Bottom Surface Density": "Densità superficie inferiore",
   "Bottom View": "Vista dal basso",
   "Bottom Z distance": "Distanza Z inferiore",
   "Bottom interface layers": "Strati interfaccia inferiore",
   "Bottom interface spacing": "Spaziatura interfaccia inferiore",
   "Bottom layer direction": "Direzione dello strato inferiore",
+  "Bottom minimum shell thickness": "Spessore minimo del guscio inferiore",
   "Bottom paint penetration layers": "Strati di penetrazione pittura inferiore",
   "Bottom shell layers": "Strati guscio inferiore",
   "Bottom shell thickness": "Spessore guscio inferiore",
+  "Bottom solid layers": "Strati solidi inferiori",
   "Bottom surface": "Superficie inferiore",
   "Bottom surface density": "Densità superficie inferiore",
   "Bottom surface fill order": "Ordine di riempimento della superficie inferiore",
@@ -13415,6 +13906,7 @@
   "Copy": "Copia",
   "Copy Process Settings": "Copia impostazioni di processo",
   "Copy to clipboard": "Copia negli appunti",
+  "Copying multiple cells is not supported.": "Copia di celle multiple non supportata.",
   "CoreXY": "CoreXY",
   "Cost": "Costo",
   "Counter clockwise": "Senso antiorario",
@@ -13924,6 +14416,7 @@
   "Infill": "Riempimento",
   "Infill combination": "Combinazione riempimento",
   "Infill combination - Max layer height": "Combinazione riempimento - Altezza massima strato",
+  "Infill density(%)": "Densità riempimento (%)",
   "Infill gap": "Spazio del riempimento",
   "Infill gap.": "Spazio del riempimento.",
   "Infill lock depth": "Profondità intersezione riempimento",
@@ -14259,6 +14752,7 @@
   "Multi-tool ramming volume": "Volume modellazione filamento multitestina",
   "Multimaterial": "Multimateriale",
   "Multiple": "Multiplo",
+  "Name": "Nome",
   "Name is invalid;": "Nome non valido;",
   "Name is unavailable.": "Nome non disponibile.",
   "Name of parent profile.": "Nome del profilo padre.",
@@ -14324,6 +14818,7 @@
   "Object name": "Nome oggetto",
   "Object name: %1%\n": "Nome oggetto: %1%\n",
   "Object will be raised by this number of support layers. Use this function to avoid warping when printing ABS.": "L'oggetto verrà sollevato per questo numero di strati di supporto. Utilizzare questa funzione per evitare deformazioni durante la stampa di ABS.",
+  "Object/Part Settings": "Impostazioni oggetto/parte",
   "Objects": "Oggetti",
   "Objects list": "Elenco oggetti",
   "Octagram Spiral": "Spirale a ottogramma",
@@ -14332,6 +14827,7 @@
   "On surfaces": "Sulle superfici",
   "On/Off G-code window": "Attiva/Disattiva finestra G-code",
   "On/Off one layer mode of the vertical slider": "Attiva/Disattiva modalità singolo strato del cursore di scorrimento verticale",
+  "One cell can only be copied to one or more cells in the same column.": "È possibile copiare una cella solo in una o più celle della stessa colonna.",
   "One wall threshold": "Soglia singola parete",
   "Only create support for critical regions including sharp tail, cantilever, etc.": "Genera supporti solo per le aree critiche, tra cui estremità taglienti, sbalzi, ecc.",
   "Only draw brim over the sharp edges of the model.": "Disegna la tesa solo sugli spigoli vivi del modello.",
@@ -14366,12 +14862,14 @@
   "Outer brim only": "Solo tesa esterna",
   "Outer wall": "Parete esterna",
   "Outer wall flow ratio": "Flusso di stampa pareti esterne",
+  "Outer wall speed": "Velocità parete esterna",
   "Outer walls": "Pareti esterne",
   "Outer/Inner": "Esterna/Interna",
   "Outline": "Contorno",
   "Outline tolerance": "Tolleranza del contorno",
   "Output Model Info": "Informazioni modello di output",
   "Output directory": "Cartella di destinazione",
+  "Outside": "Esterno",
   "Outward": "Verso l'esterno",
   "Overhang cooling activation threshold": "Soglia di attivazione raffreddamento sporgenze",
   "Overhang flow ratio": "Flusso di stampa sporgenze",
@@ -14552,6 +15050,7 @@
   "Reset Window Layout": "Ripristina disposizione finestra",
   "Reset current rotation to real zeros.": "Reimposta la rotazione corrente a zero reale.",
   "Reset current rotation to the value when open the rotation tool.": "Reimposta la rotazione corrente al valore di apertura dello strumento.",
+  "Reset parameter": "Ripristina parametro",
   "Reset scale": "Reimposta scala",
   "Resolution": "Risoluzione",
   "Resonance Compensation": "Compensazione risonanza",
@@ -15126,6 +15625,7 @@
   "Toolhead-relative (nozzle offsets)": "Relativo alla testa di stampa (offset degli ugelli)",
   "Tools per Gantry": "Testine per portale",
   "Top Only": "Solo superiore",
+  "Top Surface Density": "Densità superficie superiore",
   "Top View": "Vista dall'alto",
   "Top Z distance": "Distanza Z superiore",
   "Top and Bottom": "Superiore e inferiore",
@@ -15135,6 +15635,7 @@
   "Top interface layers": "Strati interfaccia superiore",
   "Top interface spacing": "Spaziatura interfaccia superiore",
   "Top layer direction": "Direzione dello strato superiore",
+  "Top minimum shell thickness": "Spessore minimo del guscio superiore",
   "Top paint penetration layers": "Strati di penetrazione pittura superiore",
   "Top shell thickness": "Spessore guscio superiore",
   "Top solid infill area is enlarged slightly to overlap with wall for better bonding and to minimize the appearance of pinholes where the top infill meets the walls. A value of 25-30% is a good starting point, minimizing the appearance of pinholes. The percentage value is relative to the inner wall line width.": "L'area di riempimento solido superiore viene leggermente allargata per sovrapporsi alla parete, garantendo una migliore adesione e riducendo al minimo la comparsa di fori nei punti in cui il riempimento superiore incontra le pareti. Un valore del 25-30% è un buon punto di partenza, riducendo al minimo la comparsa di fori. Il valore percentuale è relativo alla larghezza della linea della parete interna.",
@@ -15258,6 +15759,7 @@
   "Vertical slider - Move active thumb Down": "Cursore di scorrimento verticale - Abbassa cursore attivo",
   "Vertical slider - Move active thumb Up": "Cursore di scorrimento verticale - Solleva cursore attivo",
   "View": "Vista",
+  "View all object's settings": "Visualizza tutte le impostazioni dell'oggetto",
   "Visualization Theme": "Tema di visualizzazione",
   "Volume": "Volume",
   "Volume of nozzle between the filament cutter and the end of the nozzle": "Volume dell'ugello tra l'area di taglio ed l'estremità dell'ugello.",

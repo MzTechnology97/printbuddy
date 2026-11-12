@@ -87,15 +87,16 @@ export const printedFilament = (obj: WorkspaceObject, partId: string, edits?: Ow
   filamentOf(obj, partId, edits) || filamentOf(obj, null, edits);
 
 /** OrcaSlicer's filament change on an object or one of its parts, as draft edits (target -> extruder): the list's
- * Fila. column (``update_filament_in_config``: an object's choice drops its parts' own) or keys 0-9
+ * Fila. column (``update_filament_in_config``: an object's choice drops its parts' own), keys 0-9
  * (``set_extruder_for_selected_items``: the model parts' only; 0 is filament 1 on an object, the object's on a
- * part). A value the file already holds goes back to it (undefined).
+ * part) or the object table (``update_volume_values_from_object``: only the parts' own equal to the object's new
+ * one). A value the file already holds goes back to it (undefined).
  * shortcut: a negative part's or a blocker's own filament (which prints nothing) stays; Orca's column drops it too. */
 export function filamentEdits(
   obj: WorkspaceObject,
   partId: string | null,
   n: number,
-  how: 'column' | 'keys',
+  how: 'column' | 'keys' | 'table',
   edits?: OwnEdits,
 ): Record<string, Record<string, string | null | undefined>> {
   const id = obj.id ?? '';
@@ -111,6 +112,7 @@ export function filamentEdits(
     for (const p of obj.parts) {
       const type = p.type ?? 'normal_part';
       if (!p.id || !FILAMENT_PARTS.has(type) || (how === 'keys' && type !== 'normal_part')) continue;
+      if (how === 'table' && filamentOf(obj, p.id, edits) !== value) continue;
       const own = p.extruder != null && p.extruder !== '';
       if (own || edits?.[ownTarget(id, p.id)]?.[FILAMENT_KEY] !== undefined) {
         out[ownTarget(id, p.id)] = { [FILAMENT_KEY]: own ? null : undefined };

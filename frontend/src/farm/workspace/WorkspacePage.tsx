@@ -75,6 +75,7 @@ import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { FILAMENT_KEY, type Selection, instancesOf, ownToSave } from './objects';
+import { ObjectTableDialog } from './ObjectTable';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -283,6 +284,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // OrcaSlicer's Save preset (of a section, a filament's for the filament window) and Compare presets
   const [savePreset, setSavePreset] = useState<{ section: 'process' | 'filament' | 'printer'; filament: number } | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
+  // OrcaSlicer's object table: the row it opens on (null: none), or closed
+  const [objectTable, setObjectTable] = useState<{ objectId: string; partId: string | null } | null | false>(false);
   const [picker, setPicker] = useState<{ section: PresetRef['section']; filament: number; at: { x: number; y: number } } | null>(null);
 
   const projectQuery = useQuery({
@@ -326,13 +329,17 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         const label = setting ? orcaText(layout, layout.options[e.key]?.label ?? setting.label, i18n.language) : e.key;
         const value = e.value == null || !setting ? null : Array.isArray(setting.value) ? e.value.split(',') : e.value;
         const where = `${obj?.name ?? e.object_id}${part && part.name !== obj?.name ? ` › ${part.name}` : ''}`;
+        // a choice by its label, as the slicer names it (the table's Brim: "No-brim", not no_brim)
+        const choice = typeof value === 'string' ? layout.options[e.key]?.enum?.find((o) => o.value === value)?.label : undefined;
         return {
           id: `${e.object_id}/${e.part_id ?? ''}:${e.key}`,
           section: `${where}: ${label}`,
           name:
             value == null || !setting
               ? t('farm.workspace.save.projectValue')
-              : formatValue(setting, value, t('farm.workspace.inherit'), i18n.language),
+              : choice
+                ? orcaText(layout, choice, i18n.language)
+                : formatValue(setting, value, t('farm.workspace.inherit'), i18n.language),
           invalid: !!setting && value != null && valueErrors(setting, value).some((err) => err !== null),
         };
       }),
@@ -777,6 +784,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             setPerObject(true);
             select(sel);
           },
+          table: () => setObjectTable({ objectId: sel.id, partId: sel.partId ?? null }),
         }),
       });
       return;
@@ -813,6 +821,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             setPerObject(true);
             select(sel);
           },
+          table: () => setObjectTable({ objectId: sel.id, partId: null }),
         },
         doc.editable && !doc.cannot_place ? alignMenu(alignSelection(menuInstances ?? selectedItems(view, [sel.id], null), [], false)) : undefined,
       ),
@@ -1338,6 +1347,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             onSavePreset={doc.kind === 'project' ? () => setSavePreset({ section: 'process', filament: 0 }) : undefined}
             onComparePresets={() => setCompareOpen(true)}
             presetTips={presetTips('process')}
+            objectTable={doc.objects.length ? { open: () => setObjectTable(null), tip: tr("View all object's settings") } : undefined}
             onPickPreset={doc.editable && !presetSwitch.busy ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
             pickLabel={(name) => t('farm.workspace.presets.switch.pick', { name })}
             own={doc.editable ? ownEditing : undefined}
@@ -1651,6 +1661,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             setSavePreset(null);
             showToast(t('farm.workspace.presets.saved', { name }), 'success');
           }}
+        />
+      )}
+      {objectTable !== false && (
+        <ObjectTableDialog
+          layout={layout}
+          doc={doc}
+          draft={draft}
+          colours={colours}
+          stats={stats}
+          editing={doc.editable ? ownEditing : undefined}
+          start={objectTable}
+          onSelect={select}
+          onClose={() => setObjectTable(false)}
         />
       )}
       {compareOpen && (

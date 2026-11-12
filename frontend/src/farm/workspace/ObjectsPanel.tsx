@@ -38,7 +38,7 @@ const PART_ICONS: Record<string, string> = {
   support_enforcer: 'menu_support_enforcer',
 };
 
-function Chip({ colour, n, dim }: { colour: string | undefined; n: number | string; dim?: boolean }) {
+export function Chip({ colour, n, dim }: { colour: string | undefined; n: number | string; dim?: boolean }) {
   return (
     <span
       className={`inline-flex items-center justify-center w-4 h-4 rounded-sm text-[10px] font-semibold text-black border border-white/30 flex-shrink-0 ${
