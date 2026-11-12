@@ -13,7 +13,7 @@ export function objectMenu(
   tr: Tr,
   deleteKey: string,
   printable: boolean,
-  on: { select: () => void; zoom: () => void; info: () => void; settings: () => void },
+  on: { select: () => void; zoom: () => void; info: () => void; settings: () => void; table?: () => void },
   align?: MenuItem[] | string,
 ): MenuItem[] {
   return [
@@ -40,7 +40,7 @@ export function objectMenu(
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
     { label: tr('Copy Process Settings') },
     { label: tr('Paste Process Settings') },
-    { label: tr('Edit in Parameter Table') },
+    { label: tr('Edit in Parameter Table'), onClick: on.table },
     { label: tr('More'), submenu: true, separator: true },
   ];
 }
@@ -67,7 +67,11 @@ export function plateMenu(tr: Tr, on: { selectAll: () => void; settings: () => v
 }
 
 /** A part, negative part, modifier, blocker or enforcer (GUI_Factories.cpp part menu). */
-export function partMenu(tr: Tr, deleteKey: string, on: { select: () => void; zoom: () => void; settings: () => void }): MenuItem[] {
+export function partMenu(
+  tr: Tr,
+  deleteKey: string,
+  on: { select: () => void; zoom: () => void; settings: () => void; table?: () => void },
+): MenuItem[] {
   return [
     { label: tr('Select'), onClick: on.select },
     { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
@@ -83,7 +87,7 @@ export function partMenu(tr: Tr, deleteKey: string, on: { select: () => void; zo
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
     { label: tr('Copy Process Settings') },
     { label: tr('Paste Process Settings') },
-    { label: tr('Edit in Parameter Table') },
+    { label: tr('Edit in Parameter Table'), onClick: on.table },
     { label: tr('More'), submenu: true, separator: true },
   ];
 }

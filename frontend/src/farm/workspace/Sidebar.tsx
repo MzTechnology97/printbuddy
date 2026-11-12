@@ -70,6 +70,8 @@ interface Props {
   onSavePreset?: () => void;
   /** OrcaSlicer's Compare presets. */
   onComparePresets?: () => void;
+  /** OrcaSlicer's "View all object's settings" (ParamsPanel's table icon): the object table; ``tip`` its tooltip. */
+  objectTable?: { open: () => void; tip: string };
   /** OrcaSlicer strings for those buttons' tooltips. */
   presetTips?: { save: string; compare: string };
   /** The objects' own settings can be edited from the Objects view (ObjectsPanel). */
@@ -139,6 +141,7 @@ export function Sidebar({
   stats,
   onSavePreset,
   onComparePresets,
+  objectTable,
   presetTips,
   onPickPreset,
   pickLabel,
@@ -240,6 +243,11 @@ export function Sidebar({
               </button>
             )}
           </>
+        )}
+        {objectTable && (
+          <button type="button" onClick={objectTable.open} title={objectTable.tip} aria-label={objectTable.tip} className="p-0.5 rounded hover:bg-white/10">
+            <img src={orcaIcon('table')} alt="" className="w-4 h-4" aria-hidden />
+          </button>
         )}
       </Header>
       {perObject ? (

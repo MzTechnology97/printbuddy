@@ -20,7 +20,8 @@ export function Dialog({
 }: {
   title: string;
   intro?: string;
-  wide?: boolean;
+  /** full: most of the window (the object table) */
+  wide?: boolean | 'full';
   onClose: () => void;
   children: React.ReactNode;
 }) {
@@ -33,7 +34,7 @@ export function Dialog({
   }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
-      <div className={`w-full ${wide ? 'max-w-2xl' : 'max-w-lg'} max-h-[90vh] flex flex-col rounded-lg bg-bambu-dark-secondary border border-bambu-dark-tertiary`}>
+      <div className={`w-full ${wide === 'full' ? 'max-w-[96vw]' : wide ? 'max-w-2xl' : 'max-w-lg'} max-h-[90vh] flex flex-col rounded-lg bg-bambu-dark-secondary border border-bambu-dark-tertiary`}>
         <div className="p-4 border-b border-bambu-dark-tertiary flex items-start gap-2">
           <div className="flex-1">
             <h2 className="text-lg font-semibold">{title}</h2>
