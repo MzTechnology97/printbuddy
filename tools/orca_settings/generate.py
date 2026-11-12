@@ -269,6 +269,23 @@ UI_STRINGS = [
     "Reset parameter",
     "One cell can only be copied to one or more cells in the same column.",
     "Copying multiple cells is not supported.",
+    # the plate's settings (PlateSettingsDialog.cpp, ConfigManipulation.cpp's spiral mode question)
+    "Plate name",
+    "Same as Global Plate Type",
+    "Same as Global Print Sequence",
+    "Same as Global",
+    "Other layer filament sequence",
+    "Layer",
+    "to",
+    "Layer range\u0004End",  # in its context: a range's last layer
+    "Please input layer value (>= 2).",
+    "Yes",
+    "No",
+    "The filament list contains mixed filaments. Custom filament sequence will not take effect.",
+    "Spiral mode only works when wall loops is 1, support is disabled, clumping detection by probing is disabled, "
+    "top shell layers is 0, sparse infill density is 0 and timelapse type is traditional.",
+    "Change these settings automatically?\nYes - Change these settings and enable spiral/vase mode automatically\n"
+    "No  - Cancel enabling spiral mode",
     "Quality",
     "Strength",
     "Speed",

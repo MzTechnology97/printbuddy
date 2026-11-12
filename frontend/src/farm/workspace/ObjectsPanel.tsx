@@ -8,11 +8,12 @@
 // the cog of the list (colEditing) drops them all. The copy writes them in model_settings.config.
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
 import type { WorkspaceDocument, WorkspaceObject, WorkspacePlate, WorkspaceSetting } from './api';
-import type { Draft } from './draft';
+import { type Draft, ON } from './draft';
 import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './orcaLayout';
-import { SettingControl } from './SettingControl';
+import { EnumSelect, SettingControl } from './SettingControl';
+import type { PlateValues } from './PlateSettings';
 import { SettingsPanel } from './SettingsPanel';
 import type { OwnEdits } from './draft';
 import {
@@ -115,6 +116,8 @@ export interface OwnEditing {
   setMany: (target: string, values: Record<string, string | null | undefined>) => void;
   /** several targets in one undo step (a filament change: the object's and its parts') */
   setTargets?: (values: Record<string, Record<string, string | null | undefined>>) => void;
+  /** a plate's own settings (plates.ts): set some (one undo step), or open the dialog's filament sequences */
+  plate?: { apply: (plate: WorkspacePlate, values: PlateValues) => void; customize: (plate: WorkspacePlate) => void };
 }
 
 const PART_TABS = new Set(['normal_part', 'modifier_part']); // ParamsPanel's TabPrintPart; the others have no tab
@@ -307,7 +310,7 @@ export function ObjectsPanel({
           const shownObjects = objects.filter((o) => hit(plateName) || hit(o.name) || o.parts.some((p) => hit(p.name)));
           if (q && !shownObjects.length && !hit(plateName)) return null;
           const plateSelected = !!plate && selected?.kind === 'plate' && selected.plate === plate.index;
-          const plateHasOwn = !!plate && Object.keys(plateOwn(layout, plate)).length > 0;
+          const plateHasOwn = !!plate && Object.keys(plateOwn(layout, plate, edits)).length > 0;
           return (
             <li key={plateKey} role="treeitem" aria-expanded={open(plateKey)} aria-selected={plateSelected} aria-level={1}>
               <div
@@ -486,7 +489,7 @@ export function ObjectsPanel({
       )}
       <div className="flex-1 min-h-[16rem]">
         {selectedPlate ? (
-          <PlateSettings key={selectedPlate.index} layout={layout} plate={selectedPlate} byKey={byKey} draft={draft} />
+          <PlateSettings key={selectedPlate.index} layout={layout} plate={selectedPlate} byKey={byKey} draft={draft} editing={editing} />
         ) : selectedObject && selected?.kind === 'object' ? (
           <ObjectSettings
             key={`${selected.id}-${selected.partId ?? selected.part ?? ''}`}
@@ -612,21 +615,32 @@ function ObjectSettings({
   );
 }
 
-/** OrcaSlicer's "Plate Settings" tab: the plate's own value of each, else the project's (greyed). */
+/** OrcaSlicer's "Plate Settings" tab (TabPrintPlate): the plate's own value of each, else the project's (greyed).
+ * Bed type, print sequence and spiral vase change here, their reset arrow back to the project's; the filament
+ * sequences are Auto or Customize, which opens the dialog's sequences. The skirt's start point stays read only:
+ * Orca keeps it per plate only while the project is open (bbs_3mf writes no key for it). */
 function PlateSettings({
   layout,
   plate,
   byKey,
   draft,
+  editing,
 }: {
   layout: OrcaLayout;
   plate: WorkspacePlate;
   byKey: Map<string, WorkspaceSetting>;
   draft: Draft;
+  editing?: OwnEditing;
 }) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);
-  const own = plateOwn(layout, plate);
+  const own = plateOwn(layout, plate, editing?.edits);
+  const metaKey = Object.fromEntries(Object.entries(layout.plate_keys ?? {}).map(([m, opt]) => [opt, m]));
+  const apply = editing?.plate && ((values: PlateValues) => editing.plate?.apply(plate, values));
+  const sequences: Record<string, string> = {
+    first_layer_print_sequence: 'First layer filament sequence',
+    other_layers_print_sequence: 'Other layer filament sequence',
+  };
   return (
     <div className="px-3 pt-1">
       <div className="flex border-b border-bambu-dark-tertiary" role="tablist">
@@ -634,8 +648,37 @@ function PlateSettings({
           {tr('Plate Settings')}
         </span>
       </div>
-      <p className="text-[11px] text-bambu-gray mt-1">{t('farm.workspace.readOnlyPhase2')}</p>
+      {!apply && <p className="text-[11px] text-bambu-gray mt-1">{t('farm.workspace.readOnly')}</p>}
       {Object.values(layout.plate_keys ?? {}).map((key) => {
+        const reset = apply && own[key] != null && (
+          <button
+            type="button"
+            title={t('farm.workspace.reset')}
+            aria-label={`${t('farm.workspace.reset')}: ${layout.options[key] ? tr(layout.options[key].label) : key}`}
+            onClick={() => apply({ [metaKey[key]]: null })}
+            className="w-5 h-5 flex items-center justify-center rounded text-bambu-gray hover:text-white"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+        );
+        if (key in sequences) {
+          const label = tr(sequences[key]);
+          return (
+            <div key={key} className={`flex items-center gap-2 min-h-[30px] py-0.5 pl-4 ${own[key] != null ? '' : 'opacity-60'}`} data-testid={`plate-${key}`}>
+              <span className={`flex-1 min-w-0 text-[13px] leading-tight ${own[key] != null ? 'text-[#F1754E]' : 'text-bambu-gray-light'}`}>{label}</span>
+              <EnumSelect
+                label={label}
+                value={own[key] != null ? 'custom' : 'auto'}
+                options={[
+                  { value: 'auto', label: tr('Auto') },
+                  { value: 'custom', label: tr('Customize') },
+                ]}
+                onChange={(v) => (v === 'auto' ? apply?.({ [metaKey[key]]: null }) : editing?.plate?.customize(plate))}
+              />
+              <span className="w-5" aria-hidden />
+            </div>
+          );
+        }
         const option = layout.options[key];
         const global = byKey.get(key);
         const label = option ? orcaText(layout, option.label, i18n.language) : key;
@@ -661,7 +704,7 @@ function PlateSettings({
         const setting: WorkspaceSetting | undefined = base && {
           ...base,
           label,
-          editable: false,
+          editable: !!apply && key !== 'skirt_start_angle',
           options: base.options?.map((o) => ({ ...o, label: enumLabel(o.value, o.label) })) ?? null,
         };
         return (
@@ -671,11 +714,17 @@ function PlateSettings({
               {own[key] == null && <span className="block text-[11px] text-bambu-gray">{t('farm.workspace.fromProject')}</span>}
             </span>
             {setting && value != null ? (
-              <SettingControl setting={setting} value={value} errors={[]} onChange={() => {}} />
+              <SettingControl
+                setting={setting}
+                value={value}
+                errors={[]}
+                // a plate's spiral vase is written as Orca writes it, true or false
+                onChange={(v) => apply?.({ [metaKey[key]]: setting.type === 'bool' ? (ON.has(String(v)) ? 'true' : 'false') : String(v) })}
+              />
             ) : (
               <span className="w-[120px] text-[13px] text-bambu-gray truncate">{own[key] ?? '—'}</span>
             )}
-            <span className="w-5" aria-hidden />
+            {reset || <span className="w-5" aria-hidden />}
           </div>
         );
       })}
