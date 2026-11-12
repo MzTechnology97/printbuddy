@@ -15,7 +15,18 @@ import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './o
 import { SettingControl } from './SettingControl';
 import { SettingsPanel } from './SettingsPanel';
 import type { OwnEdits } from './draft';
-import { type Selection, editTarget, hiddenPart, instancesOf, ownSettings, plateOwn, targetOwn } from './objects';
+import {
+  FILAMENT_PARTS,
+  type Selection,
+  editTarget,
+  filamentEdits,
+  filamentOf,
+  hiddenPart,
+  instancesOf,
+  ownSettings,
+  plateOwn,
+  targetOwn,
+} from './objects';
 import type { ObjectStats } from './viewTools';
 import '../i18n';
 
@@ -27,14 +38,51 @@ const PART_ICONS: Record<string, string> = {
   support_enforcer: 'menu_support_enforcer',
 };
 
-function Chip({ colour, n }: { colour: string | undefined; n: number }) {
+function Chip({ colour, n, dim }: { colour: string | undefined; n: number | string; dim?: boolean }) {
   return (
     <span
-      className="inline-flex items-center justify-center w-4 h-4 rounded-sm text-[10px] font-semibold text-black border border-white/30 flex-shrink-0"
+      className={`inline-flex items-center justify-center w-4 h-4 rounded-sm text-[10px] font-semibold text-black border border-white/30 flex-shrink-0 ${
+        dim ? 'opacity-60' : ''
+      }`}
       style={{ backgroundColor: colour ?? '#777' }}
     >
       {n}
     </span>
+  );
+}
+
+/** OrcaSlicer's Fila. cell: the filament's chip; a button opening the list when it can change. ``value`` 0: a
+ * modifier's "default" (grey), a part's own none (its object's filament, dimmed). */
+function FilamentCell({
+  value,
+  shown,
+  colours,
+  label,
+  onOpen,
+}: {
+  value: number;
+  shown: number;
+  colours: string[];
+  label: string;
+  onOpen?: (at: { x: number; y: number }) => void;
+}) {
+  const chip = shown > 0 ? <Chip colour={colours[shown - 1]} n={shown} dim={value === 0} /> : <Chip colour="#9e9e9e" n="–" />;
+  if (!onOpen) return chip;
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      aria-haspopup="listbox"
+      onClick={(e) => {
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        onOpen({ x: r.left, y: r.bottom });
+      }}
+      className="flex-shrink-0 rounded hover:ring-1 hover:ring-white/60"
+    >
+      {chip}
+    </button>
   );
 }
 
@@ -65,6 +113,8 @@ export interface OwnEditing {
   /** ``value``: the target's new own value; null: not its own any more; undefined: as the file has it */
   set: (target: string, key: string, value: string | null | undefined) => void;
   setMany: (target: string, values: Record<string, string | null | undefined>) => void;
+  /** several targets in one undo step (a filament change: the object's and its parts') */
+  setTargets?: (values: Record<string, Record<string, string | null | undefined>>) => void;
 }
 
 const PART_TABS = new Set(['normal_part', 'modifier_part']); // ParamsPanel's TabPrintPart; the others have no tab
@@ -139,6 +189,29 @@ export function ObjectsPanel({
         if (keys.has(key)) values[key] = key in saved ? null : undefined;
       }
       if (Object.keys(values).length) editing.setMany(part ? `${objectId}/${part}` : objectId, values);
+    }
+  };
+  // OrcaSlicer's Fila. column: the list of a row (an object, a part, a modifier) and keys 0-9 on the selection
+  const [picker, setPicker] = useState<{ obj: WorkspaceObject; partId: string | null; at: { x: number; y: number } } | null>(
+    null,
+  );
+  const canPick = !!editing?.setTargets && colours.length > 0;
+  const pick = (obj: WorkspaceObject, partId: string | null, n: number, how: 'column' | 'keys') =>
+    editing?.setTargets?.(filamentEdits(obj, partId, n, how, edits));
+  const filamentKeys = (e: React.KeyboardEvent) => {
+    // ObjectList::key_event: with more than one filament, a digit up to their count sets the selection's
+    if (!canPick || colours.length < 2 || e.ctrlKey || e.metaKey || e.altKey || !/^[0-9]$/.test(e.key)) return;
+    const n = Number(e.key);
+    if (n > colours.length || selected?.kind !== 'object') return;
+    e.preventDefault();
+    const obj = byId.get(selected.id);
+    if (selected.partId) {
+      if (obj) pick(obj, selected.partId, n, 'keys');
+      return;
+    }
+    for (const id of new Set([selected.id, ...selectedIds])) {
+      const o = byId.get(id);
+      if (o) pick(o, null, n, 'keys');
     }
   };
   const instances = useMemo(() => instancesOf(doc.plates), [doc.plates]);
@@ -219,7 +292,9 @@ export function ObjectsPanel({
       <ul
         role="tree"
         aria-label={tr('Objects')}
-        className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1"
+        tabIndex={0}
+        onKeyDown={filamentKeys}
+        className="max-h-[40%] min-h-[6rem] overflow-y-auto border-b border-bambu-dark-tertiary pb-1 focus:outline-none"
         onContextMenu={(e) => {
           if (e.target !== e.currentTarget || !onEmptyMenu) return; // a row has its own menu
           e.preventDefault();
@@ -254,7 +329,7 @@ export function ObjectsPanel({
                     const placed = instances.get(id) ?? [];
                     const showInstances = placed.length > 1;
                     const s = stats.get(id);
-                    const n = Number(obj.extruder);
+                    const n = filamentOf(obj, null, edits);
                     // an instance picked in the list lights its own row (one picked in 3D, the object's when it has one instance)
                     const objSelected =
                       (selected?.kind === 'object' && selected.id === id && !selected.part && (selected.instance == null || !showInstances)) ||
@@ -291,7 +366,13 @@ export function ObjectsPanel({
                             title={tr('Printable')}
                             className="w-3.5 h-3.5 accent-bambu-green"
                           />
-                          {Number.isFinite(n) && n > 0 ? <Chip colour={colours[n - 1]} n={n} /> : <span className="w-4" aria-hidden />}
+                          <FilamentCell
+                            value={n}
+                            shown={n}
+                            colours={colours}
+                            label={`${tr('Filament')} ${n}`}
+                            onOpen={canPick ? (at) => setPicker({ obj, partId: null, at }) : undefined}
+                          />
                           {cols.support && (
                             <Cell icon={s?.paint.supports && 'objlist_support_painting'} title={tr('Click the icon to edit support painting of the object')} />
                           )}
@@ -321,6 +402,16 @@ export function ObjectsPanel({
                                     <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, partSel)}>
                                       <img src={orcaIcon(PART_ICONS[p.type ?? 'normal_part'] ?? 'menu_add_part')} alt="" className="w-3.5 h-3.5" aria-hidden />
                                       <span className="flex-1 truncate">{p.name ?? `#${p.id}`}</span>
+                                      {p.id && FILAMENT_PARTS.has(p.type ?? 'normal_part') && (
+                                        <FilamentCell
+                                          value={filamentOf(obj, p.id, edits)}
+                                          // a model part with none prints with its object's; a modifier's none changes nothing
+                                          shown={filamentOf(obj, p.id, edits) || ((p.type ?? 'normal_part') === 'normal_part' ? n : 0)}
+                                          colours={colours}
+                                          label={`${tr('Filament')} ${filamentOf(obj, p.id, edits) || tr('default')}`}
+                                          onOpen={canPick ? (at) => setPicker({ obj, partId: p.id, at }) : undefined}
+                                        />
+                                      )}
                                       {partOwn && (
                                         <Cog
                                           title={editing ? tr('Click the icon to reset all settings of the object') : ownCount}
@@ -377,6 +468,22 @@ export function ObjectsPanel({
           );
         })}
       </ul>
+      {picker && (
+        <FilamentList
+          at={picker.at}
+          colours={colours}
+          // ExtraRenderers.cpp: "default" for a modifier; an object's and a part's are the filaments
+          withDefault={!!picker.partId && picker.obj.parts.find((p) => p.id === picker.partId)?.type === 'modifier_part'}
+          current={filamentOf(picker.obj, picker.partId, edits)}
+          defaultLabel={tr('default')}
+          label={tr('Fila.')}
+          onPick={(n) => {
+            pick(picker.obj, picker.partId, n, 'column');
+            setPicker(null);
+          }}
+          onClose={() => setPicker(null)}
+        />
+      )}
       <div className="flex-1 min-h-[16rem]">
         {selectedPlate ? (
           <PlateSettings key={selectedPlate.index} layout={layout} plate={selectedPlate} byKey={byKey} draft={draft} />
@@ -395,6 +502,64 @@ export function ObjectsPanel({
         )}
       </div>
     </div>
+  );
+}
+
+/** The Fila. column's list (BitmapChoiceRenderer): each filament with its colour, "default" first for a modifier. */
+function FilamentList({
+  at,
+  colours,
+  withDefault,
+  current,
+  defaultLabel,
+  label,
+  onPick,
+  onClose,
+}: {
+  at: { x: number; y: number };
+  colours: string[];
+  withDefault: boolean;
+  current: number;
+  defaultLabel: string;
+  label: string;
+  onPick: (n: number) => void;
+  onClose: () => void;
+}) {
+  const choices = [...(withDefault ? [0] : []), ...colours.map((_, i) => i + 1)];
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onClose();
+        }}
+        aria-hidden
+      />
+      <ul
+        role="listbox"
+        aria-label={label}
+        className="fixed z-50 min-w-[6rem] max-h-72 overflow-y-auto rounded border border-bambu-dark-tertiary bg-bambu-dark-secondary py-1 shadow-lg"
+        style={{ left: at.x, top: at.y + 2 }}
+        onKeyDown={(e) => e.key === 'Escape' && onClose()}
+      >
+        {choices.map((n) => (
+          <li key={n} role="option" aria-selected={n === current}>
+            <button
+              type="button"
+              onClick={() => onPick(n)}
+              className={`flex w-full items-center gap-2 px-2 py-1 text-[12px] text-left hover:bg-bambu-dark-tertiary ${
+                n === current ? 'text-white font-semibold' : 'text-bambu-gray-light'
+              }`}
+            >
+              {n ? <Chip colour={colours[n - 1]} n={n} /> : <Chip colour="#9e9e9e" n="–" />}
+              {n ? n : defaultLabel}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 

@@ -172,7 +172,15 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
         parts = []
         for part in obj.findall("part"):
             pmeta = _meta(part)
-            parts.append({"id": part.get("id"), "name": pmeta.get("name"), "type": part.get("subtype")})
+            # its own filament (0 or none: its object's; a modifier's: none changed), edited in the Fila. column
+            parts.append(
+                {
+                    "id": part.get("id"),
+                    "name": pmeta.get("name"),
+                    "type": part.get("subtype"),
+                    "extruder": pmeta.get("extruder"),
+                }
+            )
             overrides += [
                 {"key": k, "value": v, "part": pmeta.get("name"), "part_id": part.get("id")}
                 for k, v in pmeta.items()

@@ -241,6 +241,8 @@ UI_STRINGS = [
     "Add Precise Seam",
     "Height Range Modifier",
     "Printable",
+    "default",  # the Fila. column's choice for a modifier (ExtraRenderers.cpp BitmapChoiceRenderer)
+    "Fila.",
     "Auto Drop",
     "Edit Process Settings",
     "Copy Process Settings",

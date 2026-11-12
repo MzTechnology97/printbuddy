@@ -5,6 +5,9 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import type { ViewerScene } from '../../components/ModelViewer';
+import type { WorkspaceObject } from './api';
+import type { OwnEdits } from './draft';
+import { filamentOf, printedFilament } from './objects';
 
 export type ViewPreset = 'iso' | 'top' | 'bottom' | 'front' | 'rear' | 'left' | 'right';
 export type Vec3 = [number, number, number];
@@ -192,6 +195,26 @@ export function pick(
     o = o.parent;
   }
   return o ? { objectId: String(o.userData.objectId), instance: Number(o.userData.instance ?? 0), partId, point: hit.point.clone() } : null;
+}
+
+/** Each model part in the colour of the filament it prints with (its own, else its object's: the Fila. column),
+ * the unsaved edits made. Painted objects, modifiers and the other kinds keep what the file shows: a painted
+ * part's colours are its paint's, merged per filament in more than one mesh. */
+export function colourFilaments(view: ViewerScene, objects: WorkspaceObject[], edits: OwnEdits, colours: string[]) {
+  const byId = new Map(objects.map((o) => [o.id ?? '', o]));
+  for (const item of items(view)) {
+    const obj = byId.get(String(item.userData.objectId));
+    if (!obj || item.userData.paint?.color) continue;
+    for (const group of item.children) {
+      const partId = (group.userData.partId as string | null | undefined) ?? null;
+      const part = partId ? obj.parts.find((p) => p.id === partId) : undefined;
+      if ((part?.type ?? 'normal_part') !== 'normal_part') continue;
+      const meshes = group.children.filter((c): c is THREE.Mesh => c instanceof THREE.Mesh);
+      if (meshes.length !== 1 || !(meshes[0].material instanceof THREE.MeshPhongMaterial)) continue;
+      const hex = colours[(part?.id ? printedFilament(obj, part.id, edits) : filamentOf(obj, null, edits)) - 1];
+      if (hex) meshes[0].material.color.set(hex.slice(0, 7));
+    }
+  }
 }
 
 function itemOf(view: ViewerScene, objectId: string | null): THREE.Object3D | undefined {

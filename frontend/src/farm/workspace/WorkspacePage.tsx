@@ -74,7 +74,7 @@ import { facePlanes, laidOnFace, useLayOnFace } from './layOnFace';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { type Selection, instancesOf, ownToSave } from './objects';
+import { FILAMENT_KEY, type Selection, instancesOf, ownToSave } from './objects';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -94,6 +94,7 @@ import {
   PlateButtons,
 } from './Viewport';
 import {
+  colourFilaments,
   CANVAS_DEFAULTS,
   type CanvasOptions,
   type ObjectStats,
@@ -233,7 +234,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   const doc = useMemo(() => ({ ...source, settings }), [source, settings]);
   const navigate = useNavigate();
@@ -243,7 +244,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const fileId = doc.file.id;
   // unsaved: edits (the objects' own settings among them), preset switches, placements
   const count = edits + switched.refs.length + Object.keys(placed).length;
-  const ownEditing = useMemo(() => ({ edits: own, set: setOwn, setMany: setOwnMany }), [own, setOwn, setOwnMany]);
+  const ownEditing = useMemo(
+    () => ({ edits: own, set: setOwn, setMany: setOwnMany, setTargets: setOwnTargets }),
+    [own, setOwn, setOwnMany, setOwnTargets],
+  );
   livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
   const [pane, setPane] = useState<Pane>('view');
@@ -292,6 +296,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const value = doc.settings.find((s) => s.key === 'filament_colour')?.value;
     return Array.isArray(value) ? value : value ? [value] : [];
   }, [doc.settings]);
+  // the 3D view in each part's filament colour, the Fila. column's changes made (colourFilaments)
+  useEffect(() => {
+    if (view) colourFilaments(view, doc.objects, own, colours);
+  }, [view, doc.objects, own, colours]);
   const byKey = useMemo(() => new Map(doc.settings.map((s) => [s.key, s])), [doc.settings]);
   // the objects' own settings edited, as the save dialog lists them; one the backend would refuse holds the save
   const ownRows = useMemo(
@@ -300,6 +308,21 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         const obj = doc.objects.find((o) => o.id === e.object_id);
         const part = e.part_id ? obj?.parts.find((p) => p.id === e.part_id) : undefined;
         const setting = byKey.get(e.key);
+        if (e.key === FILAMENT_KEY) {
+          // the Fila. column's: a filament number, 0 a modifier's "default", null the part's own none (its object's)
+          const at = `${obj?.name ?? e.object_id}${part && part.name !== obj?.name ? ` › ${part.name}` : ''}`;
+          return {
+            id: `${e.object_id}/${e.part_id ?? ''}:${e.key}`,
+            section: `${at}: ${orcaText(layout, 'Filament', i18n.language)}`,
+            name:
+              e.value == null
+                ? t('farm.workspace.save.objectFilament')
+                : e.value === '0'
+                  ? orcaText(layout, 'default', i18n.language)
+                  : e.value,
+            invalid: false,
+          };
+        }
         const label = setting ? orcaText(layout, layout.options[e.key]?.label ?? setting.label, i18n.language) : e.key;
         const value = e.value == null || !setting ? null : Array.isArray(setting.value) ? e.value.split(',') : e.value;
         const where = `${obj?.name ?? e.object_id}${part && part.name !== obj?.name ? ` › ${part.name}` : ''}`;
