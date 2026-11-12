@@ -26,9 +26,17 @@ from backend.app.core.permissions import Permission
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
-from backend.app.farm.workspace import object_settings, placement, plate_settings, project, settings as ws_settings
+from backend.app.farm.workspace import (
+    object_settings,
+    placement,
+    plate_settings,
+    plate_structure,
+    project,
+    settings as ws_settings,
+)
 from backend.app.farm.workspace.object_settings import MAX_EDITS as MAX_OBJECT_SETTINGS, ObjectSetting
 from backend.app.farm.workspace.plate_settings import MAX_EDITS as MAX_PLATE_SETTINGS, PlateSetting
+from backend.app.farm.workspace.plate_structure import MAX_OPS as MAX_PLATE_OPS, PlateOp
 from backend.app.farm.workspace.presets import PresetRef, router as presets_router, switch_target
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
@@ -56,6 +64,8 @@ class CopyRequest(BaseModel):
     object_settings: list[ObjectSetting] = Field(default_factory=list, max_length=MAX_OBJECT_SETTINGS)
     # a plate's own settings set, changed or dropped (OrcaSlicer's Plate Settings dialog and tab)
     plate_settings: list[PlateSetting] = Field(default_factory=list, max_length=MAX_PLATE_SETTINGS)
+    # plates added, removed or moved to the front, in order, before ``plate_settings`` (numbered after them)
+    plate_structure: list[PlateOp] = Field(default_factory=list, max_length=MAX_PLATE_OPS)
 
 
 async def _library_3mf(db: AsyncSession, file_id: int) -> LibraryFile:
@@ -196,6 +206,7 @@ def _build_copy(
     part_transforms: list[placement.PartTransform] = (),
     own_settings: list[ObjectSetting] = (),
     plate_edits: list[PlateSetting] = (),
+    plate_ops: list[PlateOp] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -214,22 +225,32 @@ def _build_copy(
         replaced, placed = {}, []
         settings_xml = (
             project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
-            if part_transforms or own_settings or plate_edits
+            if part_transforms or own_settings or plate_edits or plate_ops
             else None
         )
-        if transforms or part_transforms:
-            model = project.read_model(zf)
+        model = original_model = None
+        if transforms or part_transforms or plate_ops:
+            model = original_model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
             if part_transforms:
                 model, settings_xml, moved = placement.place_parts(model, settings_xml, part_transforms)
                 placed += moved
-            replaced[project.MODEL_ENTRY] = model
         if own_settings:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
             settings_xml, owned = object_settings.apply(settings_xml, cfg, list(own_settings), slicer)
             placed += owned
+        if plate_ops:
+            if settings_xml is None:
+                raise HTTPException(status_code=422, detail="This project has no plates file to write to")
+            # after the placements: the plates' instances move with their plates from where they were put
+            settings_xml, new_cfg, model, restructured = plate_structure.apply(
+                settings_xml, new_cfg, list(plate_ops), model
+            )
+            placed += restructured
+        if model is not None and model != original_model:
+            replaced[project.MODEL_ENTRY] = model
         if plate_edits:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no plate settings file to write to")
@@ -250,6 +271,8 @@ def _build_copy(
         raise HTTPException(status_code=422, detail=f"An object's settings were refused: {exc}"[:1000]) from exc
     except plate_settings.InvalidPlateSetting as exc:
         raise HTTPException(status_code=422, detail=f"A plate's settings were refused: {exc}"[:1000]) from exc
+    except plate_structure.InvalidPlateStructure as exc:
+        raise HTTPException(status_code=422, detail=f"The plates can't be changed so: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -312,6 +335,7 @@ async def save_copy(
                 body.part_transforms,
                 body.object_settings,
                 body.plate_settings,
+                body.plate_structure,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)

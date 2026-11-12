@@ -848,21 +848,48 @@ const PLATE_TOOLS = [
   { key: 'settings', icon: 'plate_settings_dark', label: 'Customize current plate' },
 ];
 
-/** The plate's own buttons; only "Customize current plate" works (it shows the plate's settings). */
-export function PlateButtons({ layout, onSettings }: { layout: OrcaLayout; onSettings: () => void }) {
+/** What the plate's buttons act on: the plate (its number among ``count``, locked or not) and what each does. */
+export interface PlateActions {
+  index: number;
+  count: number;
+  locked: boolean;
+  /** absent: the plates can't be moved in this file (its model is too large to rewrite) */
+  onRemove?: () => void;
+  onLock: () => void;
+  onName: () => void;
+  onFront?: () => void;
+}
+
+/** The plate's own buttons (PartPlate.cpp): remove (not the last plate), lock / unlock, its name, to the front (not
+ * the first), its settings; orient and arrange come with the objects' arranging (later). Without ``plate`` (a file
+ * that can't be saved) only "Customize current plate" works, showing the plate's settings. */
+export function PlateButtons({ layout, onSettings, plate }: { layout: OrcaLayout; onSettings: () => void; plate?: PlateActions }) {
   const tr = useOrcaText(layout);
+  const act: Record<string, (() => void) | undefined> = {
+    settings: onSettings,
+    remove: plate && plate.count > 1 ? plate.onRemove : undefined,
+    lock: plate?.onLock,
+    name: plate?.onName,
+    front: plate && plate.index > 1 ? plate.onFront : undefined,
+  };
   return (
     <div className="absolute right-2 top-12 flex flex-col gap-1" role="toolbar" aria-label={tr('Plate')}>
-      {PLATE_TOOLS.map((tool) => (
-        <ToolButton
-          key={tool.key}
-          icon={tool.icon}
-          label={tr(tool.label)}
-          enabled={tool.key === 'settings'}
-          tip="left"
-          onClick={tool.key === 'settings' ? onSettings : undefined}
-        />
-      ))}
+      {PLATE_TOOLS.map((tool) => {
+        const locked = tool.key === 'lock' && !!plate?.locked;
+        return (
+          <ToolButton
+            key={tool.key}
+            icon={locked ? 'plate_locked_dark' : tool.icon}
+            label={tr(locked ? 'Unlock current plate' : tool.label)}
+            enabled={!!act[tool.key]}
+            // greyed for this plate (the last one, the first one), not to come: the label says why
+            why={!!plate && (tool.key === 'remove' || tool.key === 'front')}
+            active={tool.key === 'lock' && plate ? locked : undefined}
+            tip="left"
+            onClick={act[tool.key]}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -1127,12 +1154,15 @@ export function PlateBar({ fileId, plates, selected, onSelect, sliced }: PlateBa
               active ? 'border-bambu-green ring-1 ring-bambu-green' : 'border-bambu-dark-tertiary hover:border-bambu-gray'
             } ${sliced && !sliced.has(p.index) ? 'opacity-60' : ''}`}
           >
-            <img
-              src={api.getLibraryFilePlateThumbnail(fileId, p.index)}
-              alt=""
-              className="absolute inset-0 w-full h-full object-contain"
-              onError={(e) => ((e.target as HTMLImageElement).style.visibility = 'hidden')}
-            />
+            {/* a plate moved shows the file's picture of it; a new one has none yet */}
+            {p.source !== null && (
+              <img
+                src={api.getLibraryFilePlateThumbnail(fileId, p.source ?? p.index)}
+                alt=""
+                className="absolute inset-0 w-full h-full object-contain"
+                onError={(e) => ((e.target as HTMLImageElement).style.visibility = 'hidden')}
+              />
+            )}
             <span className="absolute top-0.5 left-0.5 min-w-[1.1rem] rounded bg-black/70 px-1 text-[11px] font-semibold text-white">
               {p.index}
             </span>

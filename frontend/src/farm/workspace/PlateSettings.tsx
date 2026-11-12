@@ -265,6 +265,40 @@ export function PlateSettingsDialog({
   );
 }
 
+/** OrcaSlicer's "Edit Plate Name" (PlateNameEditDialog): the name, at most 250 characters; Enter or OK keeps it. */
+export function PlateNameDialog({ layout, name, onApply, onClose }: { layout: OrcaLayout; name: string; onApply: (name: string) => void; onClose: () => void }) {
+  const { i18n } = useTranslation();
+  const tr = (text: string) => orcaText(layout, text, i18n.language);
+  const [value, setValue] = useState(name);
+  const ok = () => {
+    onApply(value);
+    onClose();
+  };
+  return (
+    <Dialog title={tr('Edit Plate Name')} onClose={onClose}>
+      <div className="flex items-center gap-3 px-6 py-5">
+        <span className="flex-1 text-[13px] text-bambu-gray-light">{tr('Plate name')}</span>
+        <input
+          type="text"
+          aria-label={tr('Plate name')}
+          value={value}
+          maxLength={250}
+          autoFocus
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && ok()}
+          className="h-7 w-[240px] rounded border border-bambu-dark-tertiary bg-bambu-dark px-2 text-[13px] text-white outline-none focus:border-bambu-green"
+        />
+      </div>
+      <div className="flex justify-end gap-2 border-t border-bambu-dark-tertiary p-3">
+        <Button variant="secondary" onClick={onClose}>
+          {tr('Cancel')}
+        </Button>
+        <Button onClick={ok}>{tr('OK')}</Button>
+      </div>
+    </Dialog>
+  );
+}
+
 /** ConfigManipulation::show_spiral_mode_settings_dialog for a plate: Yes changes the objects and turns it on. */
 export function SpiralConfirm({ layout, onYes, onNo }: { layout: OrcaLayout; onYes: () => void; onNo: () => void }) {
   const { i18n } = useTranslation();
