@@ -57,7 +57,10 @@ Leaving the URL field blank uses the `SLICER_API_URL` /
 
 ## Where the source lives
 
-Both images build from the git context configured by
+The OrcaSlicer image builds from [`orca/`](orca/README.md): the sidecar source cloned at a pinned commit
+(`SLICER_API_COMMIT`) with Printbuddy's `/arrange` route added, which the 3MF Workspace's Arrange calls.
+
+The Bambu Studio image builds from the git context configured by
 `SLICER_API_BUILD_CONTEXT` in `.env`. The Compose file uses Docker's git build
 context, so you don't need to clone the sidecar manually — Docker pulls the repo
 at build time.

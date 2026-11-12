@@ -56,6 +56,8 @@ export function plateMenu(
     lock?: () => void;
     /** Auto Rotate: the plate's objects oriented (absent: nothing on it, or a file that can't be saved) */
     orient?: () => void;
+    /** Arrange: the plate's objects arranged by Orca in the slicer sidecar (absent: not now) */
+    arrange?: () => void;
     locked?: boolean;
     remove?: () => void;
   },
@@ -65,7 +67,7 @@ export function plateMenu(
     { label: tr('Select All Plates') },
     { label: tr('Plate Settings'), onClick: on.settings },
     { label: tr('Delete All'), separator: true },
-    { label: tr('Arrange'), separator: true },
+    { label: tr('Arrange'), separator: true, onClick: on.arrange },
     { label: tr('Auto Rotate'), onClick: on.orient },
     { label: tr('Order By'), submenu: true },
     { label: tr('Edit'), submenu: true },

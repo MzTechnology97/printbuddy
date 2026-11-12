@@ -73,6 +73,8 @@ import {
 } from './align';
 import { facePlanes, laidOnFace, useLayOnFace } from './layOnFace';
 import { autoOrient } from './orient';
+import { type ArrangeSettings, arrangeRequest, loadArrangeSettings, saveArrangeSettings } from './arrange';
+import { ArrangeOptionsDialog } from './ArrangeOptions';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
@@ -165,6 +167,8 @@ const WORKING_SHORTCUTS = new Set([
   'GizmoMeasure',
   'Orient',
   'OrientPlate',
+  'Arrange',
+  'ArrangePlate',
   'ViewDefault',
   'ViewTop',
   'ViewBottom',
@@ -822,6 +826,65 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const p = doc.plates.find((x) => x.index === n);
     if (p) applyPlate(p, { locked: plateLocked(n) ? 'false' : 'true' });
   };
+  /** A setting's value for an object: its own, else the project's as the draft has it. */
+  const valueFor = (key: string, objectId: string | null) => {
+    const obj = objectId == null ? undefined : doc.objects.find((o) => o.id === objectId);
+    const setting = settings.find((x) => x.key === key);
+    return (obj ? ownSettings(obj, null, own)[key] : undefined) ?? (setting ? projectValue(setting, draft) : undefined);
+  };
+  // OrcaSlicer's Arrange, run by Orca's own command line in the slicer sidecar (backend arrange.py) on the project as
+  // the draft has it: its arranged instances become one move (one undo step), on the plates Orca put them on.
+  // Every plate (the toolbar, A) or one (the plate's button and menu, Shift+A). Shortcut: Orca's arrange of the
+  // objects selected alone isn't in its command line: the toolbar arranges everything, as with nothing selected.
+  const i3 = valueFor('printer_structure', null) === 'i3';
+  const [arrangeSettings, setArrangeSettingsState] = useState<ArrangeSettings>(() => loadArrangeSettings(i3));
+  const setArrangeSettings = (s: ArrangeSettings) => {
+    setArrangeSettingsState(s);
+    saveArrangeSettings(s);
+  };
+  const [arrangeOpen, setArrangeOpen] = useState(false);
+  const [arranging, setArranging] = useState(false);
+  const runArrange = async (plateNo: number) => {
+    if (arranging) return;
+    if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
+    if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
+    setArranging(true);
+    showToast(tr('Arranging...'), 'info');
+    try {
+      const saved = placementsToSave(placed);
+      const res = await workspaceApi.arrange(fileId, {
+        base_sha256: doc.sha256,
+        changes: draft,
+        presets: switched.refs,
+        transforms: saved.transforms,
+        part_transforms: saved.parts,
+        object_settings: ownToSave(own),
+        plate_settings: plateToSave(own),
+        instance_plates: Object.entries(onPlate)
+          .filter((e): e is [string, number] => typeof e[1] === 'number')
+          .map(([key, p]) => ({ object_id: key.split(':')[0], instance: Number(key.split(':')[1]), plate: p })),
+        arrange: arrangeRequest(arrangeSettings, plateNo),
+      });
+      const next: Placed = { ...placed };
+      const moved = { ...onPlate };
+      for (const r of res.placements) {
+        const key = `${r.object_id}:${r.instance}`;
+        next[key] = r.matrix;
+        if (r.plate === filePlate(key)) delete moved[key];
+        else moved[key] = r.plate;
+      }
+      if (view) applyPlacements(view, next);
+      place(next, moved);
+      showToast(tr('Arranging done.'), 'success');
+    } catch (e) {
+      showToast(t('farm.workspace.arrange.failed', { reason: e instanceof Error ? e.message : String(e) }), 'error');
+    } finally {
+      setArranging(false);
+    }
+  };
+  /** Arrange offered: a model the copy can rewrite, no unsaved plate changes, not already arranging; else why not. */
+  const canArrange: true | string =
+    doc.cannot_place ?? (plateOps.length ? t('farm.workspace.arrange.savePlates') : arranging ? t('farm.workspace.arrange.busy') : true);
   const toolReady: Record<string, true | string> = doc.editable
     ? {
         move: ready,
@@ -833,6 +896,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         // Auto orientation turns instances: the model must be rewritable, and the 3D view have something to turn
         // (not a duplicated plate's copies before they are saved: they show their plate's objects)
         orient: doc.cannot_place ? doc.cannot_place : view && stats.size && !(canvas.focus && shownPlate?.copies) ? true : why,
+        arrange: canArrange,
       }
     : {};
   /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
@@ -960,6 +1024,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             locked: plateLocked(sel.plate),
             remove: doc.plates.length > 1 && !doc.cannot_place ? () => plateOp({ op: 'remove', plate: sel.plate }) : undefined,
             orient: canOrientPlate(sel.plate) ? () => orientPlate(sel.plate) : undefined,
+            arrange: canArrange === true ? () => void runArrange(sel.plate) : undefined,
           }),
         }),
       });
@@ -1110,11 +1175,6 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // object's mesh gives (the same turn for all of them, before their own rotation) and put on the bed
   // (ensure_on_bed); one undo step. Objects not printable stay as they are. Shortcut: with focus mode on the 3D view
   // has the plate shown only, so another plate's instances aren't turned.
-  const valueFor = (key: string, objectId: string | null) => {
-    const obj = objectId == null ? undefined : doc.objects.find((o) => o.id === objectId);
-    const setting = settings.find((x) => x.key === key);
-    return (obj ? ownSettings(obj, null, own)[key] : undefined) ?? (setting ? projectValue(setting, draft) : undefined);
-  };
   const orientKeys = (keys: string[]) => {
     if (!view || !keys.length) return;
     // OrientJob::get_orient_mesh: the printer's side fan, when it has one (auxiliary_fan, fan_direction)
@@ -1166,6 +1226,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const toggleTool = (key: string) => {
     if (key === 'addplate') return plateOp({ op: 'add' }); // Add plate: not a tool, it acts at once
     if (key === 'orient') return orientSelected(); // as Orca's: acts at once, no options shown
+    if (key === 'arrange') return void runArrange(0); // Arrange all objects: at once (its options: a right click)
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
@@ -1248,6 +1309,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     else if ((e.key === 'r' || e.key === 'R') && toolReady.rotate === true) toggleTool('rotate');
     else if ((e.key === 's' || e.key === 'S') && toolReady.scale === true) toggleTool('scale');
     else if ((e.key === 'f' || e.key === 'F') && toolReady.flatten === true) toggleTool('flatten');
+    else if ((e.key === 'a' || e.key === 'A') && toolReady.arrange === true) void runArrange(e.shiftKey ? (plate ?? 1) : 0);
     else if ((e.key === 'q' || e.key === 'Q') && toolReady.orient === true) {
       if (e.shiftKey) {
         if (plate != null && canOrientPlate(plate)) orientPlate(plate);
@@ -1615,7 +1677,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 className="w-full h-full"
                 onScene={onScene}
               />
-              <MainToolbar layout={layout} active={tool} onTool={toggleTool} ready={toolReady} />
+              <MainToolbar
+                layout={layout}
+                active={tool}
+                onTool={toggleTool}
+                onToolMenu={(key) => key === 'arrange' && doc.editable && setArrangeOpen(true)}
+                ready={toolReady}
+              />
               {tool === 'move' && view && tkeys.length > 0 && (
                 <MoveWindow
                   layout={layout}
@@ -1801,6 +1869,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                               onName: () => setNameDialog(currentPlate),
                               onFront: doc.cannot_place ? undefined : () => plateOp({ op: 'front', plate: currentPlate }),
                               onOrient: canOrientPlate(currentPlate) ? () => orientPlate(currentPlate) : undefined,
+                              onArrange: canArrange === true ? () => void runArrange(currentPlate) : undefined,
                             }
                           : undefined
                       }
@@ -1883,6 +1952,17 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         />
       )}
       {menu && <ContextMenu items={menu.items} at={menu.at} onClose={() => setMenu(null)} />}
+      {arrangeOpen && (
+        <ArrangeOptionsDialog
+          layout={layout}
+          value={arrangeSettings}
+          lidar={['1', 'true'].includes(String(valueFor('scan_first_layer', null)))}
+          i3={i3}
+          onChange={setArrangeSettings}
+          onArrange={() => canArrange === true && void runArrange(0)}
+          onClose={() => setArrangeOpen(false)}
+        />
+      )}
       {picker && <ContextMenu key={offered.status} items={pickerItems()} at={picker.at} onClose={() => setPicker(null)} />}
       {pending && (
         <UnsavedChangesDialog
