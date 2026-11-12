@@ -66,6 +66,8 @@ export interface WorkspacePlate {
   /** After plates were added, removed or moved (plates.ts): the file's plate this one is (its thumbnail); null: a new
    * plate. */
   source?: number | null;
+  /** A duplicated plate (Duplicate Current Plate): the objects it copies (written when the copy is saved). */
+  copies?: string[];
 }
 
 export type WorkspaceKind = 'project' | 'sliced' | 'model' | 'other_slicer';
@@ -212,7 +214,8 @@ export const workspaceApi = {
     partTransforms: PartTransform[] = [],
     objectSettings: ObjectSettingEdit[] = [],
     plateSettings: PlateSettingEdit[] = [],
-    plateStructure: { op: string; plate?: number }[] = [],
+    plateStructure: { op: string; plate?: number; objects?: string[]; instances?: InstanceTransform[] }[] = [],
+    instancePlates: { object_id: string; instance: number; plate: number }[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
@@ -226,6 +229,7 @@ export const workspaceApi = {
         object_settings: objectSettings,
         plate_settings: plateSettings,
         plate_structure: plateStructure,
+        instance_plates: instancePlates,
       }),
     }),
 };

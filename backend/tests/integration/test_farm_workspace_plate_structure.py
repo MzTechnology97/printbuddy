@@ -98,7 +98,7 @@ class TestApply:
 
     def test_the_plates_move_as_orca_lays_them_out(self):
         bed = (256.0, 256.0)  # a stride of 307.2 mm
-        moves = lambda count, *ops: plate_structure.moves(count, [PlateOp(**o) for o in ops], bed)  # noqa: E731
+        moves = lambda count, *ops: plate_structure.moves(count, [PlateOp(**o) for o in ops], bed)[:2]  # noqa: E731
         # plate 2 to the front: the two plates trade places
         assert moves(2, {"op": "front", "plate": 2}) == ({0: (307.2, 0.0), 1: (-307.2, 0.0)}, (0.0, 0.0))
         # plate 1 removed: its objects go where the objects on no plate are (after the one plate left), plate 2
