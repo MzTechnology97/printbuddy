@@ -114,6 +114,41 @@ export function targetPoints(view: ViewerScene, placed: Placed, targets: string[
   return out;
 }
 
+/** A part group's triangles, as vertex indices into its ``filePoints`` (its meshes in the same order). */
+function fileIndices(group: THREE.Object3D): Uint32Array {
+  if (group.userData.indices) return group.userData.indices as Uint32Array;
+  const chunks: number[] = [];
+  let base = 0;
+  group.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    const geometry = o.geometry as THREE.BufferGeometry;
+    const count = geometry.getAttribute('position').count;
+    const index = geometry.getIndex();
+    for (let i = 0; i < (index ? index.count : count); i++) chunks.push(base + (index ? index.getX(i) : i));
+    base += count;
+  });
+  group.userData.indices = Uint32Array.from(chunks);
+  return group.userData.indices as Uint32Array;
+}
+
+/** The targets' (``targetPoints``) points and their triangles: a mesh, in the slicer's coordinates turned by ``into``. */
+export function targetMesh(view: ViewerScene, placed: Placed, targets: string[], into?: THREE.Matrix4): { positions: Float32Array; indices: Uint32Array } {
+  const positions = targetPoints(view, placed, targets, into);
+  const indices: number[] = [];
+  let base = 0;
+  for (const item of items(view))
+    for (const t of targets) {
+      const { inst, part } = splitTarget(t);
+      if (inst !== keyOf(item)) continue;
+      for (const group of partsOf(item)) {
+        if (part != null && String(group.userData.partId) !== part) continue;
+        for (const i of fileIndices(group)) indices.push(base + i);
+        base += filePoints(group).length / 3;
+      }
+    }
+  return { positions, indices: Uint32Array.from(indices) };
+}
+
 /** The targets' box in the slicer's axes, or (Object coordinates) in the first target's own rotated axes. */
 export function boxOf(view: ViewerScene, placed: Placed, targets: string[], cs: Coordinates = 'world', frame?: THREE.Matrix4): THREE.Box3 | null {
   // the axes: the first target's own (an instance's, a part's), or ``frame`` (a part's instance's, for Object)

@@ -53,6 +53,7 @@ import {
   rotationAbout,
   rotationOf,
   rotationSync,
+  targetMesh,
   targetPoints,
   withLinearOf,
   withoutRotation,
@@ -71,10 +72,11 @@ import {
   modelTargets,
 } from './align';
 import { facePlanes, laidOnFace, useLayOnFace } from './layOnFace';
+import { autoOrient } from './orient';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { FILAMENT_KEY, type Selection, instancesOf, ownToSave } from './objects';
+import { FILAMENT_KEY, type Selection, instancesOf, ownSettings, ownToSave } from './objects';
 import { ObjectTableDialog } from './ObjectTable';
 import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
 import {
@@ -93,7 +95,7 @@ import {
   withAdded,
   withMoved,
 } from './plates';
-import type { TargetEdits } from './objectGrid';
+import { type TargetEdits, projectValue } from './objectGrid';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -161,6 +163,8 @@ const WORKING_SHORTCUTS = new Set([
   'SelectAll',
   'SelectAllPlates',
   'GizmoMeasure',
+  'Orient',
+  'OrientPlate',
   'ViewDefault',
   'ViewTop',
   'ViewBottom',
@@ -826,6 +830,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         flatten: flattenKey ? true : tkeys.length ? t('farm.workspace.flatten.single') : why,
         // a plate added can move the others (a new column): the model must be rewritable
         addplate: doc.cannot_place ? doc.cannot_place : doc.plates.length < MAX_PLATES ? true : t('farm.workspace.plateLimit', { count: MAX_PLATES }),
+        // Auto orientation turns instances: the model must be rewritable, and the 3D view have something to turn
+        // (not a duplicated plate's copies before they are saved: they show their plate's objects)
+        orient: doc.cannot_place ? doc.cannot_place : view && stats.size && !(canvas.focus && shownPlate?.copies) ? true : why,
       }
     : {};
   /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
@@ -952,6 +959,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             lock: () => toggleLock(sel.plate),
             locked: plateLocked(sel.plate),
             remove: doc.plates.length > 1 && !doc.cannot_place ? () => plateOp({ op: 'remove', plate: sel.plate }) : undefined,
+            orient: canOrientPlate(sel.plate) ? () => orientPlate(sel.plate) : undefined,
           }),
         }),
       });
@@ -1098,8 +1106,66 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       canvasEl.removeEventListener('dblclick', dbl);
     };
   }, [view]);
+  // OrcaSlicer's Auto orientation (orient.ts, OrientJob): each object's instances the 3D view has, turned as the
+  // object's mesh gives (the same turn for all of them, before their own rotation) and put on the bed
+  // (ensure_on_bed); one undo step. Objects not printable stay as they are. Shortcut: with focus mode on the 3D view
+  // has the plate shown only, so another plate's instances aren't turned.
+  const valueFor = (key: string, objectId: string | null) => {
+    const obj = objectId == null ? undefined : doc.objects.find((o) => o.id === objectId);
+    const setting = settings.find((x) => x.key === key);
+    return (obj ? ownSettings(obj, null, own)[key] : undefined) ?? (setting ? projectValue(setting, draft) : undefined);
+  };
+  const orientKeys = (keys: string[]) => {
+    if (!view || !keys.length) return;
+    // OrientJob::get_orient_mesh: the printer's side fan, when it has one (auxiliary_fan, fan_direction)
+    const dir = valueFor('fan_direction', null);
+    const fan = !['1', 'true'].includes(String(valueFor('auxiliary_fan', null))) ? 0 : dir === 'right' ? 1 : dir === 'left' || dir === 'both' ? -1 : 0;
+    const turns = new Map<string, THREE.Matrix4>();
+    for (const key of keys) {
+      const id = key.split(':')[0];
+      if (turns.has(id)) continue;
+      const spec = currentSpec(view, placed, key);
+      if (!spec) continue;
+      const mesh = targetMesh(view, placed, modelTargets(view, key, modelPart), fromSpec(spec).invert());
+      turns.set(id, autoOrient(mesh, Number(valueFor('support_threshold_angle', id) ?? 30), fan).rotation);
+    }
+    keys = keys.filter((key) => turns.has(key.split(':')[0]));
+    const turned = (spec: Spec, key: string) =>
+      toSpec(turns.get(key.split(':')[0])!.clone().multiply(fromSpec(spec).setPosition(0, 0, 0)).setPosition(spec[9], spec[10], spec[11]));
+    const next = changed(view, placed, { keys, apply: turned, sync: 'none', drop: 'flatten' }, autoDrop);
+    applyPlacements(view, next);
+    commit(next);
+  };
+  /** The instances of ``objects`` in the 3D view, printable (prepare_selection), but those on a locked plate. */
+  const orientable = (objects: Set<string>, skipLocked: boolean) =>
+    (view?.model.children ?? [])
+      .filter((c) => c.userData.objectId != null && objects.has(String(c.userData.objectId)) && c.userData.printable !== false)
+      .map((c) => `${c.userData.objectId}:${Number(c.userData.instance ?? 0)}`)
+      .filter((key) => {
+        const [id, inst] = key.split(':');
+        const p = instances.get(id)?.find((i) => i.index === Number(inst))?.plate;
+        return !skipLocked || p == null || !plateLocked(p);
+      });
+  /** Auto orientation (Q, the toolbar): the objects selected (all of each), else every object. */
+  const orientSelected = () => {
+    const chosen = selectedIds.length ? selectedIds : selectedId ? [selectedId] : [];
+    const keys = orientable(new Set(chosen.length ? chosen : doc.objects.map((o) => o.id ?? '')), true);
+    if (chosen.length && !keys.length && orientable(new Set(chosen), false).length)
+      return showToast(tr('All the selected objects are on a locked plate.\nCannot auto-orient these objects.'), 'info');
+    orientKeys(keys);
+  };
+  /** Auto orient objects on current plate (Shift+Q, the plate's button, its Auto Rotate): the objects whose last
+   * instance is on it (prepare_partplate), all their instances. Offered when the plate has objects (a duplicate's
+   * copies can't be turned before they are saved). */
+  const canOrientPlate = (n: number) => !!view && !doc.cannot_place && !!doc.plates.find((p) => p.index === n)?.object_ids.length;
+  const orientPlate = (n: number) => {
+    if (plateLocked(n)) return showToast(tr('This plate is locked.\nCannot auto-orient on this plate.'), 'info');
+    const on = doc.objects.map((o) => o.id ?? '').filter((id) => instances.get(id)?.at(-1)?.plate === n);
+    orientKeys(orientable(new Set(on), false));
+  };
   const toggleTool = (key: string) => {
     if (key === 'addplate') return plateOp({ op: 'add' }); // Add plate: not a tool, it acts at once
+    if (key === 'orient') return orientSelected(); // as Orca's: acts at once, no options shown
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
@@ -1182,6 +1248,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     else if ((e.key === 'r' || e.key === 'R') && toolReady.rotate === true) toggleTool('rotate');
     else if ((e.key === 's' || e.key === 'S') && toolReady.scale === true) toggleTool('scale');
     else if ((e.key === 'f' || e.key === 'F') && toolReady.flatten === true) toggleTool('flatten');
+    else if ((e.key === 'q' || e.key === 'Q') && toolReady.orient === true) {
+      if (e.shiftKey) {
+        if (plate != null && canOrientPlate(plate)) orientPlate(plate);
+      } else orientSelected();
+    }
     else if (e.key === 'Escape') {
       if (tool) toggleTool(tool);
       else deselect();
@@ -1729,6 +1800,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                               onLock: () => toggleLock(currentPlate),
                               onName: () => setNameDialog(currentPlate),
                               onFront: doc.cannot_place ? undefined : () => plateOp({ op: 'front', plate: currentPlate }),
+                              onOrient: canOrientPlate(currentPlate) ? () => orientPlate(currentPlate) : undefined,
                             }
                           : undefined
                       }
