@@ -42,7 +42,7 @@ ORDER = (
     "other_layers_print_sequence_nums",
     "spiral_mode",
 )
-OWN = frozenset(ORDER) - {"plater_id", "locked"}
+OWN = frozenset(ORDER) - {"plater_id"}
 NUMS = "other_layers_print_sequence_nums"
 _PLATE = re.compile(rb"<plate\b[^>]*>")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -60,6 +60,7 @@ class PlateSetting(BaseModel):
     plate: int = Field(ge=1, le=10000)
     key: Literal[
         "plater_name",
+        "locked",
         "bed_type",
         "print_sequence",
         "first_layer_print_sequence",
@@ -84,12 +85,12 @@ def check(e: PlateSetting, cfg: dict, slicer: str) -> dict[str, str | None]:
     """The lines an edit writes (key -> value; None: removed), its value checked; ``InvalidPlateSetting`` when it
     can't be one."""
     if e.value is None:
-        if e.key == "plater_name":
-            raise InvalidPlateSetting("plater_name: a plate's name can be empty, not removed")
+        if e.key in ("plater_name", "locked"):
+            raise InvalidPlateSetting(f"{e.key}: a plate always has it, it can't be removed")
         return {e.key: None, **({NUMS: None} if e.key == "other_layers_print_sequence" else {})}
-    if e.key == "spiral_mode":
+    if e.key in ("spiral_mode", "locked"):
         if e.value not in (True, False, "true", "false"):
-            raise InvalidPlateSetting(f"spiral_mode: {e.value!r} is not true or false")
+            raise InvalidPlateSetting(f"{e.key}: {e.value!r} is not true or false")
         return {e.key: "true" if e.value in (True, "true") else "false"}  # as Orca writes it (std::boolalpha)
     if isinstance(e.value, bool):
         raise InvalidPlateSetting(f"{e.key}: {e.value!r} is not a value it takes")

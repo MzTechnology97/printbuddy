@@ -45,7 +45,19 @@ export function objectMenu(
   ];
 }
 
-export function plateMenu(tr: Tr, on: { selectAll: () => void; settings: () => void }): MenuItem[] {
+export function plateMenu(
+  tr: Tr,
+  on: {
+    selectAll: () => void;
+    settings: () => void;
+    /** the plate's name, lock and removal (E4b): absent in a file that can't be saved; ``remove`` absent for the
+     * last plate */
+    name?: () => void;
+    lock?: () => void;
+    locked?: boolean;
+    remove?: () => void;
+  },
+): MenuItem[] {
   return [
     { label: tr('Select All'), onClick: on.selectAll },
     { label: tr('Select All Plates') },
@@ -55,9 +67,9 @@ export function plateMenu(tr: Tr, on: { selectAll: () => void; settings: () => v
     { label: tr('Auto Rotate') },
     { label: tr('Order By'), submenu: true },
     { label: tr('Edit'), submenu: true },
-    { label: tr('Edit Plate Name'), separator: true },
-    { label: tr('Lock') },
-    { label: tr('Delete Plate'), separator: true },
+    { label: tr('Edit Plate Name'), separator: true, onClick: on.name },
+    { label: tr('Lock'), checked: !!on.locked, onClick: on.lock },
+    { label: tr('Delete Plate'), separator: true, onClick: on.remove },
     { label: tr('Add Primitive'), icon: 'menu_add_part', submenu: true, separator: true },
     { label: tr('Add Handy models'), icon: 'menu_add_part', submenu: true },
     { label: tr('Add Models'), icon: 'menu_add_part' },

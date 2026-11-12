@@ -15732,6 +15732,7 @@
   "Unique preset": "Profilo unico",
   "Unloading speed": "Velocità di scaricamento",
   "Unloading speed at the start": "Velocità iniziale di scaricamento",
+  "Unlock current plate": "Sblocca il piatto corrente",
   "Unprintable area in XY plane. For example, X1 Series printers use the front left corner to cut filament during filament change. The area is expressed as a polygon in the format \"XxY, XxY, ...\". It constrains material and model placement, but allows machine travel. Configure toolhead collision volumes separately for G-code checking and travel avoidance.": "Area non stampabile nel piano XY. Ad esempio, le stampanti della serie X1 usano l'angolo anteriore sinistro per tagliare il filamento durante il cambio del filamento. L'area è espressa come poligono nel formato \"XxY, XxY, ...\". Limita il posizionamento del materiale e dei modelli, ma consente gli spostamenti della macchina. Configura separatamente i volumi di collisione della testa di stampa per il controllo del G-code e per evitare gli spostamenti.",
   "Unretract": "De-retrazione",
   "Untitled": "Senza titolo",

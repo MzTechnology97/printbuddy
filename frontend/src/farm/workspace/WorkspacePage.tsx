@@ -76,8 +76,19 @@ import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, m
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { FILAMENT_KEY, type Selection, instancesOf, ownToSave } from './objects';
 import { ObjectTableDialog } from './ObjectTable';
-import { PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
-import { LAYER_END, parseRanges, plateEdits, plateMeta, plateToSave, spiralEdits } from './plates';
+import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
+import {
+  LAYER_END,
+  MAX_PLATES,
+  type PlateOp,
+  applyPlateOps,
+  parseRanges,
+  plateEdits,
+  plateMeta,
+  plateToSave,
+  remapPlateEdits,
+  spiralEdits,
+} from './plates';
 import type { TargetEdits } from './objectGrid';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
@@ -238,9 +249,17 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
-  const doc = useMemo(() => ({ ...source, settings }), [source, settings]);
+  // the plates as the unsaved adds, removals and moves leave them, with their unsaved names (plates.ts)
+  const doc = useMemo(
+    () => ({
+      ...source,
+      settings,
+      plates: applyPlateOps(source.plates, plateOps).map((p) => ({ ...p, name: plateMeta(p, own).plater_name || null })),
+    }),
+    [source, settings, plateOps, own],
+  );
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -251,6 +270,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // OrcaSlicer's Plate Settings dialog (the plate it edits; onlyLayers: the tab's "Customize"), and spiral vase
   // waiting for its question (ConfigManipulation::show_spiral_mode_settings_dialog)
   const [plateDialog, setPlateDialog] = useState<{ plate: number; onlyLayers: boolean } | null>(null);
+  // OrcaSlicer's Edit Plate Name, on the plate it renames
+  const [nameDialog, setNameDialog] = useState<number | null>(null);
   const [pendingSpiral, setPendingSpiral] = useState<{ plate: WorkspacePlate; values: PlateValues } | null>(null);
   /** A plate's own settings, one undo step; turning spiral vase on asks first. */
   const applyPlate = useCallback(
@@ -281,8 +302,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const [selection, setSelection] = useState<Selection>(null);
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuItem[] } | null>(null);
   const [view, setViewScene] = useState<ViewerScene | null>(null);
+  // the plate the 3D view shows, as the plates' changes leave it (a new one: source null, nothing on it yet)
+  const shownPlate = doc.plates.find((p) => p.index === selectedPlate);
   const [stats, setStats] = useState<Map<string, ObjectStats>>(new Map());
   const [canvas, setCanvas] = useState<CanvasOptions>(CANVAS_DEFAULTS);
+  useEffect(() => {
+    if (view) view.model.visible = !(canvas.focus && shownPlate?.source === null);
+  }, [view, canvas.focus, shownPlate?.source]);
   // the section view (GLCanvas3D's): 0 none, up to 1; its plane faces the camera from the first cut until
   // "Set viewing angle" turns it again; a toggle goes back to the last cut (half way the first time)
   const [section, setSectionState] = useState(0);
@@ -371,10 +397,16 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const o = (text: string) => orcaText(layout, text, i18n.language);
     const labels: Record<string, string> = {
       plater_name: 'Plate name',
+      locked: 'Lock',
       first_layer_print_sequence: 'First layer filament sequence',
       other_layers_print_sequence: 'Other layer filament sequence',
     };
-    return plateToSave(own).map((e) => {
+    const opRows = plateOps.map((op, i) => ({
+      id: `plateop${i}`,
+      section: op.op === 'add' ? o('Plate') : `${o('Plate')} ${op.plate}`,
+      name: o(op.op === 'add' ? 'Add plate' : op.op === 'remove' ? 'Remove current plate (if not last one)' : 'Move plate to the front'),
+    }));
+    return [...opRows, ...plateToSave(own).map((e) => {
       const option = layout.options[layout.plate_keys?.[e.key] ?? e.key];
       const choice = option?.enum?.find((x) => x.value === e.value)?.label;
       const name =
@@ -382,6 +414,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           ? o('Same as Global')
           : e.key === 'spiral_mode'
             ? o(e.value === 'true' ? 'Enable' : 'Disable')
+            : e.key === 'locked'
+              ? o(e.value === 'true' ? 'Lock current plate' : 'Unlock current plate')
             : e.key === 'other_layers_print_sequence'
               ? // each range as the dialog shows it: "Layer 2 to End: 2 1"
                 parseRanges(e.value, undefined, Math.max(colours.length, 1))
@@ -391,8 +425,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 ? o(choice)
                 : e.value;
       return { id: `plate${e.plate}:${e.key}`, section: `${o('Plate')} ${e.plate}: ${o(labels[e.key] ?? option?.label ?? e.key)}`, name };
-    });
-  }, [own, layout, i18n.language, colours.length]);
+    })];
+  }, [own, plateOps, layout, i18n.language, colours.length]);
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -660,11 +694,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const plateAt = (key: string) => {
     const [objectId, inst] = key.split(':');
     const plate = instances.get(objectId)?.find((i) => i.index === Number(inst))?.plate;
-    return plate == null ? -1 : doc.plates.findIndex((p) => p.index === plate);
+    // the file's plate (placements stay where the file puts the instances until the copy moves the plates)
+    const source = doc.plates.find((p) => p.index === plate)?.source;
+    return source == null ? -1 : source - 1;
   };
   const alignSelection = (keys: string[], parts: string[], inObject: boolean): AlignSelection | null =>
     view && (keys.length || parts.length)
-      ? { view, placed, instances: keys, parts, modelPart, objectCs: inObject, autoDrop, plateOf: plateAt, plateCount: doc.plates.length }
+      ? { view, placed, instances: keys, parts, modelPart, objectCs: inObject, autoDrop, plateOf: plateAt, plateCount: source.plates.length }
       : null;
   const runAlign = (sel: AlignSelection, type: AlignType, toParent: boolean) => {
     const moves = alignMoves(sel, type, toParent);
@@ -725,8 +761,32 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // a move a copy can't save is not offered: the backend says so with the document (cannot_place)
   const why = doc.cannot_place ? t('farm.workspace.move.tooLarge') : orcaText(layout, 'Please select at least one object.', i18n.language);
   const ready: true | string = tkeys.length ? true : why;
+  /** A plate added, removed or moved to the front (PartPlateList), one undo step. The copy moves the plates' instances
+   * with their plates and a removed plate's to where the objects on no plate are (they stay in the project, on no
+   * plate: plate_structure.py); until then every placement stays where the file puts it. */
+  const plateOp = (op: PlateOp) => {
+    setPlates([...plateOps, op], placed, remapPlateEdits(own, op));
+    // as Orca: a plate moved to the front is the current one; a removal keeps the plates after it in reach
+    if (op.op === 'front') setSelectedPlate(1);
+    else if (op.op === 'remove' && selectedPlate != null && selectedPlate >= op.plate) setSelectedPlate(Math.max(1, selectedPlate - 1));
+  };
+  const plateLocked = (n: number) => {
+    const p = doc.plates.find((x) => x.index === n);
+    return !!p && plateMeta(p, own).locked === 'true';
+  };
+  const toggleLock = (n: number) => {
+    const p = doc.plates.find((x) => x.index === n);
+    if (p) applyPlate(p, { locked: plateLocked(n) ? 'false' : 'true' });
+  };
   const toolReady: Record<string, true | string> = doc.editable
-    ? { move: ready, rotate: ready, scale: ready, flatten: flattenKey ? true : tkeys.length ? t('farm.workspace.flatten.single') : why }
+    ? {
+        move: ready,
+        rotate: ready,
+        scale: ready,
+        flatten: flattenKey ? true : tkeys.length ? t('farm.workspace.flatten.single') : why,
+        // a plate added can move the others (a new column): the model must be rewritable
+        addplate: doc.cannot_place ? doc.cannot_place : doc.plates.length < MAX_PLATES ? true : t('farm.workspace.plateLimit', { count: MAX_PLATES }),
+      }
     : {};
   /** A placement in the Save dialog: where the instance goes, and its rotation and scale when it has them. */
   const placementText = (spec: Spec) => {
@@ -847,6 +907,12 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             setPerObject(true);
             select(plateSel);
           },
+          ...(doc.editable && {
+            name: () => setNameDialog(sel.plate),
+            lock: () => toggleLock(sel.plate),
+            locked: plateLocked(sel.plate),
+            remove: doc.plates.length > 1 && !doc.cannot_place ? () => plateOp({ op: 'remove', plate: sel.plate }) : undefined,
+          }),
         }),
       });
       return;
@@ -993,6 +1059,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     };
   }, [view]);
   const toggleTool = (key: string) => {
+    if (key === 'addplate') return plateOp({ op: 'add' }); // Add plate: not a tool, it acts at once
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
@@ -1124,6 +1191,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         placementsToSave(placed).parts,
         ownToSave(own),
         plateToSave(own),
+        plateOps,
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1410,7 +1478,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                 fileType="3mf"
                 buildVolume={bed}
                 filamentColors={colours}
-                selectedPlateId={selectedPlate}
+                // the file's plate the one chosen is (a new plate has none: the model is hidden, below)
+                selectedPlateId={shownPlate === undefined ? selectedPlate : shownPlate.source}
                 className="w-full h-full"
                 onScene={onScene}
               />
@@ -1589,6 +1658,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                         setPerObject(true);
                         select({ kind: 'plate', plate: currentPlate });
                       }}
+                      plate={
+                        doc.editable
+                          ? {
+                              index: currentPlate,
+                              count: doc.plates.length,
+                              locked: plateLocked(currentPlate),
+                              onRemove: doc.cannot_place ? undefined : () => plateOp({ op: 'remove', plate: currentPlate }),
+                              onLock: () => toggleLock(currentPlate),
+                              onName: () => setNameDialog(currentPlate),
+                              onFront: doc.cannot_place ? undefined : () => plateOp({ op: 'front', plate: currentPlate }),
+                            }
+                          : undefined
+                      }
                     />
                   )}
                 </>
@@ -1725,6 +1807,14 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           onlyLayers={plateDialog.onlyLayers}
           onApply={(values) => applyPlate(doc.plates.find((p) => p.index === plateDialog.plate)!, values)}
           onClose={() => setPlateDialog(null)}
+        />
+      )}
+      {nameDialog != null && doc.plates.some((p) => p.index === nameDialog) && (
+        <PlateNameDialog
+          layout={layout}
+          name={plateMeta(doc.plates.find((p) => p.index === nameDialog)!, own).plater_name ?? ''}
+          onApply={(name) => applyPlate(doc.plates.find((p) => p.index === nameDialog)!, { plater_name: name })}
+          onClose={() => setNameDialog(null)}
         />
       )}
       {pendingSpiral && (

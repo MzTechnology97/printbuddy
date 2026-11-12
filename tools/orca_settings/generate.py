@@ -163,6 +163,7 @@ ICONS = [
     "plate_orient_dark",
     "plate_arrange_dark",
     "plate_unlocked_dark",
+    "plate_locked_dark",
     "plate_name_edit_dark",
     "plate_move_front_dark",
     # objects tree: a part's kind, own settings
@@ -271,6 +272,7 @@ UI_STRINGS = [
     "Copying multiple cells is not supported.",
     # the plate's settings (PlateSettingsDialog.cpp, ConfigManipulation.cpp's spiral mode question)
     "Plate name",
+    "Unlock current plate",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",
     "Same as Global",

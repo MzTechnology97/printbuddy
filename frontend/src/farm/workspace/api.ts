@@ -63,6 +63,9 @@ export interface WorkspacePlate {
   instances: { object_id: string; instance_id: string | null }[];
   /** The plate's metadata in model_settings.config: its own settings (bed_type, print_sequence...) among them. */
   metadata?: Record<string, string>;
+  /** After plates were added, removed or moved (plates.ts): the file's plate this one is (its thumbnail); null: a new
+   * plate. */
+  source?: number | null;
 }
 
 export type WorkspaceKind = 'project' | 'sliced' | 'model' | 'other_slicer';
@@ -209,6 +212,7 @@ export const workspaceApi = {
     partTransforms: PartTransform[] = [],
     objectSettings: ObjectSettingEdit[] = [],
     plateSettings: PlateSettingEdit[] = [],
+    plateStructure: { op: string; plate?: number }[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
@@ -221,6 +225,7 @@ export const workspaceApi = {
         part_transforms: partTransforms,
         object_settings: objectSettings,
         plate_settings: plateSettings,
+        plate_structure: plateStructure,
       }),
     }),
 };

@@ -124,7 +124,9 @@ class TestApply:
             ({"plate": 1, "key": "other_layers_print_sequence", "value": "2 5 1"}, "ranges of 4 numbers"),
             ({"plate": 1, "key": "spiral_mode", "value": "1"}, "not true or false"),
             ({"plate": 1, "key": "plater_name", "value": "a\nb"}, "no control characters"),
-            ({"plate": 1, "key": "plater_name", "value": None}, "can be empty, not removed"),
+            ({"plate": 1, "key": "plater_name", "value": None}, "can't be removed"),
+            ({"plate": 1, "key": "locked", "value": None}, "can't be removed"),
+            ({"plate": 1, "key": "locked", "value": "yes"}, "not true or false"),
             ({"plate": 1, "key": "bed_type", "value": True}, "not a value it takes"),
         ],
     )

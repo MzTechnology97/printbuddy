@@ -9,6 +9,7 @@ import { instancesOf, ownSettings } from './objects';
 
 export const PLATE_KEYS = [
   'plater_name',
+  'locked',
   'bed_type',
   'print_sequence',
   'first_layer_print_sequence',
@@ -86,6 +87,42 @@ export function formatRanges(ranges: LayerRange[]): string {
 export function orderOf(text: string | undefined, filaments: number): number[] {
   const n = (text ?? '').split(/\s+/).filter(Boolean).map(Number);
   return n.length === filaments ? n : Array.from({ length: filaments }, (_, i) => i + 1);
+}
+
+/** OrcaSlicer's Add plate, Remove the current plate (if not last one) and Move plate to the front, the plates
+ * numbered as they are when the op comes. */
+export type PlateOp = { op: 'add' } | { op: 'remove' | 'front'; plate: number };
+export const MAX_PLATES = 36; // PartPlate.hpp MAX_PLATE_COUNT
+
+/** The plates after ``ops``, numbered again (``source``: the file's plate each one is, null a new one). */
+export function applyPlateOps(plates: WorkspacePlate[], ops: PlateOp[]): WorkspacePlate[] {
+  const list = plates.map((p) => ({ ...p, source: p.source === undefined ? p.index : p.source }));
+  for (const o of ops) {
+    if (o.op === 'add') {
+      list.push({ index: 0, name: null, object_ids: [], instances: [], metadata: { plater_name: '', locked: 'false' }, source: null });
+    } else {
+      const [p] = list.splice(o.plate - 1, 1);
+      if (o.op === 'front' && p) list.unshift(p);
+    }
+  }
+  return list.map((p, i) => ({ ...p, index: i + 1, metadata: { ...p.metadata, plater_id: String(i + 1) } }));
+}
+
+/** The plates' own settings edited (``plate:N``), numbered as the plates are after ``op``; a removed plate's go. */
+export function remapPlateEdits(edits: OwnEdits, op: PlateOp): OwnEdits {
+  if (op.op === 'add') return edits;
+  const out: OwnEdits = {};
+  for (const [target, keys] of Object.entries(edits)) {
+    if (!isPlateTarget(target)) {
+      out[target] = keys;
+      continue;
+    }
+    const n = Number(target.slice(6));
+    if (op.op === 'remove') {
+      if (n !== op.plate) out[plateTarget(n > op.plate ? n - 1 : n)] = keys;
+    } else out[plateTarget(n === op.plate ? 1 : n < op.plate ? n + 1 : n)] = keys;
+  }
+  return out;
 }
 
 // PartPlate::set_vase_mode_related_object_config (timelapse_type is a printer-wide setting: not an object's own)
