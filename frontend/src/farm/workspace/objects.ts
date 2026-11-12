@@ -122,16 +122,23 @@ export function filamentEdits(
   return out;
 }
 
-/** The own settings edited, as the copy saves them (null: no longer its own). */
+/** The own settings edited, as the copy saves them (null: no longer its own); the plates' are plates.ts's. */
 export function ownToSave(edits: OwnEdits): ObjectSettingEdit[] {
-  return Object.entries(edits).flatMap(([target, keys]) => {
-    const [object_id, part_id = null] = target.split('/');
-    return Object.entries(keys).map(([key, value]) => ({ object_id, part_id, key, value }));
-  });
+  return Object.entries(edits)
+    .filter(([target]) => !target.startsWith('plate:'))
+    .flatMap(([target, keys]) => {
+      const [object_id, part_id = null] = target.split('/');
+      return Object.entries(keys).map(([key, value]) => ({ object_id, part_id, key, value }));
+    });
 }
 
-/** The plate's own settings (the keys of ``layout.plate_keys`` it sets). */
-export function plateOwn(layout: OrcaLayout, plate: WorkspacePlate): Record<string, string> {
-  const meta = plate.metadata ?? {};
+/** The plate's own settings (the keys of ``layout.plate_keys`` it sets: option key -> value), the unsaved edits
+ * made (plates.ts). */
+export function plateOwn(layout: OrcaLayout, plate: WorkspacePlate, edits?: OwnEdits): Record<string, string> {
+  const meta = { ...(plate.metadata ?? {}) };
+  for (const [key, value] of Object.entries(edits?.[`plate:${plate.index}`] ?? {})) {
+    if (value === null) delete meta[key];
+    else meta[key] = value;
+  }
   return Object.fromEntries(Object.entries(layout.plate_keys ?? {}).filter(([m]) => meta[m] != null && meta[m] !== '').map(([m, opt]) => [opt, meta[m]]));
 }

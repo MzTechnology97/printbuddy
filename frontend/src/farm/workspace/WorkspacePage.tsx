@@ -16,7 +16,7 @@ import { PrintModal } from '../../components/PrintModal';
 import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
-import { type OfferedPreset, type PresetRef, type SwitchReason, type WorkspaceDocument, workspaceApi } from './api';
+import { type OfferedPreset, type PresetRef, type SwitchReason, type WorkspaceDocument, type WorkspacePlate, workspaceApi } from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
@@ -76,6 +76,9 @@ import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, m
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { FILAMENT_KEY, type Selection, instancesOf, ownToSave } from './objects';
 import { ObjectTableDialog } from './ObjectTable';
+import { PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
+import { LAYER_END, parseRanges, plateEdits, plateMeta, plateToSave, spiralEdits } from './plates';
+import type { TargetEdits } from './objectGrid';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
 import { PreviewPane } from './PreviewPane';
 import { Sidebar } from './Sidebar';
@@ -245,9 +248,27 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const fileId = doc.file.id;
   // unsaved: edits (the objects' own settings among them), preset switches, placements
   const count = edits + switched.refs.length + Object.keys(placed).length;
+  // OrcaSlicer's Plate Settings dialog (the plate it edits; onlyLayers: the tab's "Customize"), and spiral vase
+  // waiting for its question (ConfigManipulation::show_spiral_mode_settings_dialog)
+  const [plateDialog, setPlateDialog] = useState<{ plate: number; onlyLayers: boolean } | null>(null);
+  const [pendingSpiral, setPendingSpiral] = useState<{ plate: WorkspacePlate; values: PlateValues } | null>(null);
+  /** A plate's own settings, one undo step; turning spiral vase on asks first. */
+  const applyPlate = useCallback(
+    (plate: WorkspacePlate, values: PlateValues) => {
+      if (values.spiral_mode === 'true' && plateMeta(plate, own).spiral_mode !== 'true') setPendingSpiral({ plate, values });
+      else setOwnTargets(plateEdits(plate, values));
+    },
+    [own, setOwnTargets],
+  );
   const ownEditing = useMemo(
-    () => ({ edits: own, set: setOwn, setMany: setOwnMany, setTargets: setOwnTargets }),
-    [own, setOwn, setOwnMany, setOwnTargets],
+    () => ({
+      edits: own,
+      set: setOwn,
+      setMany: setOwnMany,
+      setTargets: setOwnTargets,
+      plate: { apply: applyPlate, customize: (p: WorkspacePlate) => setPlateDialog({ plate: p.index, onlyLayers: true }) },
+    }),
+    [own, setOwn, setOwnMany, setOwnTargets, applyPlate],
   );
   livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
@@ -345,6 +366,33 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       }),
     [own, doc.objects, byKey, layout, i18n.language, t],
   );
+  // the plates' own settings edited, as the save dialog lists them
+  const plateRows = useMemo(() => {
+    const o = (text: string) => orcaText(layout, text, i18n.language);
+    const labels: Record<string, string> = {
+      plater_name: 'Plate name',
+      first_layer_print_sequence: 'First layer filament sequence',
+      other_layers_print_sequence: 'Other layer filament sequence',
+    };
+    return plateToSave(own).map((e) => {
+      const option = layout.options[layout.plate_keys?.[e.key] ?? e.key];
+      const choice = option?.enum?.find((x) => x.value === e.value)?.label;
+      const name =
+        e.value == null
+          ? o('Same as Global')
+          : e.key === 'spiral_mode'
+            ? o(e.value === 'true' ? 'Enable' : 'Disable')
+            : e.key === 'other_layers_print_sequence'
+              ? // each range as the dialog shows it: "Layer 2 to End: 2 1"
+                parseRanges(e.value, undefined, Math.max(colours.length, 1))
+                  .map((r) => `${o('Layer')} ${r.from} ${o('to')} ${r.to >= LAYER_END ? o('Layer range\u0004End') : r.to}: ${r.order.join(' ')}`)
+                  .join('; ')
+              : choice
+                ? o(choice)
+                : e.value;
+      return { id: `plate${e.plate}:${e.key}`, section: `${o('Plate')} ${e.plate}: ${o(labels[e.key] ?? option?.label ?? e.key)}`, name };
+    });
+  }, [own, layout, i18n.language, colours.length]);
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -1075,6 +1123,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         placementsToSave(placed).transforms,
         placementsToSave(placed).parts,
         ownToSave(own),
+        plateToSave(own),
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1535,6 +1584,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
                     <PlateButtons
                       layout={layout}
                       onSettings={() => {
+                        // "Customize current plate": Orca's Plate Settings dialog; a file that can't be saved shows its tab
+                        if (doc.editable) return setPlateDialog({ plate: currentPlate, onlyLayers: false });
                         setPerObject(true);
                         select({ kind: 'plate', plate: currentPlate });
                       }}
@@ -1603,6 +1654,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             }),
             // the objects' (parts') own settings: the new value, or the project's again
             ...ownRows,
+            ...plateRows,
           ]}
           invalid={[...invalid, ...ownRows.filter((r) => r.invalid).map((r) => r.id)]}
           saving={saveMutation.isPending}
@@ -1660,6 +1712,37 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           onSaved={(name) => {
             setSavePreset(null);
             showToast(t('farm.workspace.presets.saved', { name }), 'success');
+          }}
+        />
+      )}
+      {plateDialog && doc.plates.some((p) => p.index === plateDialog.plate) && (
+        <PlateSettingsDialog
+          layout={layout}
+          doc={doc}
+          plate={doc.plates.find((p) => p.index === plateDialog.plate)!}
+          edits={own}
+          colours={colours}
+          onlyLayers={plateDialog.onlyLayers}
+          onApply={(values) => applyPlate(doc.plates.find((p) => p.index === plateDialog.plate)!, values)}
+          onClose={() => setPlateDialog(null)}
+        />
+      )}
+      {pendingSpiral && (
+        <SpiralConfirm
+          layout={layout}
+          onYes={() => {
+            const { plate, values } = pendingSpiral;
+            const all: TargetEdits = { ...spiralEdits(doc, plate.index, draft, own) };
+            for (const [target, keys] of Object.entries(plateEdits(plate, values))) all[target] = { ...all[target], ...keys };
+            setOwnTargets(all);
+            setPendingSpiral(null);
+          }}
+          onNo={() => {
+            // the other settings stay; spiral vase is left as it was
+            const { plate, values } = pendingSpiral;
+            const rest = Object.fromEntries(Object.entries(values).filter(([k]) => k !== 'spiral_mode'));
+            if (Object.keys(rest).length) setOwnTargets(plateEdits(plate, rest));
+            setPendingSpiral(null);
           }}
         />
       )}

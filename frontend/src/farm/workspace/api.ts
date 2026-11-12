@@ -132,6 +132,13 @@ export interface ObjectSettingEdit {
   value: string | null;
 }
 
+/** One of a plate's own settings set, changed or dropped (``value`` null: same as global): Orca's Plate Settings. */
+export interface PlateSettingEdit {
+  plate: number;
+  key: string;
+  value: string | null;
+}
+
 /** A part placed anew in its object: its component transform (3MF's 12 numbers), for every instance. */
 export interface PartTransform {
   object_id: string;
@@ -201,6 +208,7 @@ export const workspaceApi = {
     transforms: InstanceTransform[] = [],
     partTransforms: PartTransform[] = [],
     objectSettings: ObjectSettingEdit[] = [],
+    plateSettings: PlateSettingEdit[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
@@ -212,6 +220,7 @@ export const workspaceApi = {
         transforms,
         part_transforms: partTransforms,
         object_settings: objectSettings,
+        plate_settings: plateSettings,
       }),
     }),
 };
