@@ -84,10 +84,12 @@ import {
   applyPlateOps,
   parseRanges,
   plateEdits,
+  plateAfterMove,
   plateMeta,
   plateToSave,
   remapPlateEdits,
   spiralEdits,
+  withMoved,
 } from './plates';
 import type { TargetEdits } from './objectGrid';
 import { type OrcaLayout, loadOrcaLayout, orcaText } from './orcaLayout';
@@ -249,16 +251,17 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
-  // the plates as the unsaved adds, removals and moves leave them, with their unsaved names (plates.ts)
+  // the plates as the unsaved adds, removals, moves and duplicates leave them, the instances moved onto another plate
+  // on it, with their unsaved names (plates.ts)
   const doc = useMemo(
     () => ({
       ...source,
       settings,
-      plates: applyPlateOps(source.plates, plateOps).map((p) => ({ ...p, name: plateMeta(p, own).plater_name || null })),
+      plates: applyPlateOps(withMoved(source.plates, onPlate), plateOps).map((p) => ({ ...p, name: plateMeta(p, own).plater_name || null })),
     }),
-    [source, settings, plateOps, own],
+    [source, settings, plateOps, own, onPlate],
   );
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -307,8 +310,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const [stats, setStats] = useState<Map<string, ObjectStats>>(new Map());
   const [canvas, setCanvas] = useState<CanvasOptions>(CANVAS_DEFAULTS);
   useEffect(() => {
-    if (view) view.model.visible = !(canvas.focus && shownPlate?.source === null);
-  }, [view, canvas.focus, shownPlate?.source]);
+    if (!view) return;
+    view.model.visible = !(canvas.focus && shownPlate?.source === null);
+    // a duplicated plate shows its plate's objects, copied only when the copy is saved: nothing to pick on it
+    view.model.userData.readOnly = canvas.focus && !!shownPlate?.copies;
+  }, [view, canvas.focus, shownPlate?.source, shownPlate?.copies]);
   // the section view (GLCanvas3D's): 0 none, up to 1; its plane faces the camera from the first cut until
   // "Set viewing angle" turns it again; a toggle goes back to the last cut (half way the first time)
   const [section, setSectionState] = useState(0);
@@ -404,7 +410,15 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     const opRows = plateOps.map((op, i) => ({
       id: `plateop${i}`,
       section: op.op === 'add' ? o('Plate') : `${o('Plate')} ${op.plate}`,
-      name: o(op.op === 'add' ? 'Add plate' : op.op === 'remove' ? 'Remove current plate (if not last one)' : 'Move plate to the front'),
+      name: o(
+        op.op === 'add'
+          ? 'Add plate'
+          : op.op === 'remove'
+            ? 'Remove current plate (if not last one)'
+            : op.op === 'duplicate'
+              ? 'Duplicate Current Plate'
+              : 'Move plate to the front',
+      ),
     }));
     return [...opRows, ...plateToSave(own).map((e) => {
       const option = layout.options[layout.plate_keys?.[e.key] ?? e.key];
@@ -558,6 +572,27 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const axes = partTargets.length ? partInstance : lead; // the Object axes: the instance's (a part's too, as Orca's Instance)
   // the instance's axes for parts in Object coordinates (several parts have no Part axes of their own)
   const partFrame = partTargets.length && partInstance && (cs === 'object' || (cs === 'part' && !part)) ? rotationOf(partInstance) : undefined;
+  /** The file's plate an instance (``objectId:instance``) is on (0: none). */
+  const filePlate = (key: string) =>
+    source.plates.find((p) => p.instances.some((i) => `${i.object_id}:${Number(i.instance_id ?? 0)}` === key))?.index ?? 0;
+  /** Placements made (one undo step), each instance moved listed on the plate it lies on now (notify_instance_update),
+   * of the file's plates as the file lays them out: the copy lists it there, then moves it with that plate. Shortcut: a
+   * part moved leaves its instance's plate as it was (Orca checks the instance again); instances not in the 3D view
+   * (another plate's, in focus mode) keep theirs. */
+  const commit = (next: Placed) => {
+    const moved = { ...onPlate };
+    if (view && !doc.cannot_place) {
+      for (const key of Object.keys(next)) {
+        if (isPartKey(key) || JSON.stringify(next[key]) === JSON.stringify(placed[key])) continue;
+        const b = boxOf(view, next, [key]);
+        if (!b) continue;
+        const now = plateAfterMove(b, moved[key] ?? filePlate(key), source.plates.length, view.bed);
+        if (now === filePlate(key)) delete moved[key];
+        else moved[key] = now;
+      }
+    }
+    place(next, moved);
+  };
   /** A change shown while dragging (no bed rule yet, as Orca's drag) or made (``done``: one undo step). */
   const transform = (change: Change, done: boolean) => {
     if (!view) return;
@@ -566,7 +601,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       ? changedParts(view, placed, partTargets, (w, t) => change.apply(w, t), change.drop === 'move' ? 'move' : 'transform', drop)
       : changed(view, placed, change, drop);
     applyPlacements(view, next);
-    if (done) place(next);
+    if (done) commit(next);
   };
   const move = (d: [number, number, number], done: boolean) =>
     transform({ keys: moveKeys, apply: (spec) => moved(spec, objectCs && axes ? inObjectAxes(axes, d) : d), sync: 'none', drop: 'move' }, done);
@@ -711,7 +746,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       ? changedParts(view, placed, keys, (w, k) => moved(w, moves[k]), 'move', autoDrop)
       : changed(view, placed, { keys, apply: (spec, k) => moved(spec, moves[k]), sync: 'none', drop: 'move' }, autoDrop);
     applyPlacements(view, next);
-    place(next);
+    commit(next);
   };
   const moveAlign = tool === 'move' ? alignSelection(partTargets.length ? [] : moveKeys, partTargets, objectCs) : null;
   const canWithin = !!moveAlign && canAlign(moveAlign, { axis: 0, kind: 'min' }, false);
@@ -1192,6 +1227,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         ownToSave(own),
         plateToSave(own),
         plateOps,
+        Object.entries(onPlate).map(([key, p]) => ({ object_id: key.split(':')[0], instance: Number(key.split(':')[1]), plate: p })),
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1323,6 +1359,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     collision,
     overhangs: canvas.overhangs,
     outline: canvas.outline,
+    // Orca's is always on; a copy that can't rewrite the model, or holds 36 plates, can't take one
+    duplicatePlate:
+      !doc.editable || mode !== 'prepare' || plate == null
+        ? ''
+        : (doc.cannot_place ?? (doc.plates.length < MAX_PLATES ? (true as const) : t('farm.workspace.plateLimit', { count: MAX_PLATES }))),
   };
   const menuActions = {
     open: () => (!count || window.confirm(t('farm.workspace.unsavedConfirm'))) && navigate('/files'),
@@ -1343,6 +1384,14 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
     },
     deselectAll: () => deselect(),
+    // the objects the plate holds now (a duplicate's: those it copies), as duplicate_plate's get_objects_on_this_plate
+    duplicatePlate: () => {
+      const p = doc.plates.find((x) => x.index === plate);
+      if (!p) return;
+      const objects = p.copies ?? [...new Set(p.object_ids)];
+      const instances = placementsToSave(placed).transforms.filter((x) => objects.includes(x.object_id));
+      plateOp({ op: 'duplicate', plate: p.index, objects, instances });
+    },
     view: (preset: Parameters<typeof setView>[1]) => view && setView(view, preset),
     perspective: (on: boolean) => setCanvas((c) => ({ ...c, perspective: on })),
     toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') =>
@@ -1731,7 +1780,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
               const many = (instances.get(id)?.length ?? 1) > 1;
               return {
                 section: many ? `${name} #${Number(instance) + 1}` : name,
-                name: placementText(spec),
+                // a move onto another plate: the plate it lies on (the file's numbering, as the copy lists it)
+                name:
+                  onPlate[key] === undefined
+                    ? placementText(spec)
+                    : `${placementText(spec)} · ${onPlate[key] ? `${tr('Plate')} ${onPlate[key]}` : tr('Outside')}`,
               };
             }),
             // the objects' (parts') own settings: the new value, or the project's again

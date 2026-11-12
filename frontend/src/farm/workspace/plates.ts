@@ -89,17 +89,27 @@ export function orderOf(text: string | undefined, filaments: number): number[] {
   return n.length === filaments ? n : Array.from({ length: filaments }, (_, i) => i + 1);
 }
 
-/** OrcaSlicer's Add plate, Remove the current plate (if not last one) and Move plate to the front, the plates
- * numbered as they are when the op comes. */
-export type PlateOp = { op: 'add' } | { op: 'remove' | 'front'; plate: number };
+/** OrcaSlicer's Add plate, Remove the current plate (if not last one), Move plate to the front and Duplicate Current
+ * Plate, the plates numbered as they are when the op comes. */
+/** A duplicate holds the objects the plate held then and where their instances were placed by then (the copy takes
+ * the others where the file has them), so a later move leaves the copies where they were, as in Orca. */
+export type PlateOp =
+  | { op: 'add' }
+  | { op: 'remove' | 'front'; plate: number }
+  | { op: 'duplicate'; plate: number; objects: string[]; instances: { object_id: string; instance: number; matrix: number[] }[] };
 export const MAX_PLATES = 36; // PartPlate.hpp MAX_PLATE_COUNT
 
-/** The plates after ``ops``, numbered again (``source``: the file's plate each one is, null a new one). */
+/** The plates after ``ops``, numbered again (``source``: the file's plate each one is, null a new one). A duplicate
+ * shows its plate as the file has it until the copy is saved, which writes the objects it held (``copies``) as
+ * objects of their own; it lists none, so they can't be edited apart before (``duplicate_plate`` copies no plate
+ * setting either). */
 export function applyPlateOps(plates: WorkspacePlate[], ops: PlateOp[]): WorkspacePlate[] {
   const list = plates.map((p) => ({ ...p, source: p.source === undefined ? p.index : p.source }));
   for (const o of ops) {
-    if (o.op === 'add') {
-      list.push({ index: 0, name: null, object_ids: [], instances: [], metadata: { plater_name: '', locked: 'false' }, source: null });
+    if (o.op === 'add' || o.op === 'duplicate') {
+      const source = o.op === 'duplicate' ? (list[o.plate - 1]?.source ?? null) : null;
+      const copies = o.op === 'duplicate' && source !== null ? o.objects : undefined;
+      list.push({ index: 0, name: null, object_ids: [], instances: [], metadata: { plater_name: '', locked: 'false' }, source, copies });
     } else {
       const [p] = list.splice(o.plate - 1, 1);
       if (o.op === 'front' && p) list.unshift(p);
@@ -108,9 +118,45 @@ export function applyPlateOps(plates: WorkspacePlate[], ops: PlateOp[]): Workspa
   return list.map((p, i) => ({ ...p, index: i + 1, metadata: { ...p.metadata, plater_id: String(i + 1) } }));
 }
 
+/** The instances moved onto another plate (``objectId:instance`` -> the file's plate it lies on, 0 none) listed there. */
+export function withMoved(plates: WorkspacePlate[], onPlate: Record<string, number>): WorkspacePlate[] {
+  const keys = Object.keys(onPlate);
+  if (!keys.length) return plates;
+  const key = (i: { object_id: string; instance_id: string | null }) => `${i.object_id}:${Number(i.instance_id ?? 0)}`;
+  return plates.map((p) => {
+    const instances = [
+      ...p.instances.filter((i) => onPlate[key(i)] === undefined),
+      ...keys.filter((k) => onPlate[k] === p.index).map((k) => ({ object_id: k.split(':')[0], instance_id: k.split(':')[1] })),
+    ];
+    return { ...p, instances, object_ids: [...new Set(instances.map((i) => i.object_id))] };
+  });
+}
+
+/** OrcaSlicer's notify_instance_update: a moved instance stays on its plate while its box touches it, else goes on
+ * the first plate it touches (0: none). Plates as the file lays ``count`` of them out (compute_origin), numbered
+ * from 1; the box in the slicer's x / y. Shortcut: the bed from (0, 0) and every height; a bed with its origin
+ * elsewhere would need its printable area here. */
+export function plateAfterMove(
+  box: { min: { x: number; y: number }; max: { x: number; y: number } },
+  current: number,
+  count: number,
+  bed: { x: number; y: number },
+): number {
+  const root = Math.sqrt(count);
+  const cols = root > Math.round(root) ? Math.round(root) + 1 : Math.round(root);
+  const EPS = 1e-4; // BuildVolume::SceneEpsilon
+  const touches = (n: number) => {
+    const x = ((n - 1) % cols) * bed.x * 1.2, y = -Math.floor((n - 1) / cols) * bed.y * 1.2;
+    return box.max.x >= x - EPS && box.min.x <= x + bed.x + EPS && box.max.y >= y - EPS && box.min.y <= y + bed.y + EPS;
+  };
+  if (current > 0 && touches(current)) return current;
+  for (let n = 1; n <= count; n++) if (touches(n)) return n;
+  return 0;
+}
+
 /** The plates' own settings edited (``plate:N``), numbered as the plates are after ``op``; a removed plate's go. */
 export function remapPlateEdits(edits: OwnEdits, op: PlateOp): OwnEdits {
-  if (op.op === 'add') return edits;
+  if (op.op === 'add' || op.op === 'duplicate') return edits;
   const out: OwnEdits = {};
   for (const [target, keys] of Object.entries(edits)) {
     if (!isPlateTarget(target)) {

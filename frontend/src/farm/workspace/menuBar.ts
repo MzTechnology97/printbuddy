@@ -30,6 +30,8 @@ export interface MenuState {
   collision: boolean;
   overhangs: boolean;
   outline: boolean;
+  /** Duplicate Current Plate: true, else why not (a model too large to rewrite, the plates' limit, not Prepare). */
+  duplicatePlate: true | string;
 }
 
 export interface MenuActions {
@@ -44,6 +46,7 @@ export interface MenuActions {
   resetAll: () => void;
   selectAll: () => void;
   deselectAll: () => void;
+  duplicatePlate: () => void;
   view: (preset: ViewPreset) => void;
   perspective: (on: boolean) => void;
   toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') => void;
@@ -106,7 +109,12 @@ export function editMenu(tr: Tr, hints: Hints, s: MenuState, a: MenuActions, ext
     { label: tr('Delete Selected'), shortcut: 'Del', hint: p2 },
     { label: tr('Delete All'), shortcut: 'Ctrl+D', hint: p2 },
     { label: tr('Clone Selected'), shortcut: 'Ctrl+K', hint: p2, separator: true },
-    { label: tr('Duplicate Current Plate'), hint: p2, separator: true },
+    {
+      label: tr('Duplicate Current Plate'),
+      onClick: s.duplicatePlate === true ? a.duplicatePlate : undefined,
+      hint: s.duplicatePlate === true ? undefined : s.duplicatePlate,
+      separator: true,
+    },
     { label: tr('Select All'), shortcut: 'Ctrl+A', onClick: on(s.prepare, a.selectAll), separator: true },
     { label: tr('Deselect All'), shortcut: 'Esc', onClick: on(s.prepare, a.deselectAll) },
     // Printbuddy's: every unsaved change back to the project's value at once

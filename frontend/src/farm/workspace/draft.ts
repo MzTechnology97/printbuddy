@@ -127,6 +127,9 @@ const NO_PLACEMENTS: Placements = {};
 export type OwnEdits = Record<string, Record<string, string | null>>;
 const NO_OWN: OwnEdits = {};
 const NO_OPS: PlateOp[] = [];
+/** The instances a move put on another plate: ``objectId:instance`` -> the file's plate it lies on (0: none). */
+export type OnPlate = Record<string, number>;
+const NO_PLATE: OnPlate = {};
 
 /** One undo step: the draft, the preset switches it was made on, the instances placed anew, the objects' own
  * settings edited and the plates added, removed or moved (none: ``undefined``). */
@@ -136,6 +139,7 @@ export interface DraftStep {
   placed?: Placements;
   own?: OwnEdits;
   plateOps?: PlateOp[];
+  onPlate?: OnPlate;
 }
 /** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
 export interface DraftHistory extends DraftStep {
@@ -147,11 +151,11 @@ export interface DraftHistory extends DraftStep {
 export type DraftAction =
   | { type: 'edit'; edit: (d: Draft) => Draft; key: string | null; at: number }
   /** a preset switch (or Undo all): the switches and the draft change together, as one step */
-  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements; own?: OwnEdits; plateOps?: PlateOp[] }
+  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements; own?: OwnEdits; plateOps?: PlateOp[]; onPlate?: OnPlate }
   /** a plate added, removed or moved: the plates, the instances they move and their own settings, one step */
   | { type: 'plates'; plateOps: PlateOp[]; placed: Placements; own: OwnEdits }
-  /** a move (rotation, scale) of instances: one step */
-  | { type: 'place'; placed: Placements }
+  /** a move (rotation, scale) of instances, with the plates it put them on: one step */
+  | { type: 'place'; placed: Placements; onPlate?: OnPlate }
   /** an object's (part's) own settings: typing in one field is one step, as an edit */
   | { type: 'own'; edit: (o: OwnEdits) => OwnEdits; key: string | null; at: number }
   | { type: 'undo' }
@@ -160,7 +164,14 @@ export type DraftAction =
 export const COALESCE_MS = 1000;
 const HISTORY = 100;
 
-const stepOf = (h: DraftHistory): DraftStep => ({ draft: h.draft, switched: h.switched, placed: h.placed, own: h.own, plateOps: h.plateOps });
+const stepOf = (h: DraftHistory): DraftStep => ({
+  draft: h.draft,
+  switched: h.switched,
+  placed: h.placed,
+  own: h.own,
+  plateOps: h.plateOps,
+  onPlate: h.onPlate,
+});
 
 export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
   if (a.type === 'undo') {
@@ -174,12 +185,19 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
   if (a.type === 'switch' || a.type === 'place' || a.type === 'plates') {
     const next: DraftStep =
       a.type === 'place'
-        ? { ...stepOf(h), placed: a.placed }
+        ? { ...stepOf(h), placed: a.placed, onPlate: a.onPlate ?? h.onPlate }
         : a.type === 'plates'
           ? { ...stepOf(h), plateOps: a.plateOps, placed: a.placed, own: a.own }
-          : { draft: a.draft, switched: a.switched, placed: a.placed ?? h.placed, own: a.own ?? h.own, plateOps: a.plateOps ?? h.plateOps };
+          : {
+              draft: a.draft,
+              switched: a.switched,
+              placed: a.placed ?? h.placed,
+              own: a.own ?? h.own,
+              plateOps: a.plateOps ?? h.plateOps,
+              onPlate: a.onPlate ?? h.onPlate,
+            };
     const flat = (x: DraftStep) =>
-      JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS, x.own ?? NO_OWN, x.plateOps ?? NO_OPS]);
+      JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS, x.own ?? NO_OWN, x.plateOps ?? NO_OPS, x.onPlate ?? NO_PLATE]);
     if (flat(next) === flat(h)) return h;
     return { ...next, past: [...h.past, stepOf(h)].slice(-HISTORY), future: [], last: null };
   }
@@ -205,6 +223,7 @@ export function useSettingsDraft(
   const placed = history.placed ?? NO_PLACEMENTS;
   const own = history.own ?? NO_OWN;
   const plateOps = history.plateOps ?? NO_OPS;
+  const onPlate = history.onPlate ?? NO_PLATE;
   const settings = useMemo(() => (view ? view(source, switched.values) : source), [view, source, switched.values]);
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
   const set = useCallback(
@@ -215,7 +234,7 @@ export function useSettingsDraft(
   const reset = useCallback((key: string) => dispatch({ type: 'edit', edit: (d) => withoutKey(d, key), key: null, at: Date.now() }), []);
   // Undo all: the edits, the preset switches, the placements and the objects' own settings, one step that Undo brings back
   const resetAll = useCallback(
-    () => dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS, own: NO_OWN, plateOps: NO_OPS }),
+    () => dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS, own: NO_OWN, plateOps: NO_OPS, onPlate: NO_PLATE }),
     [],
   );
   /** Plates added, removed or moved (all of them so far), with the instances they move and their own settings. */
@@ -246,7 +265,7 @@ export function useSettingsDraft(
       dispatch({ type: 'own', edit: (o) => withOwn(o, target, values), key: null, at: Date.now() }),
     [],
   );
-  const place = useCallback((next: Placements) => dispatch({ type: 'place', placed: next }), []);
+  const place = useCallback((next: Placements, plates?: OnPlate) => dispatch({ type: 'place', placed: next, onPlate: plates }), []);
   const switchTo = useCallback((next: Switched, nextDraft: Draft) => dispatch({ type: 'switch', switched: next, draft: nextDraft }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
   const redo = useCallback(() => dispatch({ type: 'redo' }), []);
@@ -261,7 +280,7 @@ export function useSettingsDraft(
     [draft, byKey],
   );
   return {
-    settings, switched, switchTo, placed, place, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid,
+    settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid,
     count: Object.keys(draft).length + Object.values(own).reduce((n, keys) => n + Object.keys(keys).length, 0) + plateOps.length,
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };

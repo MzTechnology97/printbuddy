@@ -47,12 +47,12 @@ describe('undo / redo of the settings edits', () => {
 
 const state: MenuState = {
   canUndo: true, canRedo: false, canSave: false, dirty: true, hasSlice: false, prepare: true, perspective: true,
-  navigator: true, grid: true, labels: false, collision: false, overhangs: false, outline: true,
+  navigator: true, grid: true, labels: false, collision: false, overhangs: false, outline: true, duplicatePlate: true,
 };
 const actions = (): MenuActions => ({
   open: vi.fn(), save: vi.fn(), download3mf: vi.fn(), exportSliced: vi.fn(), exportGcode: vi.fn(), quit: vi.fn(),
   undo: vi.fn(), redo: vi.fn(), resetAll: vi.fn(), selectAll: vi.fn(), deselectAll: vi.fn(), view: vi.fn(),
-  perspective: vi.fn(), toggle: vi.fn(), shortcuts: vi.fn(),
+  perspective: vi.fn(), toggle: vi.fn(), shortcuts: vi.fn(), duplicatePlate: vi.fn(),
 });
 const tr = (s: string) => stripMnemonic(s);
 const trc = (_c: string, s: string) => s;

@@ -36,7 +36,7 @@ from backend.app.farm.workspace import (
 )
 from backend.app.farm.workspace.object_settings import MAX_EDITS as MAX_OBJECT_SETTINGS, ObjectSetting
 from backend.app.farm.workspace.plate_settings import MAX_EDITS as MAX_PLATE_SETTINGS, PlateSetting
-from backend.app.farm.workspace.plate_structure import MAX_OPS as MAX_PLATE_OPS, PlateOp
+from backend.app.farm.workspace.plate_structure import MAX_OPS as MAX_PLATE_OPS, InstancePlate, PlateOp
 from backend.app.farm.workspace.presets import PresetRef, router as presets_router, switch_target
 from backend.app.models.library import LibraryFile, LibraryFolder
 from backend.app.models.user import User
@@ -64,7 +64,9 @@ class CopyRequest(BaseModel):
     object_settings: list[ObjectSetting] = Field(default_factory=list, max_length=MAX_OBJECT_SETTINGS)
     # a plate's own settings set, changed or dropped (OrcaSlicer's Plate Settings dialog and tab)
     plate_settings: list[PlateSetting] = Field(default_factory=list, max_length=MAX_PLATE_SETTINGS)
-    # plates added, removed or moved to the front, in order, before ``plate_settings`` (numbered after them)
+    # the plate each instance moved onto another lies on now (the file's plates), before ``plate_structure``
+    instance_plates: list[InstancePlate] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
+    # plates added, removed, moved to the front or duplicated, in order, before ``plate_settings`` (numbered after them)
     plate_structure: list[PlateOp] = Field(default_factory=list, max_length=MAX_PLATE_OPS)
 
 
@@ -207,6 +209,7 @@ def _build_copy(
     own_settings: list[ObjectSetting] = (),
     plate_edits: list[PlateSetting] = (),
     plate_ops: list[PlateOp] = (),
+    instance_plates: list[InstancePlate] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -225,11 +228,11 @@ def _build_copy(
         replaced, placed = {}, []
         settings_xml = (
             project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
-            if part_transforms or own_settings or plate_edits or plate_ops
+            if part_transforms or own_settings or plate_edits or plate_ops or instance_plates
             else None
         )
         model = original_model = None
-        if transforms or part_transforms or plate_ops:
+        if transforms or part_transforms or plate_ops or instance_plates:
             model = original_model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
@@ -241,12 +244,17 @@ def _build_copy(
                 raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
             settings_xml, owned = object_settings.apply(settings_xml, cfg, list(own_settings), slicer)
             placed += owned
-        if plate_ops:
+        if instance_plates or plate_ops:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no plates file to write to")
+        if instance_plates:
+            # where the placements put them, on the file's plates: then they move with those plates
+            settings_xml, assigned = plate_structure.assign(settings_xml, model, list(instance_plates))
+            placed += assigned
+        if plate_ops:
             # after the placements: the plates' instances move with their plates from where they were put
             settings_xml, new_cfg, model, restructured = plate_structure.apply(
-                settings_xml, new_cfg, list(plate_ops), model
+                settings_xml, new_cfg, list(plate_ops), model, original_model
             )
             placed += restructured
         if model is not None and model != original_model:
@@ -336,6 +344,7 @@ async def save_copy(
                 body.object_settings,
                 body.plate_settings,
                 body.plate_structure,
+                body.instance_plates,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)

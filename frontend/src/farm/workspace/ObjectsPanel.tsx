@@ -322,6 +322,9 @@ export function ObjectsPanel({
                 <span className="flex-1 truncate">{plateName}</span>
                 {plateHasOwn && <Cog title={ownCount} />}
               </div>
+              {!!plate?.copies?.length && open(plateKey) && (
+                <p className="pl-6 pr-2 py-1 text-xs text-bambu-gray">{t('farm.workspace.plateCopies')}</p>
+              )}
               {open(plateKey) && (
                 <ul role="group">
                   {shownObjects.map((obj) => {

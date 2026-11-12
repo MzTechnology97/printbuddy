@@ -183,7 +183,7 @@ export function pick(
   clientY: number,
 ): { objectId: string; instance: number; partId: string | null; point: THREE.Vector3 } | null {
   const rect = view.renderer.domElement.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
+  if (!rect.width || !rect.height || view.model.userData.readOnly) return null; // a duplicated plate's (WorkspacePage)
   const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
   RAY.setFromCamera(ndc, view.camera);
   const hit = RAY.intersectObjects(items(view), true)[0];
