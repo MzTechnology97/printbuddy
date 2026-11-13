@@ -549,8 +549,11 @@ def apply(
                     entries.setdefault(dup, []).append(_entry(template, blocks[-1], (new_id, k), identify or None))
     elif any(isinstance(s, str) for s in sources):
         raise InvalidPlateStructure("a plate's objects can't be copied without the model")
+    pairs = list(zip(copies, new_ids, strict=True)) if copies else []
     for dup, done in zip(duplicates, (a for a in applied if a["op"] == "duplicate"), strict=True):
         done["objects"] = sum(1 for d, _, _ in copies if d == dup)
+        # which object each copy is of (its height ranges go with it, as Model::add_object copies them)
+        done["copies"] = [[oid, new_id] for (d, oid, _), new_id in pairs if d == dup]
 
     start, end, blocks = _blocks(settings)  # the copies' objects are before the plates: the same blocks
     empty = _empty(blocks[-1])
