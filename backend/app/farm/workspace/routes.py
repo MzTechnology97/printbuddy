@@ -306,7 +306,10 @@ def _build_copy(
             own = {e.object_id: e.ranges for e in edits}
             in_file = layer_ranges.parse(ranges_xml, layer_ranges.object_order(model))
             for source, new_id in copied:
-                ranges = own.get(source) or [layer_ranges.LayerRange(**r) for r in in_file.get(source, [])]
+                # an edit that removed all of the source's ranges counts: the copy has none either
+                ranges = (
+                    own[source] if source in own else [layer_ranges.LayerRange(**r) for r in in_file.get(source, [])]
+                )
                 if ranges:
                     edits.append(RangeEdit(object_id=new_id, ranges=ranges))
             if edits:
