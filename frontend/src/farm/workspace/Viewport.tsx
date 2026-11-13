@@ -89,6 +89,7 @@ function ToolButton({
   enabled,
   active,
   onClick,
+  onContextMenu,
   size = 'w-7 h-7',
   tip = 'below',
   why = false,
@@ -98,6 +99,8 @@ function ToolButton({
   enabled: boolean;
   active?: boolean;
   onClick?: () => void;
+  /** a right click (Orca's right-click options, e.g. Arrange's) */
+  onContextMenu?: () => void;
   size?: string;
   /** null: no tooltip (its panel is open beside it) */
   tip?: keyof typeof TIP_PLACE | null;
@@ -108,7 +111,18 @@ function ToolButton({
   const title = enabled || why ? label : `${label}: ${t('farm.workspace.gizmos.soon')}`;
   return (
     // a disabled button takes no pointer: its wrapper gets the hover and shows the tooltip
-    <span className="relative inline-flex group/tip">
+    <span
+      className="relative inline-flex group/tip"
+      // on the wrapper: a greyed button takes no pointer, and Orca's right-click options open even then
+      onContextMenu={
+        onContextMenu
+          ? (e) => {
+              e.preventDefault();
+              onContextMenu();
+            }
+          : undefined
+      }
+    >
       <button
         type="button"
         disabled={!enabled}
@@ -130,11 +144,14 @@ export function MainToolbar({
   layout,
   active,
   onTool,
+  onToolMenu,
   ready = {},
 }: {
   layout: OrcaLayout;
   active: string | null;
   onTool: (key: string) => void;
+  /** a tool's right click (Arrange: its options) */
+  onToolMenu?: (key: string) => void;
   /** tools that work in this state (true), or why one can't now (its tooltip, as Orca's) */
   ready?: Record<string, true | string>;
 }) {
@@ -162,6 +179,7 @@ export function MainToolbar({
               why={typeof ready[tool.key] === 'string'}
               active={WORKING_TOOLS.has(tool.key) || tool.key in ready ? active === tool.key : undefined}
               onClick={() => onTool(tool.key)}
+              onContextMenu={onToolMenu ? () => onToolMenu(tool.key) : undefined}
               size="w-9 h-9"
             />
           ))}
@@ -860,10 +878,12 @@ export interface PlateActions {
   onFront?: () => void;
   /** Auto orient objects on current plate (absent: the plate is empty, or the model can't be rewritten) */
   onOrient?: () => void;
+  /** Arrange objects on current plate (absent: it can't be arranged now) */
+  onArrange?: () => void;
 }
 
 /** The plate's own buttons (PartPlate.cpp): remove (not the last plate), auto orient, lock / unlock, its name, to the
- * front (not the first), its settings; arrange comes later. Without ``plate`` (a file
+ * front (not the first), arrange (Orca's own, in the slicer sidecar), its settings. Without ``plate`` (a file
  * that can't be saved) only "Customize current plate" works, showing the plate's settings. */
 export function PlateButtons({ layout, onSettings, plate }: { layout: OrcaLayout; onSettings: () => void; plate?: PlateActions }) {
   const tr = useOrcaText(layout);
@@ -874,6 +894,7 @@ export function PlateButtons({ layout, onSettings, plate }: { layout: OrcaLayout
     name: plate?.onName,
     front: plate && plate.index > 1 ? plate.onFront : undefined,
     orient: plate?.onOrient,
+    arrange: plate?.onArrange,
   };
   return (
     <div className="absolute right-2 top-12 flex flex-col gap-1" role="toolbar" aria-label={tr('Plate')}>

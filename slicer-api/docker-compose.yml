@@ -20,14 +20,20 @@
 # First build pulls the sidecar source over git (~5 min — downloads the
 # BambuStudio AppImage, ~220 MB) and caches the image locally.
 # Subsequent runs reuse the cache. Pin the slicer versions via .env.
+#
+# The OrcaSlicer image builds from ./orca: the same sidecar source, pinned
+# to a commit (SLICER_API_COMMIT), with Printbuddy's /arrange route added
+# (the 3MF Workspace's Arrange runs Orca's own CLI there; orca/README.md).
 
 services:
   orca-slicer-api:
     build:
-      context: "${SLICER_API_BUILD_CONTEXT}"
+      context: ./orca
       dockerfile: Dockerfile
       args:
         ORCA_VERSION: "${ORCA_VERSION:-2.3.2}"
+        SLICER_API_REPO: "${SLICER_API_REPO:-https://github.com/vmhomelab/orca-slicer-api.git}"
+        SLICER_API_COMMIT: "${SLICER_API_COMMIT:-1415ea2fc02e642b7a9b6b8ce905661de86ac8f6}"
     image: printbuddy-orca-slicer-api:orca${ORCA_VERSION:-2.3.2}
     container_name: orca-slicer-api
     restart: unless-stopped

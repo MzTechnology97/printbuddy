@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -23,10 +24,13 @@ from backend.app.api.routes import library as lib
 from backend.app.core.auth import require_permission_if_auth_enabled
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
+from backend.app.farm.detect import SLICER_ORCA
 from backend.app.farm.models import FarmLibraryFile
 from backend.app.farm.nas.access import read_file, run as access_run
 from backend.app.farm.plates.service import output_grams
+from backend.app.farm.slicing import sidecar_url
 from backend.app.farm.workspace import (
+    arrange as ws_arrange,
     object_settings,
     placement,
     plate_settings,
@@ -390,3 +394,123 @@ async def save_copy(
                     leftover.unlink(missing_ok=True)
             raise
     return {"library_file_id": saved.id, "filename": saved.filename, "folder_id": saved.folder_id, "changes": applied}
+
+
+# ---- Arrange: OrcaSlicer's own, in the slicer sidecar ---------------------------------------------------------------
+
+_one_arrange = asyncio.Semaphore(1)  # the sidecar slices a plate it arranges alone: one at a time
+ARRANGE_TIMEOUT = 660.0  # s: the sidecar's own limit (10 min) and a little
+
+
+class ArrangeRequest(CopyRequest):
+    """The project as the workspace has it (its unsaved edits, as a copy would save them) and Orca's arrange
+    options."""
+
+    changes: dict[str, Value | list[Value]] = Field(default_factory=dict)
+    arrange: ws_arrange.ArrangeOptions = Field(default_factory=ws_arrange.ArrangeOptions)
+
+
+def _arrange_input(lib_file: LibraryFile, data: bytes, body: ArrangeRequest, targets: list[dict]) -> tuple[bytes, dict]:
+    """Blocking: the project with the draft applied (as a copy, never written to the library), each instance on a
+    plate with an identify_id, and which instance each id is."""
+    edited = (
+        body.changes
+        or body.presets
+        or body.transforms
+        or body.part_transforms
+        or body.object_settings
+        or body.plate_settings
+        or body.instance_plates
+    )
+    if edited:
+        tmp = lib.get_library_files_dir() / f".{uuid.uuid4().hex}.arrange.part"
+        try:
+            _build_copy(
+                lib_file,
+                data,
+                body.changes,
+                tmp,
+                targets,
+                body.transforms,
+                body.part_transforms,
+                body.object_settings,
+                body.plate_settings,
+                [],
+                body.instance_plates,
+            )
+            data = tmp.read_bytes()
+        finally:
+            tmp.unlink(missing_ok=True)
+    try:
+        return ws_arrange.prepare(data)
+    except (ws_arrange.InvalidArrange, project.ArchiveError) as exc:
+        raise HTTPException(status_code=422, detail=f"This project can't be arranged: {exc}"[:500]) from exc
+
+
+def _sidecar_reason(resp: httpx.Response) -> str:
+    try:
+        return str(resp.json().get("message") or resp.text)[:300]
+    except ValueError:
+        return resp.text[:300]
+
+
+@router.post("/files/{file_id}/arrange")
+async def arrange_objects(
+    file_id: int,
+    body: ArrangeRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_UPLOAD)),
+):
+    """OrcaSlicer's Arrange (every plate, or one) on the project as the workspace has it, run by Orca's own CLI in the
+    OrcaSlicer sidecar (its ``/arrange``, slicer-api/orca); the arranged instances as placements (``placements``:
+    ``{object_id, instance, matrix, plate}``). Nothing is saved: the workspace takes them as its own move.
+
+    Refused while plates are added, removed or moved and not saved yet (the sidecar arranges the file's plates), and
+    when the objects need more plates than the project has (add them, then arrange again)."""
+    if body.plate_structure:
+        raise HTTPException(
+            status_code=422, detail="Save the copy with its plates added, removed or moved first, then arrange it"
+        )
+    lib_file = await _library_3mf(db, file_id)
+    targets = [await switch_target(db, ref) for ref in body.presets]
+    url = await sidecar_url(db, SLICER_ORCA)
+    if not url:
+        raise HTTPException(status_code=503, detail="No OrcaSlicer sidecar is set up (Settings, Slicer)")
+    async with _one_arrange:
+        data, sha = await _read(lib_file)
+        if sha != body.base_sha256:
+            raise HTTPException(
+                status_code=409, detail="The file changed since it was opened: reload it, then edit again"
+            )
+        sent, identities = await asyncio.to_thread(_arrange_input, lib_file, data, body, targets)
+        del data
+        try:
+            async with httpx.AsyncClient(timeout=ARRANGE_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{url.rstrip('/')}/arrange",
+                    data=body.arrange.form(),
+                    files={"file": ("project.3mf", sent, "model/3mf")},
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"The OrcaSlicer sidecar can't be reached: {exc}"[:300]
+            ) from exc
+        if resp.status_code == 404:
+            raise HTTPException(
+                status_code=502,
+                detail="The OrcaSlicer sidecar can't arrange: it needs Printbuddy's image (slicer-api/orca)",
+            )
+        if resp.status_code >= 400:
+            status = 422 if resp.status_code < 500 else 502
+            raise HTTPException(status_code=status, detail=f"OrcaSlicer couldn't arrange: {_sidecar_reason(resp)}")
+        try:
+            placed, plates = await asyncio.to_thread(ws_arrange.read_result, sent, identities, resp.content)
+        except (ws_arrange.InvalidArrange, project.ArchiveError) as exc:
+            raise HTTPException(status_code=502, detail=f"OrcaSlicer's arrangement can't be read: {exc}"[:500]) from exc
+    have = await asyncio.to_thread(ws_arrange.plate_count, sent)
+    if plates > have:
+        raise HTTPException(
+            status_code=422,
+            detail=f"The objects need {plates} plates: add {plates - have} more, save the copy, then arrange again",
+        )
+    return {"placements": placed, "plates": plates}

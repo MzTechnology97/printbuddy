@@ -206,6 +206,13 @@ export const workspaceApi = {
       body: JSON.stringify({ settings, presets }),
     }),
   get: (fileId: number) => farmRequest<WorkspaceDocument>(`/workspace/files/${fileId}`),
+  /** OrcaSlicer's own Arrange in the slicer sidecar, on the project as the draft has it (the save's fields); the
+   * arranged instances, nothing saved. */
+  arrange: (fileId: number, body: Record<string, unknown>) =>
+    farmRequest<{ placements: { object_id: string; instance: number; matrix: number[]; plate: number }[]; plates: number }>(
+      `/workspace/files/${fileId}/arrange`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
   saveCopy: (
     fileId: number,
     baseSha256: string,
