@@ -16,7 +16,16 @@ import { PrintModal } from '../../components/PrintModal';
 import { useSliceJobTracker } from '../../contexts/SliceJobTrackerContext';
 import { useToast } from '../../contexts/ToastContext';
 import { farmProjectApi } from '../projectSliceApi';
-import { type OfferedPreset, type PresetRef, type SwitchReason, type WorkspaceDocument, type WorkspacePlate, workspaceApi } from './api';
+import {
+  type LayerRange,
+  type OfferedPreset,
+  type PresetRef,
+  type SwitchReason,
+  type WorkspaceDocument,
+  type WorkspaceObject,
+  type WorkspacePlate,
+  workspaceApi,
+} from './api';
 import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
@@ -79,6 +88,7 @@ import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { FILAMENT_KEY, type Selection, instancesOf, ownSettings, ownToSave } from './objects';
+import { defaultOptions, firstRanges, rangeLabel, rangesOf, rangesToSave, withRanges } from './ranges';
 import { ObjectTableDialog } from './ObjectTable';
 import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
 import {
@@ -261,7 +271,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   // the plates as the unsaved adds, removals, moves and duplicates leave them, the instances moved onto another plate
   // on it, with their unsaved names (plates.ts)
@@ -297,6 +307,23 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     },
     [own, setOwnTargets],
   );
+  // the height ranges (ranges.ts): a new range's layer height is the object's own, else the process's as edited
+  const rangeEditing = useMemo(() => {
+    const value = (key: string) => (key in draft ? draft[key] : settings.find((s) => s.key === key)?.value);
+    const processLayerHeight = String(value('layer_height') ?? '0.2');
+    const minLayer = value('min_layer_height');
+    return {
+      edits: ranges,
+      set: (obj: WorkspaceObject, next: LayerRange[], key: string | null = null) => setRanges((r) => withRanges(r, obj, next), key),
+      defaults: (obj: WorkspaceObject) => defaultOptions(obj, own, processLayerHeight),
+      // get_min_layer_height: the printer's, per extruder (0 and 1 the first); libslic3r's default 0.07 when none
+      minLayerHeight: (extruder: number) => {
+        const list = Array.isArray(minLayer) ? minLayer : minLayer != null ? [minLayer] : [];
+        const n = Number(list[Math.max(0, extruder - 1)] ?? list[0]);
+        return Number.isFinite(n) ? n : 0.07;
+      },
+    };
+  }, [ranges, setRanges, own, draft, settings]);
   const ownEditing = useMemo(
     () => ({
       edits: own,
@@ -304,8 +331,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       setMany: setOwnMany,
       setTargets: setOwnTargets,
       plate: { apply: applyPlate, customize: (p: WorkspacePlate) => setPlateDialog({ plate: p.index, onlyLayers: true }) },
+      ranges: doc.cannot_place ? undefined : rangeEditing,
     }),
-    [own, setOwn, setOwnMany, setOwnTargets, applyPlate],
+    [own, setOwn, setOwnMany, setOwnTargets, applyPlate, rangeEditing, doc.cannot_place],
   );
   livePresets.current = { settings, draft, switched, switchTo };
   const [mode, setMode] = useState<Mode>('prepare');
@@ -454,6 +482,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       return { id: `plate${e.plate}:${e.key}`, section: `${o('Plate')} ${e.plate}: ${o(labels[e.key] ?? option?.label ?? e.key)}`, name };
     })];
   }, [own, plateOps, layout, i18n.language, colours.length]);
+  const rangeRows = useMemo(
+    () =>
+      rangesToSave(ranges).map((e) => {
+        const o = (text: string) => orcaText(layout, text, i18n.language);
+        const obj = doc.objects.find((x) => x.id === e.object_id);
+        return {
+          id: `ranges:${e.object_id}`,
+          section: `${obj?.name ?? e.object_id}: ${o('Height Range Modifier')}`,
+          name: e.ranges.length ? e.ranges.map((r) => rangeLabel(r, o('Range'), o('mm'))).join('; ') : t('farm.workspace.save.noRanges'),
+        };
+      }),
+    [ranges, doc.objects, layout, i18n.language, t],
+  );
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -860,6 +901,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         part_transforms: saved.parts,
         object_settings: ownToSave(own),
         plate_settings: plateToSave(own),
+        layer_ranges: rangesToSave(ranges),
         instance_plates: Object.entries(onPlate)
           .filter((e): e is [string, number] => typeof e[1] === 'number')
           .map(([key, p]) => ({ object_id: key.split(':')[0], instance: Number(key.split(':')[1]), plate: p })),
@@ -1049,6 +1091,17 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
+          // layers_editing: the object's first range (0-2 mm) when it has none, then its "Layers" row selected
+          heightRange:
+            doc.editable && !doc.cannot_place
+              ? () => {
+                  const obj = doc.objects.find((o) => o.id === sel.id);
+                  if (!obj) return;
+                  if (!rangesOf(obj, ranges).length) rangeEditing.set(obj, firstRanges(rangeEditing.defaults(obj)));
+                  setPerObject(true);
+                  select({ ...objSel, layers: true, range: null });
+                }
+              : undefined,
         },
         doc.editable && !doc.cannot_place ? alignMenu(alignSelection(menuInstances ?? selectedItems(view, [sel.id], null), [], false)) : undefined,
       ),
@@ -1373,6 +1426,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             ? { object_id, instance: Number(instance), plate: now }
             : { object_id, instance: Number(instance), plate: now, new_plate: true };
         }),
+        rangesToSave(ranges),
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1942,6 +1996,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             }),
             // the objects' (parts') own settings: the new value, or the project's again
             ...ownRows,
+            ...rangeRows,
             ...plateRows,
           ]}
           invalid={[...invalid, ...ownRows.filter((r) => r.invalid).map((r) => r.id)]}

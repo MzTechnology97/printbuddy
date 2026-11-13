@@ -6,8 +6,18 @@ import type { OrcaLayout } from './orcaLayout';
 
 export type Selection =
   | { kind: 'plate'; plate: number }
-  /** an object; ``instance``: one of its instances (its number from 0); ``part`` / ``partId``: one of its parts */
-  | { kind: 'object'; id: string; plate: number | null; part?: string | null; partId?: string | null; instance?: number | null }
+  /** an object; ``instance``: one of its instances (its number from 0); ``part`` / ``partId``: one of its parts;
+   * ``layers``: its "Layers" row (its height ranges), ``range`` one of them (its place in ranges.ts ``rangesOf``) */
+  | {
+      kind: 'object';
+      id: string;
+      plate: number | null;
+      part?: string | null;
+      partId?: string | null;
+      instance?: number | null;
+      layers?: boolean;
+      range?: number | null;
+    }
   | null;
 
 /** Where each object's instances are: plate and instance number (from 0), in the instances' order. A plate

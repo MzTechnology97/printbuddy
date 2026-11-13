@@ -32,6 +32,8 @@ export interface ObjectView {
   own: Record<string, string>;
   /** a part or modifier: the part keys only (TabPrintPart) */
   part?: boolean;
+  /** a height range: its layer height and the part keys (TabPrintLayer) */
+  range?: boolean;
 }
 
 interface Props {
@@ -93,11 +95,14 @@ export function SettingsPanel({
   const tr = (text: string) => orcaText(layout, text, lang);
   const editable = fileEditable;
   const forPart = !!object?.part;
+  const forRange = !!object?.range;
   const pages = useMemo(() => {
     const all = layout.pages[section];
     if (!object) return all;
     // an object: OrcaSlicer's object pages hold only what an object (a part) can have of its own
-    const allowed = new Set((forPart ? layout.region_keys : null) ?? layout.object_keys ?? []);
+    const allowed = new Set(
+      forRange ? ['layer_height', ...(layout.region_keys ?? [])] : ((forPart ? layout.region_keys : null) ?? layout.object_keys ?? []),
+    );
     const own = all
       .map((p) => ({
         ...p,
@@ -107,7 +112,7 @@ export function SettingsPanel({
     const frequent = FREQUENT_KEYS.filter((k) => allowed.has(k)); // a part: density and walls (TabPrintModel::build)
     return [{ title: FREQUENT_TAB, icon: '', groups: [{ title: '', icon: null, keys: frequent }] }, ...own];
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the pages depend on whether there is an object, not its values
-  }, [layout, section, !!object, forPart]);
+  }, [layout, section, !!object, forPart, forRange]);
   const simple = mode === 'simple';
   const withUnknown = showUnknown && !simple && !object;
   // opens on the first page with something to change (the printer's first pages are mostly read only)

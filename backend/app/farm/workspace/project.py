@@ -33,6 +33,8 @@ from backend.app.farm.detect import (
 from backend.app.utils.xml_prefixes import declared
 
 MODEL_SETTINGS_ENTRY = "Metadata/model_settings.config"
+LAYER_RANGES_ENTRY = "Metadata/layer_config_ranges.xml"  # bbs_3mf LAYER_CONFIG_RANGES_FILE: the height ranges
+ADDABLE = frozenset({LAYER_RANGES_ENTRY})  # entries a copy may add when the project has none
 
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024  # the source is read whole; farm 3MFs are well under 50 MB
 MAX_ENTRIES = 10_000
@@ -237,14 +239,24 @@ def classify(filename: str, zf: zipfile.ZipFile, settings: dict | None) -> tuple
     return kind, slicer, meta.get("Application") or None
 
 
-def write_copy(data: bytes, settings: dict, dest: Path, replaced: dict[str, bytes] | None = None) -> None:
+def write_copy(
+    data: bytes,
+    settings: dict,
+    dest: Path,
+    replaced: dict[str, bytes] | None = None,
+    added: dict[str, bytes] | None = None,
+) -> None:
     """Write to ``dest`` the archive with ``project_settings.config`` replaced by ``settings`` and each entry of
-    ``replaced`` (an entry the archive has) by its bytes, every other entry unchanged, and check it reads back.
-    ``ArchiveError`` for a damaged entry; ``dest`` is then partial."""
+    ``replaced`` (an entry the archive has) by its bytes, each of ``added`` (one of ``ADDABLE`` it hasn't) after the
+    others, every other entry unchanged, and check it reads back. ``ArchiveError`` for a damaged entry; ``dest`` is
+    then partial."""
     replaced = replaced or {}
+    added = added or {}
     zin = open_archive(data)
     if set(replaced) - set(zin.namelist()) or PROJECT_SETTINGS_ENTRY in replaced:
         raise ArchiveError("the copy can only replace entries the archive has")
+    if set(added) - ADDABLE or set(added) & set(zin.namelist()):
+        raise ArchiveError("the copy can only add entries it may write and the archive hasn't")
     # settings with the same values keep their bytes (Bambu Studio's line breaks, say): a copy that only places
     # instances changes nothing else
     same_settings = read_settings(zin) == settings
@@ -263,21 +275,28 @@ def write_copy(data: bytes, settings: dict, dest: Path, replaced: dict[str, byte
                         zout.open(info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as dst,
                     ):
                         shutil.copyfileobj(src, dst, _COPY_CHUNK)
-        _check_copy(zin, dest, settings, replaced)
+            for name, body in added.items():
+                zout.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), body, zipfile.ZIP_DEFLATED)
+        _check_copy(zin, dest, settings, replaced, added)
     except _ENTRY_ERRORS as exc:
         raise ArchiveError(f"an entry of the archive cannot be read: {exc}") from exc
 
 
-def _check_copy(original: zipfile.ZipFile, copy: Path, settings: dict, replaced: dict[str, bytes]) -> None:
-    """The copy reads back: same entries in the same order, same bytes (CRC) but the settings, which parse, and
-    the replaced entries, which hold what was written."""
+def _check_copy(
+    original: zipfile.ZipFile, copy: Path, settings: dict, replaced: dict[str, bytes], added: dict[str, bytes]
+) -> None:
+    """The copy reads back: same entries in the same order (the added ones after them), same bytes (CRC) but the
+    settings, which parse, and the replaced and added entries, which hold what was written."""
     with open_archive(copy) as zc:
         if zc.testzip() is not None:
             raise ArchiveError("the copy failed its integrity check")
         before, after = original.infolist(), zc.infolist()
-        if [i.filename for i in before] != [i.filename for i in after]:
+        if [i.filename for i in before] + list(added) != [i.filename for i in after]:
             raise ArchiveError("the copy does not hold the same entries")
-        for a, b in zip(before, after, strict=True):
+        for name, body in added.items():
+            if zc.read(name) != body:
+                raise ArchiveError(f"{name} does not read back in the copy")
+        for a, b in zip(before, after[: len(before)], strict=True):
             if a.filename in replaced:
                 if zc.read(b) != replaced[a.filename]:
                     raise ArchiveError(f"{a.filename} does not read back in the copy")

@@ -179,6 +179,10 @@ ICONS = [
     "objlist_support_painting",
     "objlist_color_painting",
     "objlist_sinking",
+    # the height ranges (ObjectDataViewModel LayerIcon, GUI_ObjectLayers.cpp's remove / add buttons)
+    "height_range_layer",
+    "delete",
+    "add",
     "help",
     # the object table (ParamsPanel's "View all object's settings", GUI_ObjectTable.cpp's reset icon)
     "table",
@@ -287,6 +291,12 @@ UI_STRINGS = [
     "Align to Y axis",
     "Arranging...",
     "Arranging done.",
+    # Height Range Modifier (ObjectDataViewModel's "Layers" and "Range %.2f-%.2f (mm)", GUI_ObjectLayers.cpp)
+    "Layers",
+    "Range",
+    "Remove height range",
+    "Add height range",
+    "Invalid numeric.",
     "This plate is locked.\nCannot auto-arrange on this plate.",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",

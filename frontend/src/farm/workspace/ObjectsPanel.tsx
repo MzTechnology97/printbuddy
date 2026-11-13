@@ -6,11 +6,13 @@
 // metadata, read only until the plates' batch) or an object's (part's) settings by tab, its own values first,
 // editable as OrcaSlicer's object and part tabs: a value changed becomes its own, the reset arrow drops it, and
 // the cog of the list (colEditing) drops them all. The copy writes them in model_settings.config.
+// An object's height ranges (Height Range Modifier) show under it as "Layers" -> "Range a-b (mm)": the Layers row
+// edits them all (GUI_ObjectLayers.cpp), a range its own Z and its settings (TabPrintLayer).
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
-import type { WorkspaceDocument, WorkspaceObject, WorkspacePlate, WorkspaceSetting } from './api';
-import { type Draft, ON } from './draft';
+import type { LayerRange, WorkspaceDocument, WorkspaceObject, WorkspacePlate, WorkspaceSetting } from './api';
+import { type Draft, ON, toLocaleDecimal } from './draft';
 import { type OrcaLayout, orcaFormat, orcaIcon, orcaPlural, orcaText } from './orcaLayout';
 import { EnumSelect, SettingControl } from './SettingControl';
 import type { PlateValues } from './PlateSettings';
@@ -28,6 +30,7 @@ import {
   plateOwn,
   targetOwn,
 } from './objects';
+import { type RangeEdits, addAfter, editMax, editMin, parseZ, rangeLabel, rangesOf, removeRange, withOption } from './ranges';
 import type { ObjectStats } from './viewTools';
 import '../i18n';
 
@@ -118,6 +121,19 @@ export interface OwnEditing {
   setTargets?: (values: Record<string, Record<string, string | null | undefined>>) => void;
   /** a plate's own settings (plates.ts): set some (one undo step), or open the dialog's filament sequences */
   plate?: { apply: (plate: WorkspacePlate, values: PlateValues) => void; customize: (plate: WorkspacePlate) => void };
+  /** the objects' height ranges (ranges.ts) */
+  ranges?: RangeEditing;
+}
+
+/** Editing the objects' height ranges: the unsaved edits and how to make them. */
+export interface RangeEditing {
+  edits: RangeEdits;
+  /** an object's ranges as they are to be; ``key``: the field typed in (its keystrokes make one undo step) */
+  set: (obj: WorkspaceObject, next: LayerRange[], key?: string | null) => void;
+  /** a new range's settings (get_default_layer_config) */
+  defaults: (obj: WorkspaceObject) => Record<string, string>;
+  /** the printer's minimum layer height of a filament (0: the first), splitting a range */
+  minLayerHeight: (extruder: number) => number;
 }
 
 const PART_TABS = new Set(['normal_part', 'modifier_part']); // ParamsPanel's TabPrintPart; the others have no tab
@@ -195,9 +211,10 @@ export function ObjectsPanel({
     }
   };
   // OrcaSlicer's Fila. column: the list of a row (an object, a part, a modifier) and keys 0-9 on the selection
-  const [picker, setPicker] = useState<{ obj: WorkspaceObject; partId: string | null; at: { x: number; y: number } } | null>(
+  const [picker, setPicker] = useState<{ obj: WorkspaceObject; partId: string | null; range?: number; at: { x: number; y: number } } | null>(
     null,
   );
+  const rangeEdits = editing?.ranges?.edits;
   const canPick = !!editing?.setTargets && colours.length > 0;
   const pick = (obj: WorkspaceObject, partId: string | null, n: number, how: 'column' | 'keys') =>
     editing?.setTargets?.(filamentEdits(obj, partId, n, how, edits));
@@ -334,6 +351,9 @@ export function ObjectsPanel({
                     const showParts = obj.parts.length > 1 || obj.parts.some((p) => p.type && p.type !== 'normal_part') || obj.overrides.some((o) => o.part && o.part !== obj.name);
                     const placed = instances.get(id) ?? [];
                     const showInstances = placed.length > 1;
+                    const ranges = rangesOf(obj, rangeEdits);
+                    const layersKey = `${objKey}-l`;
+                    const layersSelected = selected?.kind === 'object' && selected.id === id && !!selected.layers && selected.range == null;
                     const s = stats.get(id);
                     const n = filamentOf(obj, null, edits);
                     // an instance picked in the list lights its own row (one picked in 3D, the object's when it has one instance)
@@ -345,7 +365,7 @@ export function ObjectsPanel({
                       <li
                         key={objKey}
                         role="treeitem"
-                        aria-expanded={showParts || showInstances ? open(objKey) : undefined}
+                        aria-expanded={showParts || showInstances || ranges.length > 0 ? open(objKey) : undefined}
                         aria-selected={objSelected}
                         aria-level={2}
                       >
@@ -357,7 +377,7 @@ export function ObjectsPanel({
                           }}
                           onContextMenu={(e) => menu(e, sel)}
                         >
-                          {caret(objKey, showParts || showInstances)}
+                          {caret(objKey, showParts || showInstances || ranges.length > 0)}
                           {s && s.openEdges > 0 && (
                             <img src={orcaIcon('obj_warning')} alt={tr('Errors')} title={meshTip(s.openEdges)} className="w-4 h-4 flex-shrink-0" />
                           )}
@@ -430,6 +450,47 @@ export function ObjectsPanel({
                               })}
                           </ul>
                         )}
+                        {ranges.length > 0 && open(objKey) && (
+                          <ul role="group">
+                            <li role="treeitem" aria-expanded={open(layersKey)} aria-selected={layersSelected} aria-level={3}>
+                              <div
+                                className={`${row(layersSelected)} pl-9`}
+                                onClick={() => onSelect({ ...sel, layers: true, range: null })}
+                              >
+                                {caret(layersKey, true)}
+                                <img src={orcaIcon('height_range_layer')} alt="" className="w-3.5 h-3.5" aria-hidden />
+                                <span className="flex-1 truncate">{tr('Layers')}</span>
+                              </div>
+                              {open(layersKey) && (
+                                <ul role="group">
+                                  {ranges.map((r, k) => {
+                                    const rangeSelected = selected?.kind === 'object' && selected.id === id && !!selected.layers && selected.range === k;
+                                    const own = Number(r.options.extruder ?? 0);
+                                    return (
+                                      <li key={`${r.min_z}-${r.max_z}`} role="treeitem" aria-selected={rangeSelected} aria-level={4}>
+                                        <div
+                                          className={`${row(rangeSelected)} pl-14`}
+                                          onClick={() => onSelect({ ...sel, layers: true, range: k })}
+                                        >
+                                          <img src={orcaIcon('height_range_layer')} alt="" className="w-3.5 h-3.5" aria-hidden />
+                                          <span className="flex-1 truncate">{rangeLabel(r, tr('Range'), tr('mm'))}</span>
+                                          <FilamentCell
+                                            value={own}
+                                            // 0: the object's filament
+                                            shown={own || n}
+                                            colours={colours}
+                                            label={`${tr('Filament')} ${own || tr('default')}`}
+                                            onOpen={editing?.ranges && colours.length ? (at) => setPicker({ obj, partId: null, range: k, at }) : undefined}
+                                          />
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              )}
+                            </li>
+                          </ul>
+                        )}
                         {showInstances && open(objKey) && (
                           <ul role="group">
                             <li role="treeitem" aria-expanded={open(`${objKey}-i`)} aria-level={3}>
@@ -479,12 +540,21 @@ export function ObjectsPanel({
           at={picker.at}
           colours={colours}
           // ExtraRenderers.cpp: "default" for a modifier; an object's and a part's are the filaments
-          withDefault={!!picker.partId && picker.obj.parts.find((p) => p.id === picker.partId)?.type === 'modifier_part'}
-          current={filamentOf(picker.obj, picker.partId, edits)}
+          withDefault={
+            picker.range != null || (!!picker.partId && picker.obj.parts.find((p) => p.id === picker.partId)?.type === 'modifier_part')
+          }
+          current={
+            picker.range != null
+              ? Number(rangesOf(picker.obj, rangeEdits)[picker.range]?.options.extruder ?? 0)
+              : filamentOf(picker.obj, picker.partId, edits)
+          }
           defaultLabel={tr('default')}
           label={tr('Fila.')}
           onPick={(n) => {
-            pick(picker.obj, picker.partId, n, 'column');
+            const re = editing?.ranges;
+            if (picker.range != null && re) {
+              re.set(picker.obj, withOption(rangesOf(picker.obj, re.edits), picker.range, 'extruder', String(n), re.defaults(picker.obj)));
+            } else pick(picker.obj, picker.partId, n, 'column');
             setPicker(null);
           }}
           onClose={() => setPicker(null)}
@@ -493,6 +563,19 @@ export function ObjectsPanel({
       <div className="flex-1 min-h-[16rem]">
         {selectedPlate ? (
           <PlateSettings key={selectedPlate.index} layout={layout} plate={selectedPlate} byKey={byKey} draft={draft} editing={editing} />
+        ) : selectedObject && selected?.kind === 'object' && selected.layers ? (
+          <RangeSettings
+            key={`${selected.id}-l${selected.range ?? ''}`}
+            layout={layout}
+            doc={doc}
+            draft={draft}
+            obj={selectedObject}
+            range={selected.range ?? null}
+            editing={editing?.ranges}
+            onSelectRange={(range) =>
+              onSelect(range === undefined ? { kind: 'object', id: selected.id, plate: selected.plate } : { ...selected, range })
+            }
+          />
         ) : selectedObject && selected?.kind === 'object' ? (
           <ObjectSettings
             key={`${selected.id}-${selected.partId ?? selected.part ?? ''}`}
@@ -615,6 +698,172 @@ function ObjectSettings({
         </p>
       }
     />
+  );
+}
+
+/** A Z of a range (LayerRangeEditor): typed, taken on Enter or when it loses focus; a value it can't take shows
+ * Orca's "Invalid numeric." and goes back. */
+function ZInput({ value, label, onCommit, onInvalid, disabled }: {
+  value: number;
+  label: string;
+  /** false: the range didn't change (the same value, or an end below the start): the field shows its value again */
+  onCommit: (z: number) => boolean;
+  onInvalid: () => void;
+  disabled: boolean;
+}) {
+  const { i18n } = useTranslation();
+  const shown = toLocaleDecimal(String(Number(value.toFixed(6))), i18n.language);
+  const [text, setText] = useState(shown);
+  const commit = () => {
+    const z = parseZ(text);
+    if (z === null) onInvalid();
+    if (z === null || !onCommit(z)) setText(shown);
+  };
+  return (
+    <span className="relative flex-1 min-w-0">
+      <input
+        type="text"
+        inputMode="decimal"
+        aria-label={label}
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === 'Enter' && commit()}
+        className="w-full h-6 bg-bambu-dark border border-bambu-dark-tertiary rounded pl-1.5 pr-7 text-[12px] text-white disabled:opacity-60"
+      />
+      <span className="absolute right-1.5 top-1 text-[11px] text-bambu-gray pointer-events-none">mm</span>
+    </span>
+  );
+}
+
+/** The "Layers" row's editor (ObjectLayers: every range, or the selected one) and a range's settings (TabPrintLayer). */
+function RangeSettings({
+  layout,
+  doc,
+  draft,
+  obj,
+  range,
+  editing,
+  onSelectRange,
+}: {
+  layout: OrcaLayout;
+  doc: WorkspaceDocument;
+  draft: Draft;
+  obj: WorkspaceObject;
+  /** null: the Layers row, all of them */
+  range: number | null;
+  editing?: RangeEditing;
+  /** the range now selected after an edit moved it (null: the Layers row; undefined: the object, none left) */
+  onSelectRange: (range: number | null | undefined) => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const tr = (text: string) => orcaText(layout, text, i18n.language);
+  const [invalid, setInvalid] = useState(false);
+  const ranges = rangesOf(obj, editing?.edits);
+  const defaults = editing?.defaults(obj) ?? {};
+  const current = range != null ? ranges[range] : undefined;
+  const shown = range == null ? ranges.map((r, k) => [r, k] as const) : current ? [[current, range] as const] : [];
+  /** the ranges as edited; the selected range follows its edit to where it is now (Orca re-selects it) */
+  const apply = (next: LayerRange[] | null, moved?: LayerRange, key?: string) => {
+    if (!next || !editing) return false;
+    editing.set(obj, next, key);
+    if (range != null && moved) onSelectRange(next.indexOf(moved));
+    return true;
+  };
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="px-3 pt-1.5 pb-2 border-b border-bambu-dark-tertiary space-y-1" data-testid="height-ranges">
+        {shown.map(([r, k]) => (
+          <div key={`${k}-${r.min_z}-${r.max_z}`} className="flex items-center gap-1.5 text-[12px] text-bambu-gray-light">
+            <img src={orcaIcon('height_range_layer')} alt="" className="w-3.5 h-3.5" aria-hidden />
+            <span className="w-14 flex-shrink-0">{tr('Range')}</span>
+            <ZInput
+              value={r.min_z}
+              label={`${rangeLabel(r, tr('Range'), tr('mm'))}: Z min`}
+              disabled={!editing}
+              onInvalid={() => setInvalid(true)}
+              onCommit={(z) => {
+                setInvalid(false);
+                const next = editMin(ranges, k, z);
+                return apply(next, next?.find((x) => x.options === r.options && x.min_z === z));
+              }}
+            />
+            <span aria-hidden>-</span>
+            <ZInput
+              value={r.max_z}
+              label={`${rangeLabel(r, tr('Range'), tr('mm'))}: Z max`}
+              disabled={!editing}
+              onInvalid={() => setInvalid(true)}
+              onCommit={(z) => {
+                setInvalid(false);
+                const next = editMax(ranges, k, z);
+                return apply(next, next?.find((x) => x.options === r.options && x.max_z === z));
+              }}
+            />
+            {editing && (
+              <>
+                <button
+                  type="button"
+                  title={tr('Remove height range')}
+                  aria-label={`${tr('Remove height range')}: ${rangeLabel(r, tr('Range'), tr('mm'))}`}
+                  onClick={() => {
+                    const next = removeRange(ranges, k);
+                    editing.set(obj, next);
+                    // del_layer_range: the last one gone, the object is selected
+                    if (!next.length) onSelectRange(undefined);
+                    else if (range != null) onSelectRange(null);
+                  }}
+                  className="w-5 h-5 flex-shrink-0 flex items-center justify-center rounded hover:bg-bambu-dark-tertiary"
+                >
+                  <img src={orcaIcon('delete')} alt="" className="w-3.5 h-3.5" aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  title={tr('Add height range')}
+                  aria-label={`${tr('Add height range')}: ${rangeLabel(r, tr('Range'), tr('mm'))}`}
+                  onClick={() => {
+                    const next = addAfter(ranges, k, defaults, editing.minLayerHeight);
+                    if (next) editing.set(obj, next);
+                    if (range != null) onSelectRange(null); // Orca selects the Layers row
+                  }}
+                  className="w-5 h-5 flex-shrink-0 flex items-center justify-center rounded hover:bg-bambu-dark-tertiary"
+                >
+                  <img src={orcaIcon('add')} alt="" className="w-3.5 h-3.5" aria-hidden />
+                </button>
+              </>
+            )}
+          </div>
+        ))}
+        {invalid && (
+          <p role="alert" className="text-[12px] text-red-400">
+            {tr('Invalid numeric.')}
+          </p>
+        )}
+        {!editing && <p className="text-[11px] text-bambu-gray">{t('farm.workspace.readOnly')}</p>}
+      </div>
+      {current && range != null && (
+        <div className="flex-1 min-h-0">
+          <SettingsPanel
+            layout={layout}
+            section="process"
+            settings={doc.settings}
+            draft={draft}
+            editable={!!editing}
+            onChange={(setting, value) =>
+              apply(withOption(ranges, range, setting.key, Array.isArray(value) ? value.join(',') : value, defaults), undefined, `${obj.id}|${range}|${setting.key}`)
+            }
+            onReset={(key) => apply(withOption(ranges, range, key, null, defaults))}
+            object={{ own: current.options, range: true }}
+            header={
+              <p className="text-[12px] text-bambu-gray truncate">
+                {obj.name} › {rangeLabel(current, tr('Range'), tr('mm'))}
+              </p>
+            }
+          />
+        </div>
+      )}
+    </div>
   );
 }
 

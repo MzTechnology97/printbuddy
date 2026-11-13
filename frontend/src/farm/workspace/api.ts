@@ -53,6 +53,16 @@ export interface WorkspaceObject {
   parts: { id: string | null; name: string | null; type: string | null; extruder?: string | null }[];
   /** its own settings and its parts' (``part_id``: whose) */
   overrides: { key: string; value: string; part: string | null; part_id?: string | null }[];
+  /** its height ranges (Height Range Modifier, layer_config_ranges.xml), in Orca's order */
+  ranges?: LayerRange[];
+}
+
+/** One of an object's height ranges: from ``min_z`` to ``max_z`` (mm) with its own settings (``layer_height``,
+ * ``extruder`` and the region's: TabPrintLayer). */
+export interface LayerRange {
+  min_z: number;
+  max_z: number;
+  options: Record<string, string>;
 }
 
 export interface WorkspacePlate {
@@ -225,6 +235,7 @@ export const workspaceApi = {
     plateSettings: PlateSettingEdit[] = [],
     plateStructure: { op: string; plate?: number; objects?: string[]; instances?: InstanceTransform[] }[] = [],
     instancePlates: { object_id: string; instance: number; plate: number; new_plate?: boolean }[] = [],
+    layerRanges: { object_id: string; ranges: LayerRange[] }[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
@@ -239,6 +250,7 @@ export const workspaceApi = {
         plate_settings: plateSettings,
         plate_structure: plateStructure,
         instance_plates: instancePlates,
+        layer_ranges: layerRanges,
       }),
     }),
 };

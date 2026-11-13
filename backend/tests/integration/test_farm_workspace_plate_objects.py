@@ -202,7 +202,9 @@ class TestDuplicate:
         new = out[out.index(b'"plater_id" value="3"') :]
         assert b"bed_type" not in new and b'<metadata key="identify_id" value="308"/>' in new
         assert cfg["wipe_tower_x"] == ["165", "170", "165"]
-        assert applied == [{"key": "plate", "op": "duplicate", "plate": 1, "plates": 3, "objects": 1}]
+        assert applied == [
+            {"key": "plate", "op": "duplicate", "plate": 1, "plates": 3, "objects": 1, "copies": [["2", "5"]]}
+        ]
 
     def test_every_instance_is_copied_and_the_objects_given_are_the_ones(self):
         out, _, model, _ = self.run({"op": "duplicate", "plate": 2, "objects": ["4"]})

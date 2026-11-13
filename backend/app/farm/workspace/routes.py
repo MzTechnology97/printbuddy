@@ -31,6 +31,7 @@ from backend.app.farm.plates.service import output_grams
 from backend.app.farm.slicing import sidecar_url
 from backend.app.farm.workspace import (
     arrange as ws_arrange,
+    layer_ranges,
     object_settings,
     placement,
     plate_settings,
@@ -38,6 +39,7 @@ from backend.app.farm.workspace import (
     project,
     settings as ws_settings,
 )
+from backend.app.farm.workspace.layer_ranges import RangeEdit
 from backend.app.farm.workspace.object_settings import MAX_EDITS as MAX_OBJECT_SETTINGS, ObjectSetting
 from backend.app.farm.workspace.plate_settings import MAX_EDITS as MAX_PLATE_SETTINGS, PlateSetting
 from backend.app.farm.workspace.plate_structure import MAX_OPS as MAX_PLATE_OPS, InstancePlate, PlateOp
@@ -70,6 +72,8 @@ class CopyRequest(BaseModel):
     plate_settings: list[PlateSetting] = Field(default_factory=list, max_length=MAX_PLATE_SETTINGS)
     # the plate each instance moved onto another lies on now (the file's plates), before ``plate_structure``
     instance_plates: list[InstancePlate] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
+    # objects' height ranges as they are to be (Height Range Modifier), each edited object's all of them
+    layer_ranges: list[RangeEdit] = Field(default_factory=list, max_length=500)
     # plates added, removed, moved to the front or duplicated, in order, before ``plate_settings`` (numbered after them)
     plate_structure: list[PlateOp] = Field(default_factory=list, max_length=MAX_PLATE_OPS)
 
@@ -103,13 +107,24 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         for o in obj["overrides"]:
             overrides.setdefault(o["key"], []).append({"object_id": obj["id"], "object": obj["name"], **o})
     editable = kind == project.KIND_PROJECT and not structure["warnings"]
+    cannot_place = project.cannot_place(zf) if editable else None
+    # each object's height ranges (layer_config_ranges.xml, numbered by the model's objects)
+    ranges: dict[str, list[dict]] = {}
+    ranges_xml = project._read_small(zf, project.LAYER_RANGES_ENTRY)
+    if ranges_xml and editable and cannot_place is None:
+        try:
+            ranges = layer_ranges.parse(ranges_xml, layer_ranges.object_order(project.read_model(zf)))
+        except (layer_ranges.InvalidLayerRanges, project.ArchiveError):
+            ranges = {}
+    for obj in structure["objects"]:
+        obj["ranges"] = ranges.get(obj["id"], [])
     return {
         "kind": kind,
         "slicer": slicer,
         "application": application,
         "editable": editable,
         # why Move can't be saved in a copy of this file (None: it can), so the 3D view says so before a move
-        "cannot_place": project.cannot_place(zf) if editable else None,
+        "cannot_place": cannot_place,
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
@@ -214,6 +229,7 @@ def _build_copy(
     plate_edits: list[PlateSetting] = (),
     plate_ops: list[PlateOp] = (),
     instance_plates: list[InstancePlate] = (),
+    range_edits: list[RangeEdit] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -236,7 +252,7 @@ def _build_copy(
             else None
         )
         model = original_model = None
-        if transforms or part_transforms or plate_ops or instance_plates:
+        if transforms or part_transforms or plate_ops or instance_plates or range_edits:
             model = original_model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
@@ -281,10 +297,27 @@ def _build_copy(
             placed += plated
         if settings_xml is not None and settings_xml != project._read_small(zf, project.MODEL_SETTINGS_ENTRY):
             replaced[project.MODEL_SETTINGS_ENTRY] = settings_xml
+        added: dict[str, bytes] = {}
+        ranges_xml = project._read_small(zf, project.LAYER_RANGES_ENTRY)
+        copied = [pair for a in placed if a.get("op") == "duplicate" for pair in a.get("copies", [])]
+        edits = list(range_edits)
+        if model is not None and (edits or (copied and ranges_xml)):
+            # a duplicated plate's copies take their objects' ranges (Model::add_object), as edited or as the file has
+            own = {e.object_id: e.ranges for e in edits}
+            in_file = layer_ranges.parse(ranges_xml, layer_ranges.object_order(model))
+            for source, new_id in copied:
+                ranges = own.get(source) or [layer_ranges.LayerRange(**r) for r in in_file.get(source, [])]
+                if ranges:
+                    edits.append(RangeEdit(object_id=new_id, ranges=ranges))
+            if edits:
+                filaments = len(new_cfg.get("filament_colour") or [None])
+                xml, ranged = layer_ranges.apply(ranges_xml, model, edits, new_cfg, slicer, filaments)
+                (replaced if ranges_xml is not None else added)[project.LAYER_RANGES_ENTRY] = xml
+                placed += [r for r in ranged if r["object_id"] in {e.object_id for e in range_edits}]
         applied = switched + applied + placed
         if not applied:
             raise HTTPException(status_code=400, detail="Nothing changed: no copy saved")
-        project.write_copy(data, new_cfg, dest, replaced)
+        project.write_copy(data, new_cfg, dest, replaced, added)
         return applied
     except ws_settings.InvalidChange as exc:
         raise HTTPException(status_code=422, detail=f"Some values were refused: {exc}"[:1000]) from exc
@@ -296,6 +329,8 @@ def _build_copy(
         raise HTTPException(status_code=422, detail=f"A plate's settings were refused: {exc}"[:1000]) from exc
     except plate_structure.InvalidPlateStructure as exc:
         raise HTTPException(status_code=422, detail=f"The plates can't be changed so: {exc}"[:1000]) from exc
+    except layer_ranges.InvalidLayerRanges as exc:
+        raise HTTPException(status_code=422, detail=f"The height ranges can't be saved so: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -360,6 +395,7 @@ async def save_copy(
                 body.plate_settings,
                 body.plate_structure,
                 body.instance_plates,
+                body.layer_ranges,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
@@ -421,6 +457,7 @@ def _arrange_input(lib_file: LibraryFile, data: bytes, body: ArrangeRequest, tar
         or body.object_settings
         or body.plate_settings
         or body.instance_plates
+        or body.layer_ranges
     )
     if edited:
         tmp = lib.get_library_files_dir() / f".{uuid.uuid4().hex}.arrange.part"
@@ -437,6 +474,7 @@ def _arrange_input(lib_file: LibraryFile, data: bytes, body: ArrangeRequest, tar
                 body.plate_settings,
                 [],
                 body.instance_plates,
+                body.layer_ranges,
             )
             data = tmp.read_bytes()
         finally:

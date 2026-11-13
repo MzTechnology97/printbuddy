@@ -13,7 +13,15 @@ export function objectMenu(
   tr: Tr,
   deleteKey: string,
   printable: boolean,
-  on: { select: () => void; zoom: () => void; info: () => void; settings: () => void; table?: () => void },
+  on: {
+    select: () => void;
+    zoom: () => void;
+    info: () => void;
+    settings: () => void;
+    table?: () => void;
+    /** Height Range Modifier: the object's height ranges (its first one when it has none) */
+    heightRange?: () => void;
+  },
   align?: MenuItem[] | string,
 ): MenuItem[] {
   return [
@@ -34,7 +42,7 @@ export function objectMenu(
     { label: tr('Add Support Blocker'), icon: 'menu_support_blocker', submenu: true },
     { label: tr('Add Support Enforcer'), icon: 'menu_support_enforcer', submenu: true },
     { label: tr('Add Precise Seam'), submenu: true },
-    { label: tr('Height Range Modifier') },
+    { label: tr('Height Range Modifier'), onClick: on.heightRange },
     { label: tr('Printable'), shortcut: 'V', checked: printable, separator: true },
     { label: tr('Auto Drop'), checked: true },
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
