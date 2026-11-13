@@ -33,6 +33,7 @@ from backend.app.farm.workspace import (
     arrange as ws_arrange,
     layer_ranges,
     object_settings,
+    parts,
     placement,
     plate_settings,
     plate_structure,
@@ -74,6 +75,8 @@ class CopyRequest(BaseModel):
     instance_plates: list[InstancePlate] = Field(default_factory=list, max_length=placement.MAX_TRANSFORMS)
     # objects' height ranges as they are to be (Height Range Modifier), each edited object's all of them
     layer_ranges: list[RangeEdit] = Field(default_factory=list, max_length=500)
+    # parts deleted or of another type (Delete, Change Type, Precise Seam Type), in order
+    part_ops: list[parts.PartOp] = Field(default_factory=list, max_length=parts.MAX_OPS)
     # plates added, removed, moved to the front or duplicated, in order, before ``plate_settings`` (numbered after them)
     plate_structure: list[PlateOp] = Field(default_factory=list, max_length=MAX_PLATE_OPS)
 
@@ -230,6 +233,7 @@ def _build_copy(
     plate_ops: list[PlateOp] = (),
     instance_plates: list[InstancePlate] = (),
     range_edits: list[RangeEdit] = (),
+    part_ops: list[parts.PartOp] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -248,11 +252,11 @@ def _build_copy(
         replaced, placed = {}, []
         settings_xml = (
             project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
-            if part_transforms or own_settings or plate_edits or plate_ops or instance_plates
+            if part_transforms or own_settings or plate_edits or plate_ops or instance_plates or part_ops
             else None
         )
         model = original_model = None
-        if transforms or part_transforms or plate_ops or instance_plates or range_edits:
+        if transforms or part_transforms or plate_ops or instance_plates or range_edits or part_ops:
             model = original_model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
@@ -264,6 +268,17 @@ def _build_copy(
                 raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
             settings_xml, owned = object_settings.apply(settings_xml, cfg, list(own_settings), slicer)
             placed += owned
+        if part_ops:
+            if settings_xml is None:
+                raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
+            if any(op.op == "duplicate" for op in plate_ops):
+                # a duplicate takes the instances not placed yet from the file, before a part's deletion moved them
+                raise HTTPException(
+                    status_code=422, detail="Save the copy with its parts deleted or changed first, then duplicate"
+                )
+            cut = parts.cut_objects(project._read_small(zf, parts.CUT_ENTRY), layer_ranges.object_order(model))
+            model, settings_xml, changed = parts.apply(model, settings_xml, list(part_ops), cfg, slicer, cut)
+            placed += changed
         if instance_plates or plate_ops:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no plates file to write to")
@@ -334,6 +349,8 @@ def _build_copy(
         raise HTTPException(status_code=422, detail=f"The plates can't be changed so: {exc}"[:1000]) from exc
     except layer_ranges.InvalidLayerRanges as exc:
         raise HTTPException(status_code=422, detail=f"The height ranges can't be saved so: {exc}"[:1000]) from exc
+    except parts.InvalidPartOp as exc:
+        raise HTTPException(status_code=422, detail=f"The parts can't be changed so: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -399,6 +416,7 @@ async def save_copy(
                 body.plate_structure,
                 body.instance_plates,
                 body.layer_ranges,
+                body.part_ops,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
@@ -511,6 +529,11 @@ async def arrange_objects(
     if body.plate_structure:
         raise HTTPException(
             status_code=422, detail="Save the copy with its plates added, removed or moved first, then arrange it"
+        )
+    if body.part_ops:
+        # a deleted part's transform goes into its instances: the arranged ones would get it twice
+        raise HTTPException(
+            status_code=422, detail="Save the copy with its parts deleted or changed first, then arrange it"
         )
     lib_file = await _library_3mf(db, file_id)
     targets = [await switch_target(db, ref) for ref in body.presets]

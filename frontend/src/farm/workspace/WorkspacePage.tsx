@@ -89,6 +89,17 @@ import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, m
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
 import { FILAMENT_KEY, type Selection, instancesOf, ownSettings, ownToSave } from './objects';
 import { defaultOptions, firstRanges, rangeLabel, rangesOf, rangesToSave, withRanges } from './ranges';
+import {
+  type PartOp,
+  SEAM_ENTRIES,
+  TYPE_ENTRIES,
+  changeTypeTarget,
+  deletedParts,
+  isSeam,
+  plateCenter,
+  refusal,
+  withPartOps,
+} from './parts';
 import { ObjectTableDialog } from './ObjectTable';
 import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
 import {
@@ -271,20 +282,21 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, partOps, setPartOps, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   // the plates as the unsaved adds, removals, moves and duplicates leave them, the instances moved onto another plate
-  // on it, with their unsaved names (plates.ts)
+  // on it, with their unsaved names (plates.ts); the objects with their parts deleted or retyped (parts.ts)
   const doc = useMemo(
     () => ({
       ...source,
       settings,
+      objects: withPartOps(source.objects, partOps),
       plates: withAdded(applyPlateOps(withMoved(source.plates, onPlate), plateOps), onPlate).map((p) => ({
         ...p,
         name: plateMeta(p, own).plater_name || null,
       })),
     }),
-    [source, settings, plateOps, own, onPlate],
+    [source, settings, plateOps, own, onPlate, partOps],
   );
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -495,6 +507,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       }),
     [ranges, doc.objects, layout, i18n.language, t],
   );
+  const partRows = useMemo(() => {
+    const o = (text: string) => orcaText(layout, text, i18n.language);
+    return partOps.map((op, i) => {
+      const obj = source.objects.find((x) => x.id === op.object_id);
+      const part = obj?.parts.find((p) => p.id === op.part_id);
+      const entry = (isSeam(op.type) ? SEAM_ENTRIES : TYPE_ENTRIES).find((e) => e.type === op.type);
+      return {
+        id: `part${i}`,
+        section: `${obj?.name ?? op.object_id} › ${part?.name ?? op.part_id}`,
+        name: op.op === 'delete' ? o('Delete') : `${o('Change Type')}: ${entry ? o(entry.label) : op.type}`,
+      };
+    });
+  }, [partOps, source.objects, layout, i18n.language]);
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -838,6 +863,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       hint: r.why ?? undefined,
     }));
   };
+  // a part the draft deletes is hidden in the 3D view, and so out of every tool's reach (transforms.ts partsOf)
+  useEffect(() => {
+    if (!view) return;
+    const gone = deletedParts(partOps);
+    for (const item of view.model.children) {
+      if (item.userData.objectId == null) continue;
+      for (const group of item.children) {
+        if (group.userData.partId === undefined) continue;
+        group.visible = !gone.get(String(item.userData.objectId))?.has(String(group.userData.partId));
+      }
+    }
+    setStats(objectStats(view));
+  }, [view, partOps]);
   useEffect(() => {
     if (!view) return;
     applyPlacements(view, placed);
@@ -854,6 +892,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
    * with their plates and a removed plate's to where the objects on no plate are (they stay in the project, on no
    * plate: plate_structure.py); until then every placement stays where the file puts it. */
   const plateOp = (op: PlateOp) => {
+    // a duplicate copies the file's instances: one a part's deletion moves (its transform into them) must be saved first
+    if (op.op === 'duplicate' && partOps.length) return showToast(t('farm.workspace.partsBeforeDuplicate'), 'error');
     setPlates([...plateOps, op], placed, remapPlateEdits(own, op));
     // as Orca: a plate moved to the front is the current one; a removal keeps the plates after it in reach
     if (op.op === 'front') setSelectedPlate(1);
@@ -888,6 +928,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const runArrange = async (plateNo: number) => {
     if (arranging) return;
     if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
+    if (partOps.length) return showToast(t('farm.workspace.arrange.saveParts'), 'error');
     if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
     setArranging(true);
     showToast(tr('Arranging...'), 'info');
@@ -995,6 +1036,15 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   }, [view, measure]);
 
   const plateOf = (objectId: string) => doc.plates.find((p) => p.object_ids.includes(objectId))?.index ?? null;
+  /** A part deleted or of another type (Orca's Delete, Change Type, Precise Seam Type), one undo step; what Orca
+   * refuses (the last solid part) gets its message. A deleted part's object is selected. */
+  const partOp = (op: PartOp) => {
+    const obj = doc.objects.find((o) => o.id === op.object_id);
+    const why = obj ? refusal(obj, op) : null;
+    if (why) return showToast(tr(why), 'error');
+    setPartOps([...partOps, op]);
+    if (op.op === 'delete') select({ kind: 'object', id: op.object_id, plate: plateOf(op.object_id) });
+  };
   const select = (sel: Selection) => {
     setSelection(sel);
     setInfoClosed(false);
@@ -1036,6 +1086,25 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       return;
     }
     if (sel.kind === 'object' && sel.part) {
+      const obj = doc.objects.find((o) => o.id === sel.id);
+      const part = obj?.parts.find((p) => p.id === sel.partId);
+      const partId = part?.id ?? null;
+      const editable = doc.editable && !doc.cannot_place && !!partId;
+      // Center (Selection::center: the part's box to the middle of its plate) and Drop (its lowest point to the bed),
+      // each a move of the part as the Move tool makes it; greyed where it is there already
+      const target = partId ? targetKey(sel.id, sel.instance ?? 0, partId) : null;
+      const box = editable && view && target ? boxOf(view, placed, [target]) : null;
+      const plate0 = plateAt(itemKey(sel.id, sel.instance ?? 0));
+      const middle = box && plate0 >= 0 ? plateCenter(plate0, source.plates.length, settings.find((x) => x.key === 'printable_area')?.value) : null;
+      const shift: [number, number, number] | null =
+        box && middle ? [middle[0] - (box.min.x + box.max.x) / 2, middle[1] - (box.min.y + box.max.y) / 2, 0] : null;
+      const movePart = (d: [number, number, number]) => {
+        if (!view || !target) return;
+        const next = changedParts(view, placed, [target], (w) => moved(w, d), 'move', autoDrop);
+        applyPlacements(view, next);
+        commit(next);
+      };
+      const type = part?.type ?? 'normal_part';
       setMenu({
         at,
         items: partMenu(tr, t('farm.workspace.deleteKey'), {
@@ -1046,6 +1115,18 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: sel.partId ?? null }),
+          center: shift && (Math.abs(shift[0]) > 1e-6 || Math.abs(shift[1]) > 1e-6) ? () => movePart(shift) : undefined,
+          drop: box && Math.abs(box.min.z) > 0.001 ? () => movePart([0, 0, -box.min.z]) : undefined,
+          remove: editable && partId ? () => partOp({ op: 'delete', object_id: sel.id, part_id: partId }) : undefined,
+          type: {
+            current: type,
+            seams: doc.slicer === 'orcaslicer',
+            set:
+              editable && partId
+                ? (entry, fromChangeType) =>
+                    partOp({ op: 'type', object_id: sel.id, part_id: partId, type: fromChangeType ? changeTypeTarget(type, entry) : entry })
+                : undefined,
+          },
         }),
       });
       return;
@@ -1427,6 +1508,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             : { object_id, instance: Number(instance), plate: now, new_plate: true };
         }),
         rangesToSave(ranges),
+        partOps,
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1997,6 +2079,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             // the objects' (parts') own settings: the new value, or the project's again
             ...ownRows,
             ...rangeRows,
+            ...partRows,
             ...plateRows,
           ]}
           invalid={[...invalid, ...ownRows.filter((r) => r.invalid).map((r) => r.id)]}

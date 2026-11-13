@@ -179,7 +179,11 @@ def read_structure(zf: zipfile.ZipFile, settings: dict | None) -> dict:
                 {
                     "id": part.get("id"),
                     "name": pmeta.get("name"),
-                    "type": part.get("subtype"),
+                    # a Precise Seam is a modifier with its seam's type (bbs_3mf): that type
+                    "type": pmeta["precise_seam_type"]
+                    if part.get("subtype") == "modifier_part"
+                    and pmeta.get("precise_seam_type", "").startswith("precise_seam_")
+                    else part.get("subtype"),
                     "extruder": pmeta.get("extruder"),
                 }
             )
