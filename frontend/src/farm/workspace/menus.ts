@@ -1,6 +1,7 @@
 // Fork (printfarm): OrcaSlicer's right-click menus of an object and of a plate (GUI_Factories.cpp, v2.5.0, in its
 // order), the same in the objects tree and in the 3D view. Items with an action work now (they only look);
 // the others are shown disabled until phase 2 can write them into the 3MF.
+import { type PartType, SEAM_ENTRIES, TYPE_ENTRIES, isSeam } from './parts';
 import type { MenuItem } from './Viewport';
 
 type Tr = (text: string) => string;
@@ -90,23 +91,52 @@ export function plateMenu(
   ];
 }
 
-/** A part, negative part, modifier, blocker or enforcer (GUI_Factories.cpp part menu). */
+/** A part, negative part, modifier, blocker or enforcer (GUI_Factories.cpp part menu). ``type``: the part's type,
+ * and (``set``) Change Type's and, for a seam, Precise Seam Type's choices; ``seams``: the slicer has Precise Seam. */
 export function partMenu(
   tr: Tr,
   deleteKey: string,
-  on: { select: () => void; zoom: () => void; settings: () => void; table?: () => void },
+  on: {
+    select: () => void;
+    zoom: () => void;
+    settings: () => void;
+    table?: () => void;
+    /** Center on the plate, Drop to the bed (absent: greyed, it's there already or can't be saved) */
+    center?: () => void;
+    drop?: () => void;
+    /** Delete the part (absent: greyed) */
+    remove?: () => void;
+    /** ``changeType``: Change Type's entry (its Precise Seam keeps a seam's subtype), else Precise Seam Type's */
+    type?: { current: string; set?: (type: PartType, changeType: boolean) => void; seams: boolean };
+  },
 ): MenuItem[] {
+  const type = on.type;
+  const set = type?.set;
+  const choices = (entries: typeof TYPE_ENTRIES, checked: (t: PartType) => boolean, changeType: boolean): MenuItem[] =>
+    entries.map((e) => ({ label: tr(e.label), checked: checked(e.type), onClick: set && (() => set(e.type, changeType)) }));
+  const seam = !!type && isSeam(type.current);
   return [
     { label: tr('Select'), onClick: on.select },
     { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
-    { label: tr('Center'), separator: true },
-    { label: tr('Drop') },
+    { label: tr('Center'), separator: true, onClick: on.center },
+    { label: tr('Drop'), onClick: on.drop },
     { label: tr('Transform'), submenu: true },
     { label: tr('Align/Distribute'), submenu: true },
     { label: tr('Edit'), submenu: true },
-    { label: tr('Delete'), shortcut: deleteKey, separator: true },
-    { label: tr('Change Type'), submenu: true, separator: true },
-    { label: tr('Precise Seam Type'), submenu: true },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true, onClick: on.remove },
+    set
+      ? {
+          label: tr('Change Type'),
+          separator: true,
+          items: choices(
+            TYPE_ENTRIES.filter((e) => type.seams || !isSeam(e.type)),
+            (t) => (t === 'precise_seam_center' ? seam : type.current === t),
+            true,
+          ),
+        }
+      : { label: tr('Change Type'), submenu: true, separator: true },
+    // only for a seam (append_menu_item_precise_seam_submenu)
+    ...(seam && set ? [{ label: tr('Precise Seam Type'), items: choices(SEAM_ENTRIES, (t) => type.current === t, false) }] : []),
     { label: tr('Change Filament'), submenu: true },
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
     { label: tr('Copy Process Settings') },

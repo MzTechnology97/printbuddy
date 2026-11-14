@@ -562,9 +562,11 @@ const en = {
     expand: 'Expand',
     readOnly: 'read only',
     plateLimit: 'a project has at most {{count}} plates',
+    partsBeforeDuplicate: 'Save the copy with its parts deleted or changed first, then duplicate the plate.',
     arrange: {
       spacingAuto: "OrcaSlicer's command line arranges with automatic spacing only.",
       savePlates: 'Save the copy with its plates added, removed or moved first, then arrange it.',
+      saveParts: 'Save the copy with its parts deleted or changed first, then arrange it.',
       busy: 'Arranging…',
       failed: 'Arrange failed: {{reason}}',
     },
@@ -1318,9 +1320,11 @@ const it: typeof en = {
     expand: 'Espandi',
     readOnly: 'sola lettura',
     plateLimit: 'un progetto ha al massimo {{count}} piatti',
+    partsBeforeDuplicate: 'Salva prima la copia con le parti eliminate o cambiate, poi duplica il piatto.',
     arrange: {
       spacingAuto: 'La riga di comando di OrcaSlicer dispone solo con la spaziatura automatica.',
       savePlates: 'Salva prima la copia con i piatti aggiunti, rimossi o spostati, poi disponila.',
+      saveParts: 'Salva prima la copia con le parti eliminate o cambiate, poi disponila.',
       busy: 'Disposizione in corso…',
       failed: 'Disposizione non riuscita: {{reason}}',
     },

@@ -17,8 +17,9 @@ const SINKING = -0.001;
 
 const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
 const keyOf = (item: THREE.Object3D) => itemKey(String(item.userData.objectId), Number(item.userData.instance ?? 0));
-/** An item's part groups (ModelViewer: one per component, ``userData.partId`` its id in model_settings.config). */
-const partsOf = (item: THREE.Object3D) => item.children.filter((c) => c.userData.partId !== undefined);
+/** An item's part groups (ModelViewer: one per component, ``userData.partId`` its id in model_settings.config); a
+ * part the draft deletes is hidden and counts no more (parts.ts). */
+const partsOf = (item: THREE.Object3D) => item.children.filter((c) => c.userData.partId !== undefined && c.visible);
 
 /** A part's placement key: shared by all the object's instances, as Orca's ModelVolume is. */
 export const partKey = (objectId: string, partId: string) => `${objectId}/${partId}`;

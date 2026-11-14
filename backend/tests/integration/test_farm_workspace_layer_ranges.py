@@ -145,6 +145,27 @@ class TestSaveCopy:
         assert new["ranges"] == next(o["ranges"] for o in copy["objects"] if o["id"] == "4")
         assert new["ranges"][0]["options"]["layer_height"] == "0.1"
 
+    async def test_a_duplicate_of_an_object_whose_ranges_were_all_removed_has_none(self, async_client, db_session):
+        original = make_project(
+            "orca",
+            project_settings(printable_area=CFG["printable_area"]),
+            extra={project.LAYER_RANGES_ENTRY: RANGES.decode()},
+        )
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        resp = await save(
+            async_client,
+            doc,
+            {},
+            layer_ranges=[{"object_id": "4", "ranges": []}],
+            plate_structure=[{"op": "duplicate", "plate": 2, "objects": ["4"]}],
+        )
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        copy = await open_ws(async_client, row.id)
+        assert len(copy["objects"]) == 3
+        assert all(o["ranges"] == [] for o in copy["objects"])
+
     async def test_bad_ranges_are_refused_with_the_reason(self, async_client, db_session):
         f = await add_file(db_session, make_project("orca", project_settings()))
         doc = await open_ws(async_client, f.id)

@@ -186,7 +186,9 @@ export function pick(
   if (!rect.width || !rect.height || view.model.userData.readOnly) return null; // a duplicated plate's (WorkspacePage)
   const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
   RAY.setFromCamera(ndc, view.camera);
-  const hit = RAY.intersectObjects(items(view), true)[0];
+  // the raycaster sees hidden meshes too: a part the draft deletes (hidden) is not there to pick
+  const shown = (o: THREE.Object3D | null): boolean => !o || (o.visible && shown(o.parent));
+  const hit = RAY.intersectObjects(items(view), true).find((h) => shown(h.object));
   if (!hit) return null;
   let o: THREE.Object3D | null = hit.object;
   let partId: string | null = null;

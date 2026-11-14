@@ -167,6 +167,9 @@ def _scope(settings: bytes, e: ObjectSetting) -> tuple[int, int, int]:
     subtype = _attr(settings[p_start:open_end], _SUBTYPE) or "normal_part"
     if subtype not in PART_TYPES:
         raise InvalidObjectSetting(f"part {e.part_id} ({subtype}) has no settings of its own")
+    if b'key="precise_seam_type"' in settings[open_end:p_end]:
+        # a Precise Seam keeps its settings dormant (bbs_3mf ``precise_seam_config:``): it has no tab
+        raise InvalidObjectSetting(f"part {e.part_id} is a Precise Seam: it has no settings of its own")
     return p_start, open_end, p_end
 
 

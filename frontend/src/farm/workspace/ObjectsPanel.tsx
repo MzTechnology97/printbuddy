@@ -40,6 +40,13 @@ const PART_ICONS: Record<string, string> = {
   modifier_part: 'menu_add_modifier',
   support_blocker: 'menu_support_blocker',
   support_enforcer: 'menu_support_enforcer',
+  // a Precise Seam's own icon per type (GUI_Factories.cpp ADD_VOLUME_MENU_ITEMS)
+  precise_seam_center: 'menu_precise_seam_center',
+  precise_seam_left: 'menu_precise_seam_left',
+  precise_seam_right: 'menu_precise_seam_right',
+  precise_seam_enforced: 'menu_precise_seam_enforced',
+  precise_seam_blocked: 'menu_precise_seam_blocked',
+  precise_seam_neutral: 'menu_precise_seam_neutral',
 };
 
 export function Chip({ colour, n, dim }: { colour: string | undefined; n: number | string; dim?: boolean }) {
