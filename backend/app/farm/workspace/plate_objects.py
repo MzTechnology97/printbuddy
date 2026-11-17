@@ -88,11 +88,22 @@ def _fresh(used: set[str], n: int, suffix: str) -> str:
     return f"{n:08x}{suffix}"
 
 
+def next_object_id(model: bytes, settings: bytes) -> int:
+    """The first object id after every one the model and its settings use (the components' mesh ids among them)."""
+    used = set(_objects(model, 0, model.rfind(b"</resources>"))) | set(_objects(settings, 0, len(settings)))
+    used |= {c.decode() for c in re.findall(rb'objectid\s*=\s*["\'](\d+)', model)}
+    return max((int(i) for i in used if i.isdigit()), default=0) + 1
+
+
 def copy_objects(
-    model: bytes, settings: bytes, copies: list[tuple[str, list[tuple[float, ...]]]]
+    model: bytes,
+    settings: bytes,
+    copies: list[tuple[str, list[tuple[float, ...]]]],
+    ids: list[str] | None = None,
 ) -> tuple[bytes, bytes, list[str]]:
     """``model`` and ``model_settings.config`` with a copy of each ``(object id, its instances' transforms)``; the
-    copies' new ids, in order. Every other byte of both stays, and both are read back."""
+    copies' new ids, in order (``ids``: the ones asked for, each from ``next_object_id`` on). Every other byte of both
+    stays, and both are read back."""
     if len(copies) > MAX_COPIES:
         raise InvalidCopy(f"too many objects to copy at once (at most {MAX_COPIES})")
     if not copies:
@@ -107,8 +118,11 @@ def copy_objects(
         raise InvalidCopy(str(exc)) from exc
     objects = _objects(model, 0, resources_end)
     settings_objects = _objects(settings, 0, len(settings))
-    ids = set(objects) | set(settings_objects) | {c.decode() for c in re.findall(rb'objectid\s*=\s*["\'](\d+)', model)}
-    next_id = max((int(i) for i in ids if i.isdigit()), default=0) + 1
+    next_id = next_object_id(model, settings)
+    if ids is not None and (
+        len(ids) != len(copies) or len(set(ids)) != len(ids) or any(not i.isdigit() or int(i) < next_id for i in ids)
+    ):
+        raise InvalidCopy(f"the new objects' ids must be distinct numbers from {next_id} on")
     uuids = {u.decode("ascii", "replace") for u in _ANY_UUID.findall(model)}
     item_tags = [m.group(0) for m in _ITEM.finditer(model, *build)]
 
@@ -119,7 +133,7 @@ def copy_objects(
         template = next((t for t in item_tags if _attr(t, _OBJECT_ID) == object_id), None)
         if template is None:
             raise InvalidCopy(f"object {object_id} has no build item to copy")
-        new_id = str(next_id)
+        new_id = ids[len(new_ids)] if ids is not None else str(next_id)
         next_id += 1
         a, b = objects[object_id]
         block = model[a:b]
@@ -162,9 +176,9 @@ def copy_objects(
     return model, settings, new_ids
 
 
-def _append_items(model: bytes, items: list[bytes]) -> bytes:
-    """``items`` after the build's last item, each on its own line as that one is."""
-    last = next(reversed(list(_ITEM.finditer(model, *_build_span(model)))), None)
+def _append_items(model: bytes, items: list[bytes], after: re.Match | None = None) -> bytes:
+    """``items`` after the build's last item (``after``: that one), each on its own line as that one is."""
+    last = after or next(reversed(list(_ITEM.finditer(model, *_build_span(model)))), None)
     if last is None:
         raise InvalidCopy("the model has no build items")
     a, b = _line_span(model, last.start(), last.end())

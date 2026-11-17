@@ -38,12 +38,25 @@ from backend.app.farm.workspace.placement import (
     _OBJECT,
     _OBJECT_ID,
     _PART,
+    _TRANSFORM,
     _VALUE,
     InvalidPlacement,
     _attr,
     _build_items,
     _build_span,
     _element,
+    check_matrix,
+    format_matrix,
+)
+from backend.app.farm.workspace.plate_objects import (
+    _ANY_UUID,
+    _UUID,
+    BUILD,
+    InvalidCopy,
+    _append_items,
+    _fresh,
+    _set,
+    copy_objects,
 )
 from backend.app.farm.workspace.project import LAYER_RANGES_ENTRY
 from backend.app.utils.xml_prefixes import declared
@@ -80,13 +93,83 @@ class InvalidObjectOp(ValueError):
 
 class ObjectOp(BaseModel):
     """``delete``: an instance (``instance``) or the whole object; ``printable``: an instance's, or every instance's;
-    ``auto_drop``: the object's; ``rename``: the object's name or (``part_id``) a part's."""
+    ``auto_drop``: the object's; ``rename``: the object's name or (``part_id``) a part's. Additions, made first:
+    ``add_instance``: one more instance at ``matrix``; ``copy``: a new object ``new_id`` (from the document's
+    ``next_object_id``) copying the object, with an instance at each of ``matrices``."""
 
-    op: Literal["delete", "printable", "auto_drop", "rename"]
+    op: Literal["delete", "printable", "auto_drop", "rename", "add_instance", "copy"]
     object_id: str = Field(pattern=r"^[0-9]{1,9}$")
     instance: int | None = Field(default=None, ge=0, le=100_000)
     part_id: str | None = Field(default=None, pattern=r"^[0-9]{1,9}$")
     value: bool | str | None = None
+    matrix: list[float] | None = Field(default=None, min_length=12, max_length=12)
+    new_id: str | None = Field(default=None, pattern=r"^[0-9]{1,9}$")
+    matrices: list[list[float]] | None = Field(default=None, min_length=1, max_length=1000)
+
+
+ADDITIONS = ("add_instance", "copy")
+
+
+def add(
+    model: bytes, settings: bytes, ops: list[ObjectOp], indexed: dict[str, bytes | None] | None = None
+) -> tuple[bytes, bytes, dict[str, bytes], list[dict]]:
+    """The model and ``model_settings.config`` with the additions made, in order: a new instance as Plater's
+    increase_instances makes it (a copy of the object's last build item, printable, at its transform); a new object as
+    Model::add_object (plate_objects.copy_objects: its resource sharing the meshes, its settings, its build items).
+    A copy also takes its object's lines of ``layer_heights_profile.txt`` and ``brim_ear_points.txt`` (its height
+    ranges come as the copy's own edits). The plates they go on come as ``instance_plates``. What changed."""
+    applied: list[dict] = []
+    pairs: list[tuple[str, str]] = []
+    for op in ops:
+        try:
+            if op.op == "add_instance":
+                if op.matrix is None:
+                    raise InvalidObjectOp("a new instance needs its transform")
+                check_matrix(op.matrix)
+                mine = _items(model).get(op.object_id)
+                if not mine:
+                    raise InvalidObjectOp(f"the model has no object {op.object_id}")
+                uuids = {u.decode("ascii", "replace") for u in _ANY_UUID.findall(model)}
+                tag = _set(mine[-1].group(0), _TRANSFORM, b"transform", format_matrix(op.matrix))
+                tag = _set(tag, _PRINTABLE, b"printable", "1")
+                if _UUID.search(tag):
+                    tag = _set(tag, _UUID, b"p:UUID", _fresh(uuids, (int(op.object_id) << 8) + len(mine), BUILD))
+                # after the object's own items, as Orca saves them: the objects keep their places (the indexed files)
+                model = _append_items(model, [tag], after=mine[-1])
+                applied.append({"key": "instance", "object_id": op.object_id, "instance": len(mine)})
+            elif op.op == "copy":
+                if not op.matrices or op.new_id is None:
+                    raise InvalidObjectOp("a copy needs its new id and its instances' transforms")
+                for m in op.matrices:
+                    check_matrix(m)
+                model, settings, _ = copy_objects(
+                    model, settings, [(op.object_id, [tuple(m) for m in op.matrices])], ids=[op.new_id]
+                )
+                pairs.append((op.object_id, op.new_id))
+                record = {"key": "copy", "object_id": op.object_id, "new_id": op.new_id}
+                applied.append({**record, "instances": len(op.matrices), "copies": [[op.object_id, op.new_id]]})
+        except (InvalidPlacement, InvalidCopy) as exc:
+            raise InvalidObjectOp(str(exc)) from exc
+    changed: dict[str, bytes] = {}
+    if pairs:
+        place = {oid: n + 1 for n, oid in enumerate(_order(model))}
+        for name in TEXT_INDEXED:
+            data = (indexed or {}).get(name)
+            if not data:
+                continue
+            lines = {int(m.group(1)): m for m in _INDEXED_LINE.finditer(data)}
+            extra = []
+            for source, new_id in pairs:
+                m = lines.get(place[source])
+                if m:
+                    end = data.find(b"\n", m.end())
+                    rest = data[m.end() : end if end >= 0 else len(data)]
+                    extra.append(f"object_id={place[new_id]}|".encode() + rest.rstrip(b"\r"))
+            if extra:
+                newline = b"\r\n" if b"\r\n" in data else b"\n"
+                body = data if data.endswith(b"\n") else data + newline
+                changed[name] = body + newline.join(extra) + newline
+    return model, settings, changed, applied
 
 
 def check_name(name: object) -> str:
@@ -308,7 +391,7 @@ def apply(
         raise InvalidObjectOp(str(exc)) from exc
     order_before = _order(model)
     applied: list[dict] = []
-    for op in (o for o in ops if o.op != "delete"):
+    for op in (o for o in ops if o.op != "delete" and o.op not in ADDITIONS):  # the additions: add(), made first
         if op.object_id not in items:
             raise InvalidObjectOp(f"the model has no object {op.object_id}")
         model, settings, record = _flag(model, settings, op, items)

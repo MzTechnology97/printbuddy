@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from backend.app.api.routes import library
-from backend.app.farm.workspace import objects, placement, plate_structure, project
+from backend.app.farm.workspace import objects, placement, plate_objects, plate_structure, project
 from backend.app.farm.workspace.objects import InvalidObjectOp, ObjectOp
 from backend.app.models.library import LibraryFile
 from backend.tests.integration.test_farm_workspace import (
@@ -169,3 +169,124 @@ class TestSaveCopy:
         assert resp.status_code == 422 and "then arrange" in resp.json()["detail"]
         resp = await save(async_client, doc, {}, object_ops=[{"op": "rename", "object_id": "2", "value": "a|b"}])
         assert resp.status_code == 422 and "not allowed" in resp.json()["detail"]
+
+
+MOVED = [1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 60, 5]
+
+
+def grow(*ops: dict, indexed=None):
+    return objects.add(MODEL, SETTINGS, [ObjectOp(**o) for o in ops], indexed)
+
+
+class TestAdd:
+    def test_a_new_instance_copies_the_objects_last_one_at_its_place(self):
+        model, settings, changed, applied = grow({"op": "add_instance", "object_id": "2", "matrix": MOVED})
+        # after the object's own items, as Orca saves them: the objects keep their places
+        assert [oid for oid, _ in items(model)] == ["2", "2", "4", "4"]
+        assert items(model)[1] == ("2", "1 0 0 0 1 0 0 0 1 80 60 5")
+        new = [i for i in placement._build_items(model) if i["objectid"] == "2"][1]
+        assert new["printable"] == "1" and new["{http://schemas.microsoft.com/3dmanufacturing/production/2015/06}UUID"]
+        assert settings == SETTINGS and changed == {}  # on no plate until the copy puts it on one
+        assert applied == [{"key": "instance", "object_id": "2", "instance": 1}]
+
+    def test_a_copy_takes_the_id_asked_for_and_its_objects_numbered_lines(self):
+        first = plate_objects.next_object_id(MODEL, SETTINGS)
+        model, settings, changed, applied = grow(
+            {"op": "copy", "object_id": "4", "new_id": str(first + 3), "matrices": [MOVED, MOVED]},
+            indexed={objects.HEIGHTS_ENTRY: HEIGHTS},
+        )
+        assert [oid for oid, _ in items(model)] == ["2", "4", "4", str(first + 3), str(first + 3)]
+        assert f'<object id="{first + 3}">'.encode() in settings
+        # object 4 is the model's 2nd object, its copy the 3rd: the copy's line repeats 4's
+        assert changed[objects.HEIGHTS_ENTRY] == HEIGHTS + b"object_id=3|0 0.2 20 0.3\n"
+        assert applied[0]["copies"] == [["4", str(first + 3)]]
+
+    @pytest.mark.parametrize(
+        ("op", "error"),
+        [
+            ({"op": "copy", "object_id": "4", "new_id": "3", "matrices": [MOVED]}, "from 5 on"),
+            ({"op": "copy", "object_id": "4", "new_id": "9"}, "transforms"),
+            ({"op": "add_instance", "object_id": "9", "matrix": MOVED}, "no object 9"),
+            ({"op": "add_instance", "object_id": "2", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0]}, "mirrors"),
+        ],
+    )
+    def test_refuses(self, op, error):
+        with pytest.raises(InvalidObjectOp, match=error):
+            grow(op)
+
+
+@pytest.mark.integration
+class TestSaveAdditions:
+    async def test_new_instances_and_copies_land_on_their_plates_with_their_ranges(self, async_client, db_session):
+        original = make_project("orca", project_settings(), extra={project.LAYER_RANGES_ENTRY: RANGES.decode()})
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        new_id = str(doc["next_object_id"])
+        ops = [
+            {"op": "add_instance", "object_id": "2", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 90, 50, 5]},
+            {"op": "copy", "object_id": "4", "new_id": new_id, "matrices": [[1, 0, 0, 0, 1, 0, 0, 0, 1, 320, 90, 5]]},
+            {"op": "rename", "object_id": new_id, "value": "Copy of B"},
+        ]
+        plates = [
+            {"object_id": "2", "instance": 1, "plate": 1},
+            {"object_id": new_id, "instance": 0, "plate": 2},
+        ]
+        # a move of the new instance after it was added: placed on it
+        moved = [{"object_id": "2", "instance": 1, "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 95, 55, 5]}]
+        resp = await save(async_client, doc, {}, object_ops=ops, instance_plates=plates, transforms=moved)
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        copy = await open_ws(async_client, row.id)
+        assert [(p["index"], sorted(set(p["object_ids"]))) for p in copy["plates"]] == [
+            (1, ["2"]),
+            (2, sorted(["4", new_id])),
+        ]
+        assert copy["plates"][0]["instances"] == [
+            {"object_id": "2", "instance_id": "0"},
+            {"object_id": "2", "instance_id": "1"},
+        ]
+        clone = next(o for o in copy["objects"] if o["id"] == new_id)
+        assert clone["name"] == "Copy of B"
+        # object 4's ranges are its copy's too (Model::add_object)
+        assert clone["ranges"] == next(o["ranges"] for o in copy["objects"] if o["id"] == "4")
+        model = entries(library.to_absolute_path(row.file_path).read_bytes())[project.MODEL_ENTRY]
+        built = [(i["objectid"], i["transform"]) for i in placement._build_items(model)]
+        assert list(dict.fromkeys(oid for oid, _ in built)) == ["2", "4", new_id]
+        assert [t for oid, t in built if oid == "2"][-1] == "1 0 0 0 1 0 0 0 1 95 55 5"
+        assert built[-1] == (new_id, "1 0 0 0 1 0 0 0 1 320 90 5")
+
+    async def test_cut_and_paste_keeps_the_ranges(self, async_client, db_session):
+        # Cut then Paste: the copy made and its source deleted in one save; the copy has the source's ranges
+        original = make_project("orca", project_settings(), extra={project.LAYER_RANGES_ENTRY: RANGES.decode()})
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        new_id = str(doc["next_object_id"])
+        ops = [
+            {"op": "copy", "object_id": "4", "new_id": new_id, "matrices": [[1, 0, 0, 0, 1, 0, 0, 0, 1, 320, 90, 5]]},
+            {"op": "delete", "object_id": "4"},
+        ]
+        resp = await save(async_client, doc, {}, object_ops=ops)
+        assert resp.status_code == 200, resp.text
+        copy = await open_ws(async_client, resp.json()["library_file_id"])
+        assert [o["id"] for o in copy["objects"]] == ["2", new_id]
+        source = next(o for o in doc["objects"] if o["id"] == "4")
+        assert source["ranges"] and copy["objects"][1]["ranges"] == source["ranges"]
+
+    async def test_an_instance_added_then_the_first_deleted_keeps_the_numbered_files(self, async_client, db_session):
+        original = make_project("orca", project_settings(), extra={project.LAYER_RANGES_ENTRY: RANGES.decode()})
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        ops = [
+            {"op": "add_instance", "object_id": "2", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 90, 50, 5]},
+            {"op": "delete", "object_id": "2", "instance": 0},
+        ]
+        resp = await save(async_client, doc, {}, object_ops=ops)
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        before, after = entries(original), entries(library.to_absolute_path(row.file_path).read_bytes())
+        # object 2 stays the model's first object: its ranges' place is unchanged
+        assert after[project.LAYER_RANGES_ENTRY] == before[project.LAYER_RANGES_ENTRY]
+        copy = await open_ws(async_client, row.id)
+        assert [o["ranges"] for o in copy["objects"]] == [o["ranges"] for o in doc["objects"]]
+        built = [(i["objectid"], i["transform"]) for i in placement._build_items(after[project.MODEL_ENTRY])]
+        assert built[0] == ("2", "1 0 0 0 1 0 0 0 1 90 50 5")
