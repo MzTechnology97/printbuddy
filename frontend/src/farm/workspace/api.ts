@@ -55,6 +55,8 @@ export interface WorkspaceObject {
   overrides: { key: string; value: string; part: string | null; part_id?: string | null }[];
   /** its height ranges (Height Range Modifier, layer_config_ranges.xml), in Orca's order */
   ranges?: LayerRange[];
+  /** its build items in the file (absent: objects can't be added to it): the instances added are numbered after them */
+  instances?: number;
 }
 
 /** One of an object's height ranges: from ``min_z`` to ``max_z`` (mm) with its own settings (``layer_height``,
@@ -93,6 +95,8 @@ export interface WorkspaceDocument {
   editable: boolean;
   /** why a copy of this file can't hold objects moved (its model is too large to rewrite); null: it can */
   cannot_place?: string | null;
+  /** the id a new object (Clone, Paste) takes first: past every one the project uses; absent: none can be added */
+  next_object_id?: number | null;
   plates: WorkspacePlate[];
   objects: WorkspaceObject[];
   warnings: string[];
@@ -237,7 +241,16 @@ export const workspaceApi = {
     instancePlates: { object_id: string; instance: number; plate: number; new_plate?: boolean }[] = [],
     layerRanges: { object_id: string; ranges: LayerRange[] }[] = [],
     partOps: { op: 'delete' | 'type'; object_id: string; part_id: string; type?: string }[] = [],
-    objectOps: { op: string; object_id: string; instance?: number | null; part_id?: string | null; value?: boolean | string | null }[] = [],
+    objectOps: {
+      op: string;
+      object_id: string;
+      instance?: number | null;
+      part_id?: string | null;
+      value?: boolean | string | null;
+      matrix?: number[];
+      new_id?: string;
+      matrices?: number[][];
+    }[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',

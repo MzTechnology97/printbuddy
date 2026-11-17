@@ -323,6 +323,14 @@ UI_STRINGS = [
     "Rename",
     "Invalid name, the following characters are not allowed:",
     "Delete all objects on the current plate",
+    # instances and copies: the Instances submenu, Set number of instances and Clone (GUI_Factories.cpp, Plater.cpp
+    # set_number_of_copies, CloneDialog.cpp)
+    "Set number of instances",
+    "Number of copies:",
+    "Copies of the selected object",
+    "Auto arrange plate after cloning",
+    "Fill bed with copies",
+    "Fill bed with instances",
     "This plate is locked.\nCannot auto-arrange on this plate.",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",

@@ -36,6 +36,10 @@ export interface MenuState {
   canDelete: boolean;
   /** Delete All: objects to delete and a copy that can */
   canDeleteAll: boolean;
+  /** Cut, Copy and Clone Selected: objects or instances selected that the copy can add again */
+  canCopy: boolean;
+  /** Paste: something copied */
+  canPaste: boolean;
 }
 
 export interface MenuActions {
@@ -53,6 +57,10 @@ export interface MenuActions {
   duplicatePlate: () => void;
   deleteSelected: () => void;
   deleteAll: () => void;
+  cut: () => void;
+  copy: () => void;
+  paste: () => void;
+  clone: () => void;
   view: (preset: ViewPreset) => void;
   perspective: (on: boolean) => void;
   toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') => void;
@@ -104,17 +112,16 @@ export function fileMenu(tr: Tr, hints: Hints, s: MenuState, a: MenuActions, ext
   ];
 }
 
-export function editMenu(tr: Tr, hints: Hints, s: MenuState, a: MenuActions, extra: { resetAll: string }): MenuItem[] {
-  const p2 = hints.phase(2);
+export function editMenu(tr: Tr, _hints: Hints, s: MenuState, a: MenuActions, extra: { resetAll: string }): MenuItem[] {
   return [
     { label: tr('Undo'), shortcut: 'Ctrl+Z', onClick: on(s.canUndo, a.undo) },
     { label: tr('Redo'), shortcut: 'Ctrl+Y', onClick: on(s.canRedo, a.redo) },
-    { label: tr('Cut'), shortcut: 'Ctrl+X', hint: p2, separator: true },
-    { label: tr('Copy'), shortcut: 'Ctrl+C', hint: p2 },
-    { label: tr('Paste'), shortcut: 'Ctrl+V', hint: p2 },
+    { label: tr('Cut'), shortcut: 'Ctrl+X', onClick: on(s.canCopy, a.cut), separator: true },
+    { label: tr('Copy'), shortcut: 'Ctrl+C', onClick: on(s.canCopy, a.copy) },
+    { label: tr('Paste'), shortcut: 'Ctrl+V', onClick: on(s.canPaste, a.paste) },
     { label: tr('Delete Selected'), shortcut: 'Del', onClick: on(s.canDelete, a.deleteSelected) },
     { label: tr('Delete All'), shortcut: 'Ctrl+D', onClick: on(s.canDeleteAll, a.deleteAll) },
-    { label: tr('Clone Selected'), shortcut: 'Ctrl+K', hint: p2, separator: true },
+    { label: tr('Clone Selected'), shortcut: 'Ctrl+K', onClick: on(s.canCopy, a.clone), separator: true },
     {
       label: tr('Duplicate Current Plate'),
       onClick: s.duplicatePlate === true ? a.duplicatePlate : undefined,

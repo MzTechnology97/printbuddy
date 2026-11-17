@@ -228,6 +228,75 @@ interface ShortcutsProps {
 
 /** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp): a tab per page, its note, its rows by section
  * with their keys. It only lists them: the keys can't be changed here. */
+/** OrcaSlicer's number of copies: Set number of instances (Plater::set_number_of_copies, 0 to 1000) and, with
+ * ``clone``, the Clone dialog (CloneDialog.cpp, 1 to 1000): its Fill (Fill bed with instances) and "Auto arrange plate
+ * after cloning" are shown, greyed (``arrangeHint``: why). */
+export function CopiesDialog({
+  layout,
+  value,
+  clone,
+  arrangeHint,
+  onApply,
+  onClose,
+}: {
+  layout: OrcaLayout;
+  value: number;
+  clone?: boolean;
+  arrangeHint?: string;
+  onApply: (count: number) => void;
+  onClose: () => void;
+}) {
+  const { i18n } = useTranslation();
+  const tr = (text: string) => orcaText(layout, text, i18n.language);
+  const [text, setText] = useState(String(value));
+  const min = clone ? 1 : 0;
+  const n = Number(text);
+  const valid = /^\d+$/.test(text.trim()) && n >= min && n <= 1000;
+  const ok = () => {
+    if (!valid) return;
+    onApply(n);
+    onClose();
+  };
+  return (
+    <Dialog title={tr(clone ? 'Clone' : 'Copies of the selected object')} onClose={onClose}>
+      <div className="grid grid-cols-[1fr_auto] items-center gap-x-5 gap-y-2 px-6 py-5 text-[13px] text-bambu-gray-light">
+        <span>{tr('Number of copies:')}</span>
+        <input
+          type="number"
+          aria-label={tr('Number of copies:')}
+          min={min}
+          max={1000}
+          value={text}
+          autoFocus
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && ok()}
+          className={`h-7 w-[120px] rounded border bg-bambu-dark px-2 text-white outline-none focus:border-bambu-green ${valid ? 'border-bambu-dark-tertiary' : 'border-red-500'}`}
+        />
+        {clone && (
+          <>
+            <span>{tr('Auto arrange plate after cloning')}:</span>
+            <input type="checkbox" checked={false} disabled title={arrangeHint} aria-label={tr('Auto arrange plate after cloning')} />
+          </>
+        )}
+      </div>
+      <div className="flex gap-2 border-t border-bambu-dark-tertiary p-3">
+        {clone && (
+          <Button variant="secondary" disabled title={tr('Fill bed with copies')}>
+            {tr('Fill')}
+          </Button>
+        )}
+        <span className="flex-1" />
+        <Button variant="secondary" onClick={onClose}>
+          {tr('Cancel')}
+        </Button>
+        <Button onClick={ok} disabled={!valid}>
+          {tr('OK')}
+        </Button>
+      </div>
+    </Dialog>
+  );
+}
+
 export function ShortcutsDialog({ layout, context, works, onClose }: ShortcutsProps) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);

@@ -174,8 +174,9 @@ export type DraftAction =
   | { type: 'ranges'; edit: (r: RangeEdits) => RangeEdits; key: string | null; at: number }
   /** a part deleted or retyped: one step */
   | { type: 'parts'; partOps: PartOp[] }
-  /** an object or instance deleted, a flag changed, a name: one step */
-  | { type: 'objects'; objectOps: ObjectOp[] }
+  /** an object or instance deleted, added or copied, a flag changed, a name: one step (an addition with the plate
+   * its instances land on, their places and a copy's own settings) */
+  | { type: 'objects'; objectOps: ObjectOp[]; onPlate?: OnPlate; placed?: Placements; own?: OwnEdits }
   | { type: 'undo' }
   | { type: 'redo' };
 /** Edits of the same setting closer than this make one undo step. */
@@ -212,7 +213,7 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
           : a.type === 'parts'
             ? { ...stepOf(h), partOps: a.partOps }
             : a.type === 'objects'
-              ? { ...stepOf(h), objectOps: a.objectOps }
+              ? { ...stepOf(h), objectOps: a.objectOps, onPlate: a.onPlate ?? h.onPlate, placed: a.placed ?? h.placed, own: a.own ?? h.own }
               : {
               draft: a.draft,
               switched: a.switched,
@@ -311,7 +312,11 @@ export function useSettingsDraft(
   /** The parts deleted or retyped (all of them so far), one undo step. */
   const setPartOps = useCallback((next: PartOp[]) => dispatch({ type: 'parts', partOps: next }), []);
   /** The objects' operations (all of them so far), one undo step. */
-  const setObjectOps = useCallback((next: ObjectOp[]) => dispatch({ type: 'objects', objectOps: next }), []);
+  const setObjectOps = useCallback(
+    (next: ObjectOp[], plates?: OnPlate, places?: Placements, ownEdits?: OwnEdits) =>
+      dispatch({ type: 'objects', objectOps: next, onPlate: plates, placed: places, own: ownEdits }),
+    [],
+  );
   const place = useCallback((next: Placements, plates?: OnPlate) => dispatch({ type: 'place', placed: next, onPlate: plates }), []);
   const switchTo = useCallback((next: Switched, nextDraft: Draft) => dispatch({ type: 'switch', switched: next, draft: nextDraft }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
