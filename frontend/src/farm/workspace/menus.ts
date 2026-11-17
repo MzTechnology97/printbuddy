@@ -22,6 +22,12 @@ export function objectMenu(
     table?: () => void;
     /** Height Range Modifier: the object's height ranges (its first one when it has none) */
     heightRange?: () => void;
+    /** Delete the object (absent: greyed) */
+    remove?: () => void;
+    /** Printable (V): every selected instance on or off (absent: greyed) */
+    printable?: () => void;
+    /** Auto Drop: its state and the toggle (absent: shown on, greyed) */
+    autoDrop?: { checked: boolean; toggle?: () => void };
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -36,7 +42,7 @@ export function objectMenu(
     { label: tr('Transform'), submenu: true },
     alignItem(tr, align),
     { label: tr('Edit'), submenu: true },
-    { label: tr('Delete'), shortcut: deleteKey, separator: true },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true, onClick: on.remove },
     { label: tr('Add Part'), icon: 'menu_add_part', submenu: true, separator: true },
     { label: tr('Add Negative Part'), icon: 'menu_add_negative', submenu: true },
     { label: tr('Add Modifier'), icon: 'menu_add_modifier', submenu: true },
@@ -44,8 +50,8 @@ export function objectMenu(
     { label: tr('Add Support Enforcer'), icon: 'menu_support_enforcer', submenu: true },
     { label: tr('Add Precise Seam'), submenu: true },
     { label: tr('Height Range Modifier'), onClick: on.heightRange },
-    { label: tr('Printable'), shortcut: 'V', checked: printable, separator: true },
-    { label: tr('Auto Drop'), checked: true },
+    { label: tr('Printable'), shortcut: 'V', checked: printable, separator: true, onClick: on.printable },
+    { label: tr('Auto Drop'), checked: on.autoDrop?.checked ?? true, onClick: on.autoDrop?.toggle },
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
     { label: tr('Copy Process Settings') },
     { label: tr('Paste Process Settings') },
@@ -67,6 +73,8 @@ export function plateMenu(
     orient?: () => void;
     /** Arrange: the plate's objects arranged by Orca in the slicer sidecar (absent: not now) */
     arrange?: () => void;
+    /** Delete All: every instance on the plate (absent: none, or a file that can't be saved) */
+    deleteAll?: () => void;
     locked?: boolean;
     remove?: () => void;
   },
@@ -75,7 +83,7 @@ export function plateMenu(
     { label: tr('Select All'), onClick: on.selectAll },
     { label: tr('Select All Plates') },
     { label: tr('Plate Settings'), onClick: on.settings },
-    { label: tr('Delete All'), separator: true },
+    { label: tr('Delete All'), separator: true, onClick: on.deleteAll },
     { label: tr('Arrange'), separator: true, onClick: on.arrange },
     { label: tr('Auto Rotate'), onClick: on.orient },
     { label: tr('Order By'), submenu: true },
@@ -151,7 +159,15 @@ export function multiMenu(
   tr: Tr,
   deleteKey: string,
   printable: boolean,
-  on: { zoom: () => void; deselect: () => void },
+  on: {
+    zoom: () => void;
+    deselect: () => void;
+    remove?: () => void;
+    printable?: () => void;
+    autoDrop?: { checked: boolean; toggle?: () => void };
+    /** Set Filament for selected items: its choices (absent: greyed) */
+    filaments?: MenuItem[];
+  },
   align?: MenuItem[] | string,
 ): MenuItem[] {
   return [
@@ -163,10 +179,12 @@ export function multiMenu(
     { label: tr('Transform'), submenu: true },
     alignItem(tr, align),
     { label: tr('Fix Model') },
-    { label: tr('Delete'), shortcut: deleteKey, separator: true },
-    { label: tr('Set Filament for selected items'), submenu: true, separator: true },
-    { label: tr('Printable'), shortcut: 'V', checked: printable },
-    { label: tr('Auto Drop'), checked: true },
+    { label: tr('Delete'), shortcut: deleteKey, separator: true, onClick: on.remove },
+    on.filaments
+      ? { label: tr('Set Filament for selected items'), items: on.filaments, separator: true }
+      : { label: tr('Set Filament for selected items'), submenu: true, separator: true },
+    { label: tr('Printable'), shortcut: 'V', checked: printable, onClick: on.printable },
+    { label: tr('Auto Drop'), checked: on.autoDrop?.checked ?? true, onClick: on.autoDrop?.toggle },
     { label: tr('Edit Process Settings'), separator: true },
     { label: tr('Copy Process Settings') },
     { label: tr('Paste Process Settings') },

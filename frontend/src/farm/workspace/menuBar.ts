@@ -32,6 +32,10 @@ export interface MenuState {
   outline: boolean;
   /** Duplicate Current Plate: true, else why not (a model too large to rewrite, the plates' limit, not Prepare). */
   duplicatePlate: true | string;
+  /** Delete Selected: something selected the copy can delete */
+  canDelete: boolean;
+  /** Delete All: objects to delete and a copy that can */
+  canDeleteAll: boolean;
 }
 
 export interface MenuActions {
@@ -47,6 +51,8 @@ export interface MenuActions {
   selectAll: () => void;
   deselectAll: () => void;
   duplicatePlate: () => void;
+  deleteSelected: () => void;
+  deleteAll: () => void;
   view: (preset: ViewPreset) => void;
   perspective: (on: boolean) => void;
   toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') => void;
@@ -106,8 +112,8 @@ export function editMenu(tr: Tr, hints: Hints, s: MenuState, a: MenuActions, ext
     { label: tr('Cut'), shortcut: 'Ctrl+X', hint: p2, separator: true },
     { label: tr('Copy'), shortcut: 'Ctrl+C', hint: p2 },
     { label: tr('Paste'), shortcut: 'Ctrl+V', hint: p2 },
-    { label: tr('Delete Selected'), shortcut: 'Del', hint: p2 },
-    { label: tr('Delete All'), shortcut: 'Ctrl+D', hint: p2 },
+    { label: tr('Delete Selected'), shortcut: 'Del', onClick: on(s.canDelete, a.deleteSelected) },
+    { label: tr('Delete All'), shortcut: 'Ctrl+D', onClick: on(s.canDeleteAll, a.deleteAll) },
     { label: tr('Clone Selected'), shortcut: 'Ctrl+K', hint: p2, separator: true },
     {
       label: tr('Duplicate Current Plate'),

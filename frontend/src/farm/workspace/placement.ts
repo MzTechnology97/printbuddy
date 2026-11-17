@@ -39,7 +39,8 @@ export function moved(v: Spec, d: [number, number, number]): Spec {
 // the viewer swaps the slicer's Y and Z (ModelViewer createGeometryFromMesh): the same matrix both ways
 const SWAP = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
 
-const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
+// an instance the draft deletes is hidden (WorkspacePage): out of every tool's reach
+const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null && c.visible);
 const keyOf = (item: THREE.Object3D) => itemKey(String(item.userData.objectId), Number(item.userData.instance ?? 0));
 
 /** The build item's transform in the file (ModelViewer keeps it on the item's group). */

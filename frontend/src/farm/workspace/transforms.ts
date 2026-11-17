@@ -15,7 +15,8 @@ type Vec = [number, number, number];
 /** Model.hpp SINKING_Z_THRESHOLD */
 const SINKING = -0.001;
 
-const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
+// an instance the draft deletes is hidden (WorkspacePage): out of every tool's reach
+const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null && c.visible);
 const keyOf = (item: THREE.Object3D) => itemKey(String(item.userData.objectId), Number(item.userData.instance ?? 0));
 /** An item's part groups (ModelViewer: one per component, ``userData.partId`` its id in model_settings.config); a
  * part the draft deletes is hidden and counts no more (parts.ts). */

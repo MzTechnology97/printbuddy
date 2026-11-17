@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useReducer } from 'react';
 import type { PresetRef, SettingValue, WorkspaceSetting } from './api';
 import type { PlateOp, PlateRef } from './plates';
+import type { ObjectOp } from './objectOps';
 import type { PartOp } from './parts';
 import type { RangeEdits } from './ranges';
 
@@ -134,6 +135,7 @@ export type OnPlate = Record<string, PlateRef>;
 const NO_PLATE: OnPlate = {};
 const NO_RANGES: RangeEdits = {};
 const NO_PARTS: PartOp[] = [];
+const NO_OBJECT_OPS: ObjectOp[] = [];
 
 /** One undo step: the draft, the preset switches it was made on, the instances placed anew, the objects' own
  * settings edited and the plates added, removed or moved (none: ``undefined``). */
@@ -148,6 +150,8 @@ export interface DraftStep {
   ranges?: RangeEdits;
   /** parts deleted or of another type, in order (parts.ts) */
   partOps?: PartOp[];
+  /** objects and instances deleted, printable or not, dropping or not, renamed, in order (objectOps.ts) */
+  objectOps?: ObjectOp[];
 }
 /** The draft with its undo / redo history (Orca's Undo / Redo, Ctrl+Z / Ctrl+Y, on the settings edits). */
 export interface DraftHistory extends DraftStep {
@@ -159,7 +163,7 @@ export interface DraftHistory extends DraftStep {
 export type DraftAction =
   | { type: 'edit'; edit: (d: Draft) => Draft; key: string | null; at: number }
   /** a preset switch (or Undo all): the switches and the draft change together, as one step */
-  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements; own?: OwnEdits; plateOps?: PlateOp[]; onPlate?: OnPlate; ranges?: RangeEdits; partOps?: PartOp[] }
+  | { type: 'switch'; switched: Switched; draft: Draft; placed?: Placements; own?: OwnEdits; plateOps?: PlateOp[]; onPlate?: OnPlate; ranges?: RangeEdits; partOps?: PartOp[]; objectOps?: ObjectOp[] }
   /** a plate added, removed or moved: the plates, the instances they move and their own settings, one step */
   | { type: 'plates'; plateOps: PlateOp[]; placed: Placements; own: OwnEdits }
   /** a move (rotation, scale) of instances, with the plates it put them on: one step */
@@ -170,6 +174,8 @@ export type DraftAction =
   | { type: 'ranges'; edit: (r: RangeEdits) => RangeEdits; key: string | null; at: number }
   /** a part deleted or retyped: one step */
   | { type: 'parts'; partOps: PartOp[] }
+  /** an object or instance deleted, a flag changed, a name: one step */
+  | { type: 'objects'; objectOps: ObjectOp[] }
   | { type: 'undo' }
   | { type: 'redo' };
 /** Edits of the same setting closer than this make one undo step. */
@@ -185,6 +191,7 @@ const stepOf = (h: DraftHistory): DraftStep => ({
   onPlate: h.onPlate,
   ranges: h.ranges,
   partOps: h.partOps,
+  objectOps: h.objectOps,
 });
 
 export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
@@ -196,7 +203,7 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
     if (!h.future.length) return h;
     return { ...h.future[0], past: [...h.past, stepOf(h)], future: h.future.slice(1), last: null };
   }
-  if (a.type === 'switch' || a.type === 'place' || a.type === 'plates' || a.type === 'parts') {
+  if (a.type === 'switch' || a.type === 'place' || a.type === 'plates' || a.type === 'parts' || a.type === 'objects') {
     const next: DraftStep =
       a.type === 'place'
         ? { ...stepOf(h), placed: a.placed, onPlate: a.onPlate ?? h.onPlate }
@@ -204,7 +211,9 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
           ? { ...stepOf(h), plateOps: a.plateOps, placed: a.placed, own: a.own }
           : a.type === 'parts'
             ? { ...stepOf(h), partOps: a.partOps }
-            : {
+            : a.type === 'objects'
+              ? { ...stepOf(h), objectOps: a.objectOps }
+              : {
               draft: a.draft,
               switched: a.switched,
               placed: a.placed ?? h.placed,
@@ -213,9 +222,10 @@ export function draftHistory(h: DraftHistory, a: DraftAction): DraftHistory {
               onPlate: a.onPlate ?? h.onPlate,
               ranges: a.ranges ?? h.ranges,
               partOps: a.partOps ?? h.partOps,
+              objectOps: a.objectOps ?? h.objectOps,
             };
     const flat = (x: DraftStep) =>
-      JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS, x.own ?? NO_OWN, x.plateOps ?? NO_OPS, x.onPlate ?? NO_PLATE, x.ranges ?? NO_RANGES, x.partOps ?? NO_PARTS]);
+      JSON.stringify([x.draft, x.switched ?? NO_SWITCH, x.placed ?? NO_PLACEMENTS, x.own ?? NO_OWN, x.plateOps ?? NO_OPS, x.onPlate ?? NO_PLATE, x.ranges ?? NO_RANGES, x.partOps ?? NO_PARTS, x.objectOps ?? NO_OBJECT_OPS]);
     if (flat(next) === flat(h)) return h;
     return { ...next, past: [...h.past, stepOf(h)].slice(-HISTORY), future: [], last: null };
   }
@@ -250,6 +260,7 @@ export function useSettingsDraft(
   const onPlate = history.onPlate ?? NO_PLATE;
   const ranges = history.ranges ?? NO_RANGES;
   const partOps = history.partOps ?? NO_PARTS;
+  const objectOps = history.objectOps ?? NO_OBJECT_OPS;
   const settings = useMemo(() => (view ? view(source, switched.values) : source), [view, source, switched.values]);
   const byKey = useMemo(() => new Map(settings.map((s) => [s.key, s])), [settings]);
   const set = useCallback(
@@ -261,7 +272,7 @@ export function useSettingsDraft(
   // Undo all: the edits, the preset switches, the placements and the objects' own settings, one step that Undo brings back
   const resetAll = useCallback(
     () =>
-      dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS, own: NO_OWN, plateOps: NO_OPS, onPlate: NO_PLATE, ranges: NO_RANGES, partOps: NO_PARTS }),
+      dispatch({ type: 'switch', switched: NO_SWITCH, draft: {}, placed: NO_PLACEMENTS, own: NO_OWN, plateOps: NO_OPS, onPlate: NO_PLATE, ranges: NO_RANGES, partOps: NO_PARTS, objectOps: NO_OBJECT_OPS }),
     [],
   );
   /** Plates added, removed or moved (all of them so far), with the instances they move and their own settings. */
@@ -299,6 +310,8 @@ export function useSettingsDraft(
   );
   /** The parts deleted or retyped (all of them so far), one undo step. */
   const setPartOps = useCallback((next: PartOp[]) => dispatch({ type: 'parts', partOps: next }), []);
+  /** The objects' operations (all of them so far), one undo step. */
+  const setObjectOps = useCallback((next: ObjectOp[]) => dispatch({ type: 'objects', objectOps: next }), []);
   const place = useCallback((next: Placements, plates?: OnPlate) => dispatch({ type: 'place', placed: next, onPlate: plates }), []);
   const switchTo = useCallback((next: Switched, nextDraft: Draft) => dispatch({ type: 'switch', switched: next, draft: nextDraft }), []);
   const undo = useCallback(() => dispatch({ type: 'undo' }), []);
@@ -314,9 +327,9 @@ export function useSettingsDraft(
     [draft, byKey],
   );
   return {
-    settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, partOps, setPartOps, draft, set, reset, resetAll, invalid,
+    settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, partOps, setPartOps, objectOps, setObjectOps, draft, set, reset, resetAll, invalid,
     count:
-      Object.keys(draft).length + Object.values(own).reduce((n, keys) => n + Object.keys(keys).length, 0) + plateOps.length + Object.keys(ranges).length + partOps.length,
+      Object.keys(draft).length + Object.values(own).reduce((n, keys) => n + Object.keys(keys).length, 0) + plateOps.length + Object.keys(ranges).length + partOps.length + objectOps.length,
     undo, redo, canUndo: history.past.length > 0, canRedo: history.future.length > 0,
   };
 }

@@ -13,7 +13,8 @@ const SNAP = 1; // GLGizmoMove3D::m_snap_step, mm
 const SPACE_PX = 20; // space_size: 20 pixels beyond the box
 const NAME = 'workspace-move-gizmo';
 
-const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
+// an instance the draft deletes is hidden (WorkspacePage): out of every tool's reach
+const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null && c.visible);
 const keyOf = (item: THREE.Object3D) => `${item.userData.objectId}:${Number(item.userData.instance ?? 0)}`;
 
 /** The instances' box in the model group's frame (x: the slicer's X, y: its Z, z: its Y); null without any. */
