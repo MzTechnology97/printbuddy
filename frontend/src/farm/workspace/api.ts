@@ -237,6 +237,7 @@ export const workspaceApi = {
     instancePlates: { object_id: string; instance: number; plate: number; new_plate?: boolean }[] = [],
     layerRanges: { object_id: string; ranges: LayerRange[] }[] = [],
     partOps: { op: 'delete' | 'type'; object_id: string; part_id: string; type?: string }[] = [],
+    objectOps: { op: string; object_id: string; instance?: number | null; part_id?: string | null; value?: boolean | string | null }[] = [],
   ) =>
     farmRequest<SavedCopy>(`/workspace/files/${fileId}/copy`, {
       method: 'POST',
@@ -253,6 +254,7 @@ export const workspaceApi = {
         instance_plates: instancePlates,
         layer_ranges: layerRanges,
         part_ops: partOps,
+        object_ops: objectOps,
       }),
     }),
 };

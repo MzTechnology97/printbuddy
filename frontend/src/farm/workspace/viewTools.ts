@@ -65,7 +65,8 @@ export interface Target {
 // one raycaster for every pick (the pointer moves often)
 const RAY = new THREE.Raycaster();
 
-const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null);
+// an instance the draft deletes is hidden (WorkspacePage): out of every tool's reach
+const items = (view: ViewerScene) => view.model.children.filter((c) => c.userData.objectId != null && c.visible);
 
 /** The scene nodes a target covers: instances, or the part's group in each. */
 function nodesOf(view: ViewerScene, t: Target): THREE.Object3D[] {

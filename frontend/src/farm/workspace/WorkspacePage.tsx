@@ -87,7 +87,7 @@ import { ArrangeOptionsDialog } from './ArrangeOptions';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { FILAMENT_KEY, type Selection, instancesOf, ownSettings, ownToSave } from './objects';
+import { FILAMENT_KEY, type Selection, filamentEdits, instancesOf, ownSettings, ownToSave } from './objects';
 import { defaultOptions, firstRanges, rangeLabel, rangesOf, rangesToSave, withRanges } from './ranges';
 import {
   type PartOp,
@@ -100,6 +100,7 @@ import {
   refusal,
   withPartOps,
 } from './parts';
+import { ILLEGAL, type ObjectOp, deleted, isDeleted, nameRefusal, plateDeletions, printableOf, withObjectOps } from './objectOps';
 import { ObjectTableDialog } from './ObjectTable';
 import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
 import {
@@ -282,22 +283,18 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const presetSwitch = usePresetSwitch(source.settings, () => livePresets.current!, (message) => showToast(message, 'error'));
   const { pending } = presetSwitch;
   // the switches are part of the draft's undo history: a switch is one step, preset and values together
-  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, partOps, setPartOps, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
+  const { settings, switched, switchTo, placed, place, onPlate, own, setOwn, setOwnMany, setOwnTargets, plateOps, setPlates, ranges, setRanges, partOps, setPartOps, objectOps, setObjectOps, draft, set, reset, resetAll, invalid, count: edits, undo, redo, canUndo, canRedo } =
     useSettingsDraft(source.settings, withSwitched);
   // the plates as the unsaved adds, removals, moves and duplicates leave them, the instances moved onto another plate
   // on it, with their unsaved names (plates.ts); the objects with their parts deleted or retyped (parts.ts)
-  const doc = useMemo(
-    () => ({
-      ...source,
-      settings,
-      objects: withPartOps(source.objects, partOps),
-      plates: withAdded(applyPlateOps(withMoved(source.plates, onPlate), plateOps), onPlate).map((p) => ({
-        ...p,
-        name: plateMeta(p, own).plater_name || null,
-      })),
-    }),
-    [source, settings, plateOps, own, onPlate, partOps],
-  );
+  const doc = useMemo(() => {
+    const plates = withAdded(applyPlateOps(withMoved(source.plates, onPlate), plateOps), onPlate).map((p) => ({
+      ...p,
+      name: plateMeta(p, own).plater_name || null,
+    }));
+    // the objects and instances deleted, renamed, dropping or not (objectOps.ts)
+    return { ...source, settings, ...withObjectOps(withPartOps(source.objects, partOps), plates, objectOps) };
+  }, [source, settings, plateOps, own, onPlate, partOps, objectOps]);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { showToast } = useToast();
@@ -520,6 +517,21 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       };
     });
   }, [partOps, source.objects, layout, i18n.language]);
+  const objectRows = useMemo(() => {
+    const o = (text: string) => orcaText(layout, text, i18n.language);
+    const nameOf = (id: string) => source.objects.find((x) => x.id === id)?.name ?? id;
+    return objectOps.map((op, i) => {
+      const where = op.instance != null ? `${nameOf(op.object_id)} #${op.instance + 1}` : nameOf(op.object_id);
+      const part = op.part_id ? source.objects.find((x) => x.id === op.object_id)?.parts.find((p) => p.id === op.part_id)?.name : null;
+      const name =
+        op.op === 'delete'
+          ? o('Delete')
+          : op.op === 'rename'
+            ? `${o('Rename')}: ${String(op.value)}`
+            : `${o(op.op === 'printable' ? 'Printable' : 'Auto Drop')}: ${op.value ? '✓' : '✗'}`;
+      return { id: `object${i}`, section: part ? `${where} › ${part}` : where, name };
+    });
+  }, [objectOps, source.objects, layout, i18n.language]);
   const bed = useMemo(() => bedOf(doc), [doc]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
@@ -863,6 +875,20 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       hint: r.why ?? undefined,
     }));
   };
+  // an instance the draft deletes is hidden in the 3D view, out of every tool's reach; Printable as the draft has it
+  useEffect(() => {
+    if (!view) return;
+    const gone = deleted(objectOps);
+    for (const item of view.model.children) {
+      if (item.userData.objectId == null) continue;
+      const id = String(item.userData.objectId);
+      const k = Number(item.userData.instance ?? 0);
+      item.visible = !isDeleted(gone, id, k);
+      item.userData.filePrintable ??= item.userData.printable !== false;
+      item.userData.printable = printableOf(objectOps, id, k) ?? item.userData.filePrintable;
+    }
+    setStats(objectStats(view));
+  }, [view, objectOps]);
   // a part the draft deletes is hidden in the 3D view, and so out of every tool's reach (transforms.ts partsOf)
   useEffect(() => {
     if (!view) return;
@@ -892,6 +918,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
    * with their plates and a removed plate's to where the objects on no plate are (they stay in the project, on no
    * plate: plate_structure.py); until then every placement stays where the file puts it. */
   const plateOp = (op: PlateOp) => {
+    // a duplicate copies a plate's instances by the file's numbering, which a deletion changes: saved first
+    if (op.op === 'duplicate' && objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.objectsBeforeDuplicate'), 'error');
     // a duplicate copies the file's instances: one a part's deletion moves (its transform into them) must be saved first
     if (op.op === 'duplicate' && partOps.length) return showToast(t('farm.workspace.partsBeforeDuplicate'), 'error');
     setPlates([...plateOps, op], placed, remapPlateEdits(own, op));
@@ -929,6 +957,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (arranging) return;
     if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
     if (partOps.length) return showToast(t('farm.workspace.arrange.saveParts'), 'error');
+    if (objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
     if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
     setArranging(true);
     showToast(tr('Arranging...'), 'info');
@@ -943,6 +972,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         object_settings: ownToSave(own),
         plate_settings: plateToSave(own),
         layer_ranges: rangesToSave(ranges),
+        object_ops: objectOps,
         instance_plates: Object.entries(onPlate)
           .filter((e): e is [string, number] => typeof e[1] === 'number')
           .map(([key, p]) => ({ object_id: key.split(':')[0], instance: Number(key.split(':')[1]), plate: p })),
@@ -1045,6 +1075,63 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     setPartOps([...partOps, op]);
     if (op.op === 'delete') select({ kind: 'object', id: op.object_id, plate: plateOf(op.object_id) });
   };
+  // the objects' operations need a model the copy can rewrite (deletions drop its build items)
+  const canEditObjects = doc.editable && !doc.cannot_place;
+  /** The objects a menu or a key acts on: the selection's, or the one target. */
+  const targetsOf = (sel: Exclude<Selection, null>) =>
+    sel.kind === 'object' && selectedIds.length > 1 && selectedIds.includes(sel.id) ? selectedIds : sel.kind === 'object' ? [sel.id] : [];
+  /** An instance's printable flag now (the file's, the draft's operations made). */
+  const printableNow = (objectId: string, instance: number) =>
+    printableOf(objectOps, objectId, instance) ??
+    (view?.model.children.find((c) => String(c.userData.objectId) === objectId && Number(c.userData.instance ?? 0) === instance)?.userData
+      .filePrintable as boolean | undefined) ??
+    true;
+  /** Orca's Delete (Selection::erase): a part of an object of several; an instance of an object of several; else the
+   * objects. One undo step. */
+  const deleteSelection = (sel: Selection = selection) => {
+    if (!canEditObjects || sel?.kind !== 'object') return;
+    const obj = doc.objects.find((o) => o.id === sel.id);
+    if (sel.partId && !sel.layers && obj && obj.parts.length > 1) return partOp({ op: 'delete', object_id: sel.id, part_id: sel.partId });
+    const ids = targetsOf(sel);
+    const one = ids.length === 1 && sel.instance != null && (instances.get(sel.id)?.length ?? 1) > 1;
+    const ops: ObjectOp[] = one ? [{ op: 'delete', object_id: sel.id, instance: sel.instance }] : ids.map((id) => ({ op: 'delete', object_id: id }));
+    setObjectOps([...objectOps, ...ops]);
+    deselect();
+  };
+  const deleteAll = () => {
+    if (!canEditObjects || !doc.objects.length) return;
+    setObjectOps([...objectOps, ...doc.objects.map((o): ObjectOp => ({ op: 'delete', object_id: o.id ?? '' }))]);
+    deselect();
+  };
+  /** Printable (V): every target on, unless all are (append_menu_item_set_printable); an instance picked alone, only it. */
+  const togglePrintable = (sel: Selection = selection) => {
+    if (!canEditObjects || sel?.kind !== 'object') return;
+    const ids = targetsOf(sel);
+    const one = ids.length === 1 && sel.instance != null && (instances.get(sel.id)?.length ?? 1) > 1 ? sel.instance : null;
+    const all = ids.every((id) => (one != null ? [one] : (instances.get(id) ?? [{ index: 0 }]).map((i) => i.index)).every((k) => printableNow(id, k)));
+    setObjectOps([...objectOps, ...ids.map((id): ObjectOp => ({ op: 'printable', object_id: id, instance: one, value: !all }))]);
+  };
+  const autoDropOf = (id: string) => doc.objects.find((o) => o.id === id)?.auto_drop !== false;
+  const toggleAutoDrop = (ids: string[]) => {
+    if (!canEditObjects || !ids.length) return;
+    const value = !ids.every(autoDropOf);
+    setObjectOps([...objectOps, ...ids.map((id): ObjectOp => ({ op: 'auto_drop', object_id: id, value }))]);
+  };
+  const objectEditing = canEditObjects
+    ? {
+        rename: (target: Exclude<Selection, null>, name: string) => {
+          const why = nameRefusal(name);
+          if (why) return `${tr(why)} ${ILLEGAL}`;
+          if (target.kind === 'plate') {
+            const p = doc.plates.find((x) => x.index === target.plate);
+            if (p) applyPlate(p, { plater_name: name });
+          } else setObjectOps([...objectOps, { op: 'rename', object_id: target.id, part_id: target.partId ?? null, value: name }]);
+          return null;
+        },
+        printable: (objectId: string) => togglePrintable({ kind: 'object', id: objectId, plate: null }),
+        remove: () => deleteSelection(),
+      }
+    : undefined;
   const select = (sel: Selection) => {
     setSelection(sel);
     setInfoClosed(false);
@@ -1079,7 +1166,29 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           tr,
           t('farm.workspace.deleteKey'),
           selectedIds.every((id) => stats.get(id)?.printable ?? true),
-          { zoom: () => fitTo(view!, null), deselect },
+          {
+            zoom: () => fitTo(view!, null),
+            deselect,
+            ...(canEditObjects && {
+              remove: () => deleteSelection(sel),
+              printable: () => togglePrintable(sel),
+              autoDrop: { checked: selectedIds.every(autoDropOf), toggle: () => toggleAutoDrop(selectedIds) },
+              // set_extruder_for_selected_items: each object's filament, its model parts' own dropped
+              filaments: colours.map((_, i) => ({
+                label: `${tr('Filament')} ${i + 1}`,
+                onClick: () =>
+                  setOwnTargets(
+                    Object.assign(
+                      {},
+                      ...selectedIds.map((id) => {
+                        const o = doc.objects.find((x) => x.id === id);
+                        return o ? filamentEdits(o, null, i + 1, 'keys', own) : {};
+                      }),
+                    ),
+                  ),
+              })),
+            }),
+          },
           doc.editable && !doc.cannot_place ? alignMenu(alignSelection(selectedItems(view, selectedIds, null), [], false)) : undefined,
         ),
       });
@@ -1148,6 +1257,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             remove: doc.plates.length > 1 && !doc.cannot_place ? () => plateOp({ op: 'remove', plate: sel.plate }) : undefined,
             orient: canOrientPlate(sel.plate) ? () => orientPlate(sel.plate) : undefined,
             arrange: canArrange === true ? () => void runArrange(sel.plate) : undefined,
+            deleteAll: (() => {
+              const p = doc.plates.find((x) => x.index === sel.plate);
+              return canEditObjects && p && p.object_ids.length ? () => (setObjectOps([...objectOps, ...plateDeletions(p)]), deselect()) : undefined;
+            })(),
           }),
         }),
       });
@@ -1172,6 +1285,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
+          ...(canEditObjects && {
+            remove: () => deleteSelection(sel),
+            printable: () => togglePrintable(sel),
+            autoDrop: { checked: autoDropOf(sel.id), toggle: () => toggleAutoDrop([sel.id]) },
+          }),
           // layers_editing: the object's first range (0-2 mm) when it has none, then its "Layers" row selected
           heightRange:
             doc.editable && !doc.cannot_place
@@ -1430,7 +1548,14 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       const ids = e.shiftKey ? doc.objects.map((o) => o.id ?? '').filter(Boolean) : [...stats.keys()];
       setSelectedIds(ids);
       if (ids.length) select({ kind: 'object', id: ids[0], plate: selectedPlate });
+    } else if (ctrl && (e.key === 'd' || e.key === 'D')) {
+      handled();
+      deleteAll();
     } else if (ctrl) return;
+    else if (e.key === 'Delete' || e.key === 'Backspace') {
+      handled();
+      deleteSelection();
+    } else if (e.key === 'v' || e.key === 'V') togglePrintable();
     else if (e.key === 'z' || e.key === 'Z') fitTo(view, selectedId);
     else if (e.key === 'i' || e.key === 'I' || e.key === 'o' || e.key === 'O') {
       // zoom in / out towards the camera's target
@@ -1507,8 +1632,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             ? { object_id, instance: Number(instance), plate: now }
             : { object_id, instance: Number(instance), plate: now, new_plate: true };
         }),
-        rangesToSave(ranges),
+        rangesToSave(ranges).filter((r) => doc.objects.some((o) => o.id === r.object_id)),
         partOps,
+        objectOps,
       ),
     onSuccess: (saved) => {
       showToast(t('farm.workspace.save.saved', { name: saved.filename }), 'success');
@@ -1645,6 +1771,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       !doc.editable || mode !== 'prepare' || plate == null
         ? ''
         : (doc.cannot_place ?? (doc.plates.length < MAX_PLATES ? (true as const) : t('farm.workspace.plateLimit', { count: MAX_PLATES }))),
+    canDelete: canEditObjects && mode === 'prepare' && selection?.kind === 'object',
+    canDeleteAll: canEditObjects && mode === 'prepare' && doc.objects.length > 0,
   };
   const menuActions = {
     open: () => (!count || window.confirm(t('farm.workspace.unsavedConfirm'))) && navigate('/files'),
@@ -1673,6 +1801,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       const instances = placementsToSave(placed).transforms.filter((x) => objects.includes(x.object_id));
       plateOp({ op: 'duplicate', plate: p.index, objects, instances });
     },
+    deleteSelected: () => deleteSelection(),
+    deleteAll,
     view: (preset: Parameters<typeof setView>[1]) => view && setView(view, preset),
     perspective: (on: boolean) => setCanvas((c) => ({ ...c, perspective: on })),
     toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') =>
@@ -1797,7 +1927,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             objectTable={doc.objects.length ? { open: () => setObjectTable(null), tip: tr("View all object's settings") } : undefined}
             onPickPreset={doc.editable && !presetSwitch.busy ? (section, filament, at) => setPicker({ section, filament, at }) : undefined}
             pickLabel={(name) => t('farm.workspace.presets.switch.pick', { name })}
-            own={doc.editable ? ownEditing : undefined}
+            own={doc.editable ? { ...ownEditing, objects: objectEditing } : undefined}
           />
         </aside>
         <main className={`${pane === 'view' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-w-0 relative`}>
@@ -2080,6 +2210,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             ...ownRows,
             ...rangeRows,
             ...partRows,
+            ...objectRows,
             ...plateRows,
           ]}
           invalid={[...invalid, ...ownRows.filter((r) => r.invalid).map((r) => r.id)]}

@@ -130,6 +130,60 @@ export interface OwnEditing {
   plate?: { apply: (plate: WorkspacePlate, values: PlateValues) => void; customize: (plate: WorkspacePlate) => void };
   /** the objects' height ranges (ranges.ts) */
   ranges?: RangeEditing;
+  /** the objects' names, printable column and Del (objectOps.ts) */
+  objects?: ObjectEditing;
+}
+
+/** The list's own object operations: a name typed in place (ObjectList's editing), the Printable column, Del. */
+export interface ObjectEditing {
+  /** a plate's, an object's or a part's new name; Orca's refusal (its message) when it can't be one */
+  rename: (target: Exclude<Selection, null>, name: string) => string | null;
+  /** the Printable column clicked: the object's instances on or off (toggle_printable_state) */
+  printable: (objectId: string) => void;
+  /** Del: the selection deleted */
+  remove: () => void;
+}
+
+/** A name in the list, typed over in place on a double click (Enter keeps it, Esc or an empty name doesn't). */
+function Name({ text, initial = text, onRename }: { text: string; initial?: string; onRename?: (name: string) => string | null }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (editing == null || !onRename)
+    return (
+      <span className="flex-1 truncate" onDoubleClick={onRename ? (e) => (e.stopPropagation(), setEditing(initial)) : undefined}>
+        {text}
+      </span>
+    );
+  const commit = () => {
+    const name = editing;
+    if (!name.trim() || name === initial) return setEditing(null);
+    const why = onRename(name);
+    if (why) setError(why);
+    else setEditing(null);
+  };
+  return (
+    <span className="flex-1 min-w-0">
+      <input
+        autoFocus
+        aria-label={text}
+        value={editing}
+        onChange={(e) => (setEditing(e.target.value), setError(null))}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') setEditing(null);
+        }}
+        onBlur={() => setEditing(null)}
+        className="w-full h-5 bg-bambu-dark border border-bambu-green rounded px-1 text-[12px] text-white"
+      />
+      {error && (
+        <span role="alert" className="block text-[11px] text-red-400 whitespace-normal">
+          {error}
+        </span>
+      )}
+    </span>
+  );
 }
 
 /** Editing the objects' height ranges: the unsaved edits and how to make them. */
@@ -226,6 +280,12 @@ export function ObjectsPanel({
   const pick = (obj: WorkspaceObject, partId: string | null, n: number, how: 'column' | 'keys') =>
     editing?.setTargets?.(filamentEdits(obj, partId, n, how, edits));
   const filamentKeys = (e: React.KeyboardEvent) => {
+    // ObjectList::key_event: Del deletes the selection
+    if ((e.key === 'Delete' || e.key === 'Backspace') && editing?.objects && selected) {
+      e.preventDefault();
+      editing.objects.remove();
+      return;
+    }
     // ObjectList::key_event: with more than one filament, a digit up to their count sets the selection's
     if (!canPick || colours.length < 2 || e.ctrlKey || e.metaKey || e.altKey || !/^[0-9]$/.test(e.key)) return;
     const n = Number(e.key);
@@ -343,7 +403,11 @@ export function ObjectsPanel({
                 onContextMenu={(e) => plate && menu(e, { kind: 'plate', plate: plate.index })}
               >
                 {caret(plateKey, objects.length > 0)}
-                <span className="flex-1 truncate">{plateName}</span>
+                {plate && editing?.objects ? (
+                  <Name text={plateName} initial={plate.name ?? ''} onRename={(name) => editing.objects!.rename({ kind: 'plate', plate: plate.index }, name)} />
+                ) : (
+                  <span className="flex-1 truncate">{plateName}</span>
+                )}
                 {plateHasOwn && <Cog title={ownCount} />}
               </div>
               {!!plate?.copies?.length && open(plateKey) && (
@@ -388,12 +452,14 @@ export function ObjectsPanel({
                           {s && s.openEdges > 0 && (
                             <img src={orcaIcon('obj_warning')} alt={tr('Errors')} title={meshTip(s.openEdges)} className="w-4 h-4 flex-shrink-0" />
                           )}
-                          <span className="flex-1 truncate">{obj.name ?? `#${id}`}</span>
+                          <Name text={obj.name ?? `#${id}`} onRename={editing?.objects && ((name) => editing.objects!.rename(sel, name))} />
                           {cols.height && <Cell icon={s?.variableLayers && 'obj_variable_layer_height'} title={tr('Variable layer height')} />}
                           <input
                             type="checkbox"
-                            readOnly
-                            disabled
+                            readOnly={!editing?.objects}
+                            disabled={!editing?.objects}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={() => editing?.objects?.printable(id)}
                             checked={s?.printable ?? true}
                             aria-label={tr('Printable')}
                             title={tr('Printable')}
@@ -434,7 +500,10 @@ export function ObjectsPanel({
                                   <li key={`${objKey}-${p.id ?? p.name}`} role="treeitem" aria-selected={partSelected} aria-level={3}>
                                     <div className={`${row(partSelected)} pl-9`} onClick={() => onSelect(partSel)} onContextMenu={(e) => menu(e, partSel)}>
                                       <img src={orcaIcon(PART_ICONS[p.type ?? 'normal_part'] ?? 'menu_add_part')} alt="" className="w-3.5 h-3.5" aria-hidden />
-                                      <span className="flex-1 truncate">{p.name ?? `#${p.id}`}</span>
+                                      <Name
+                                        text={p.name ?? `#${p.id}`}
+                                        onRename={editing?.objects && p.id ? (name) => editing.objects!.rename(partSel, name) : undefined}
+                                      />
                                       {p.id && FILAMENT_PARTS.has(p.type ?? 'normal_part') && (
                                         <FilamentCell
                                           value={filamentOf(obj, p.id, edits)}
@@ -507,15 +576,15 @@ export function ObjectsPanel({
                               </div>
                               {open(`${objKey}-i`) && (
                                 <ul role="group">
-                                  {placed.map((inst) => {
+                                  {placed.map((inst, k) => {
                                     const instSel = { kind: 'object' as const, id, plate: inst.plate, instance: inst.index };
                                     const instSelected = selected?.kind === 'object' && selected.id === id && selected.instance === inst.index && !selected.part;
                                     // OrcaSlicer writes the plate's index from 0 (find_instance_belongs): no mark on the first
                                     const plate0 = inst.plate - 1;
                                     const label =
                                       plate0 > 0
-                                        ? orcaFormat(layout, '[P%d]Instance %d', i18n.language, plate0, inst.index + 1)
-                                        : orcaFormat(layout, 'Instance %d', i18n.language, inst.index + 1);
+                                        ? orcaFormat(layout, '[P%d]Instance %d', i18n.language, plate0, k + 1)
+                                        : orcaFormat(layout, 'Instance %d', i18n.language, k + 1); // numbered as the list has them
                                     return (
                                       <li key={`${inst.plate}-${inst.index}`} role="treeitem" aria-selected={instSelected} aria-level={4}>
                                         <div

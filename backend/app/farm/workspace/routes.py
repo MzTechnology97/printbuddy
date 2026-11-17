@@ -33,6 +33,7 @@ from backend.app.farm.workspace import (
     arrange as ws_arrange,
     layer_ranges,
     object_settings,
+    objects as ws_objects,
     parts,
     placement,
     plate_settings,
@@ -77,6 +78,8 @@ class CopyRequest(BaseModel):
     layer_ranges: list[RangeEdit] = Field(default_factory=list, max_length=500)
     # parts deleted or of another type (Delete, Change Type, Precise Seam Type), in order
     part_ops: list[parts.PartOp] = Field(default_factory=list, max_length=parts.MAX_OPS)
+    # objects and instances deleted, printable or not, dropping automatically or not, renamed (instances: the file's)
+    object_ops: list[ws_objects.ObjectOp] = Field(default_factory=list, max_length=ws_objects.MAX_OPS)
     # plates added, removed, moved to the front or duplicated, in order, before ``plate_settings`` (numbered after them)
     plate_structure: list[PlateOp] = Field(default_factory=list, max_length=MAX_PLATE_OPS)
 
@@ -234,6 +237,7 @@ def _build_copy(
     instance_plates: list[InstancePlate] = (),
     range_edits: list[RangeEdit] = (),
     part_ops: list[parts.PartOp] = (),
+    object_ops: list[ws_objects.ObjectOp] = (),
 ) -> list[dict]:
     """Blocking: write the copy to ``dest``; the changes applied (HTTP errors for what can't be saved)."""
     try:
@@ -252,11 +256,11 @@ def _build_copy(
         replaced, placed = {}, []
         settings_xml = (
             project._read_small(zf, project.MODEL_SETTINGS_ENTRY)
-            if part_transforms or own_settings or plate_edits or plate_ops or instance_plates or part_ops
+            if part_transforms or own_settings or plate_edits or plate_ops or instance_plates or part_ops or object_ops
             else None
         )
         model = original_model = None
-        if transforms or part_transforms or plate_ops or instance_plates or range_edits or part_ops:
+        if transforms or part_transforms or plate_ops or instance_plates or range_edits or part_ops or object_ops:
             model = original_model = project.read_model(zf)
             if transforms:
                 model, placed = placement.place(model, transforms)
@@ -295,6 +299,18 @@ def _build_copy(
                 if (a["object_id"], a["instance"]) in new:
                     a.update(after=new[(a["object_id"], a["instance"])], new_plate=True)
             placed += assigned
+        if object_ops:
+            if settings_xml is None:
+                raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
+            if any(op.op == "duplicate" for op in plate_ops) and any(o.op == "delete" for o in object_ops):
+                # a duplicate copies a plate's instances by the file's numbering, which a deletion changes
+                raise HTTPException(
+                    status_code=422, detail="Save the copy with its objects deleted first, then duplicate"
+                )
+            indexed = {name: project._read_small(zf, name) for name in ws_objects.INDEXED}
+            model, settings_xml, renumbered, changed = ws_objects.apply(model, settings_xml, list(object_ops), indexed)
+            replaced.update(renumbered)
+            placed += changed
         if onto and not plate_ops:
             raise HTTPException(status_code=422, detail="The plates can't be changed so: no plate is added")
         if plate_ops:
@@ -313,7 +329,8 @@ def _build_copy(
         if settings_xml is not None and settings_xml != project._read_small(zf, project.MODEL_SETTINGS_ENTRY):
             replaced[project.MODEL_SETTINGS_ENTRY] = settings_xml
         added: dict[str, bytes] = {}
-        ranges_xml = project._read_small(zf, project.LAYER_RANGES_ENTRY)
+        # as the deletions numbered it again, else as the file has it
+        ranges_xml = replaced.get(project.LAYER_RANGES_ENTRY) or project._read_small(zf, project.LAYER_RANGES_ENTRY)
         copied = [pair for a in placed if a.get("op") == "duplicate" for pair in a.get("copies", [])]
         edits = list(range_edits)
         if model is not None and (edits or (copied and ranges_xml)):
@@ -351,6 +368,8 @@ def _build_copy(
         raise HTTPException(status_code=422, detail=f"The height ranges can't be saved so: {exc}"[:1000]) from exc
     except parts.InvalidPartOp as exc:
         raise HTTPException(status_code=422, detail=f"The parts can't be changed so: {exc}"[:1000]) from exc
+    except ws_objects.InvalidObjectOp as exc:
+        raise HTTPException(status_code=422, detail=f"The objects can't be changed so: {exc}"[:1000]) from exc
     except project.ArchiveError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot save a copy of this 3MF: {exc}"[:500]) from exc
 
@@ -417,6 +436,7 @@ async def save_copy(
                 body.instance_plates,
                 body.layer_ranges,
                 body.part_ops,
+                body.object_ops,
             )
             del data
             path, file_hash, metadata, thumbnail = await asyncio.to_thread(_publish, tmp)
@@ -479,6 +499,7 @@ def _arrange_input(lib_file: LibraryFile, data: bytes, body: ArrangeRequest, tar
         or body.plate_settings
         or body.instance_plates
         or body.layer_ranges
+        or body.object_ops
     )
     if edited:
         tmp = lib.get_library_files_dir() / f".{uuid.uuid4().hex}.arrange.part"
@@ -496,6 +517,7 @@ def _arrange_input(lib_file: LibraryFile, data: bytes, body: ArrangeRequest, tar
                 [],
                 body.instance_plates,
                 body.layer_ranges,
+                object_ops=body.object_ops,
             )
             data = tmp.read_bytes()
         finally:
@@ -530,6 +552,9 @@ async def arrange_objects(
         raise HTTPException(
             status_code=422, detail="Save the copy with its plates added, removed or moved first, then arrange it"
         )
+    if any(op.op == "delete" for op in body.object_ops):
+        # the arranged instances come back by the copy's numbering, which a deletion changes
+        raise HTTPException(status_code=422, detail="Save the copy with its objects deleted first, then arrange it")
     if body.part_ops:
         # a deleted part's transform goes into its instances: the arranged ones would get it twice
         raise HTTPException(

@@ -319,6 +319,10 @@ UI_STRINGS = [
     "The type of the last solid object part cannot be changed.",
     "Change part type",
     "Choose precise seam subtype",
+    # objects' Delete, Rename and the plate's Delete All (GUI_Factories.cpp, Plater::show_illegal_characters_warning)
+    "Rename",
+    "Invalid name, the following characters are not allowed:",
+    "Delete all objects on the current plate",
     "This plate is locked.\nCannot auto-arrange on this plate.",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",
