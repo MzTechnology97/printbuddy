@@ -204,7 +204,9 @@ class TestArrangeRoute:
         assert f'<item objectid="{new_id}"'.encode() in model  # the copy went with the project
         # a deletion still has to be saved first
         ops = [{"op": "delete", "object_id": "4"}]
-        resp = await async_client.post(f"{API}/{file_id}/arrange", json={"base_sha256": doc["sha256"], "object_ops": ops})
+        resp = await async_client.post(
+            f"{API}/{file_id}/arrange", json={"base_sha256": doc["sha256"], "object_ops": ops}
+        )
         assert resp.status_code == 422 and "deleted first" in resp.json()["detail"]
 
     async def test_more_plates_than_the_project_has_are_refused(self, async_client, db_session, sidecar):
