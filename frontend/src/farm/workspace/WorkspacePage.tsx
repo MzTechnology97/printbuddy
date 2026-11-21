@@ -26,11 +26,11 @@ import {
   type WorkspacePlate,
   workspaceApi,
 } from './api';
-import { PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
+import { CopiesDialog, PresetDialog, SaveCopyDialog, ShortcutsDialog } from './Dialogs';
 import { ComparePresetsDialog, SavePresetDialog, UnsavedChangesDialog } from './PresetDialogs';
 import { SECTION_TITLES, projectPreset, withSwitched } from './presetTools';
 import { type LiveState, usePresetSwitch } from './presetSwitch';
-import { formatValue, toLocaleDecimal, useSettingsDraft, valueErrors } from './draft';
+import { type OwnEdits, formatValue, toLocaleDecimal, useSettingsDraft, valueErrors } from './draft';
 import { useMoveGizmo } from './moveGizmo';
 import {
   IDENTITY,
@@ -44,6 +44,7 @@ import {
   placementsToSave,
   positionOf,
   selectedItems,
+  syncAdded,
   toSpec,
 } from './placement';
 import {
@@ -100,13 +101,26 @@ import {
   refusal,
   withPartOps,
 } from './parts';
-import { ILLEGAL, type ObjectOp, deleted, isDeleted, nameRefusal, plateDeletions, printableOf, withObjectOps } from './objectOps';
+import {
+  ILLEGAL,
+  type ObjectOp,
+  addedItems,
+  deleted,
+  isDeleted,
+  nameRefusal,
+  nextNewId,
+  plateDeletions,
+  printableOf,
+  withObjectOps,
+} from './objectOps';
+import { type Box2, type Clip, convexHull, pastePlacements } from './paste';
 import { ObjectTableDialog } from './ObjectTable';
 import { PlateNameDialog, PlateSettingsDialog, type PlateValues, SpiralConfirm } from './PlateSettings';
 import {
   LAYER_END,
   MAX_PLATES,
   type PlateOp,
+  type PlateRef,
   applyPlateOps,
   parseRanges,
   plateEdits,
@@ -517,22 +531,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       };
     });
   }, [partOps, source.objects, layout, i18n.language]);
-  const objectRows = useMemo(() => {
-    const o = (text: string) => orcaText(layout, text, i18n.language);
-    const nameOf = (id: string) => source.objects.find((x) => x.id === id)?.name ?? id;
-    return objectOps.map((op, i) => {
-      const where = op.instance != null ? `${nameOf(op.object_id)} #${op.instance + 1}` : nameOf(op.object_id);
-      const part = op.part_id ? source.objects.find((x) => x.id === op.object_id)?.parts.find((p) => p.id === op.part_id)?.name : null;
-      const name =
-        op.op === 'delete'
-          ? o('Delete')
-          : op.op === 'rename'
-            ? `${o('Rename')}: ${String(op.value)}`
-            : `${o(op.op === 'printable' ? 'Printable' : 'Auto Drop')}: ${op.value ? '✓' : '✗'}`;
-      return { id: `object${i}`, section: part ? `${where} › ${part}` : where, name };
-    });
-  }, [objectOps, source.objects, layout, i18n.language]);
-  const bed = useMemo(() => bedOf(doc), [doc]);
+  // its settings only: a new bed reloads the 3D view's file (ModelViewer)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- bedOf reads doc.settings
+  const bed = useMemo(() => bedOf(doc), [doc.settings]);
   const isSwitched = (section: PresetRef['section']) => switched.refs.some((r) => r.section === section);
   const presets = {
     printer: (isSwitched('printer') ? null : project?.printer_preset) ?? (byKey.get('printer_settings_id')?.value as string | undefined) ?? null,
@@ -631,8 +632,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const moveInstance = !selectedIds.length && selection?.kind === 'object' ? selection.instance : null;
   const moveKeys = useMemo(
     () => (doc.editable && !doc.cannot_place ? selectedItems(view, moveObjects, moveInstance) : []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the objects selected, by id
-    [view, doc.editable, doc.cannot_place, moveObjects.join('|'), moveInstance],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the objects selected, by id; stats: the 3D view's items changed
+    [view, doc.editable, doc.cannot_place, moveObjects.join('|'), moveInstance, stats],
   );
   const moveTip = useRef<[number, number, number]>([0, 0, 0]);
   const [dragTip, setDragTip] = useState<{ text: string; x: number; y: number } | null>(null);
@@ -875,6 +876,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
       hint: r.why ?? undefined,
     }));
   };
+  // the instances and objects the draft adds (Add instance, Clone, Paste, Set as individual objects: objectOps.ts),
+  // numbered after the file's (its build items) and shown as clones of their object in the 3D view
+  const fileCount = useCallback((id: string) => source.objects.find((o) => o.id === id)?.instances ?? 0, [source.objects]);
+  const added = useMemo(() => addedItems(objectOps, fileCount), [objectOps, fileCount]);
+  useEffect(
+    () => {
+      if (!view) return;
+      syncAdded(view, added);
+      applyPlacements(view, placed);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- placed: applied by its own effect when it changes
+    [view, added],
+  );
   // an instance the draft deletes is hidden in the 3D view, out of every tool's reach; Printable as the draft has it
   useEffect(() => {
     if (!view) return;
@@ -919,7 +933,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
    * plate: plate_structure.py); until then every placement stays where the file puts it. */
   const plateOp = (op: PlateOp) => {
     // a duplicate copies a plate's instances by the file's numbering, which a deletion changes: saved first
-    if (op.op === 'duplicate' && objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.objectsBeforeDuplicate'), 'error');
+    if (op.op === 'duplicate' && objectOps.some((o) => o.op === 'delete' || o.op === 'add_instance' || o.op === 'copy'))
+      return showToast(t('farm.workspace.objectsBeforeDuplicate'), 'error');
     // a duplicate copies the file's instances: one a part's deletion moves (its transform into them) must be saved first
     if (op.op === 'duplicate' && partOps.length) return showToast(t('farm.workspace.partsBeforeDuplicate'), 'error');
     setPlates([...plateOps, op], placed, remapPlateEdits(own, op));
@@ -957,7 +972,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (arranging) return;
     if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
     if (partOps.length) return showToast(t('farm.workspace.arrange.saveParts'), 'error');
-    if (objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
+    if (objectOps.some((o) => o.op === 'delete' || o.op === 'add_instance' || o.op === 'copy'))
+      return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
     if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
     setArranging(true);
     showToast(tr('Arranging...'), 'info');
@@ -1022,6 +1038,27 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (scale.some((v) => Math.abs(v - 100) > 0.01)) parts.push(`${tr('NounScale')} ${scale.map(n).join(' / ')}%`);
     return parts.join(' · ');
   };
+  const objectRows = useMemo(() => {
+    const o = (text: string) => orcaText(layout, text, i18n.language);
+    // a copy's name: the object it copies (Model::add_object keeps it)
+    const nameOf = (id: string) => (source.objects.find((x) => x.id === id) ?? doc.objects.find((x) => x.id === id))?.name ?? id;
+    return objectOps.map((op, i) => {
+      const where = op.instance != null ? `${nameOf(op.object_id)} #${op.instance + 1}` : nameOf(op.object_id);
+      const part = op.part_id ? source.objects.find((x) => x.id === op.object_id)?.parts.find((p) => p.id === op.part_id)?.name : null;
+      const name =
+        op.op === 'add_instance' && op.matrix
+          ? `${o('Add instance')}: ${placementText(op.matrix)}`
+          : op.op === 'copy' && op.matrices?.length
+            ? `${o('Clone')}: ${placementText(op.matrices[0])}${op.matrices.length > 1 ? ` (×${op.matrices.length})` : ''}`
+            : op.op === 'delete'
+          ? o('Delete')
+          : op.op === 'rename'
+            ? `${o('Rename')}: ${String(op.value)}`
+            : `${o(op.op === 'printable' ? 'Printable' : 'Auto Drop')}: ${op.value ? '✓' : '✗'}`;
+      return { id: `object${i}`, section: part ? `${where} › ${part}` : where, name };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- placementText reads the language
+  }, [objectOps, source.objects, doc.objects, layout, i18n.language]);
   useEffect(() => {
     if (view) highlight(view, JSON.parse(targetsKey) as Target[], canvas.outline);
   }, [view, targetsKey, canvas.outline, placed]);
@@ -1132,6 +1169,194 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         remove: () => deleteSelection(),
       }
     : undefined;
+  // --- instances and copies: OrcaSlicer's Add / Remove instance (+ / -), Set number of instances, Set as an individual
+  // object, Clone (Ctrl+K), Copy / Cut / Paste; each one undo step. Additions need the model's ids (next_object_id).
+  const canAdd = canEditObjects && doc.next_object_id != null;
+  /** An object's instances now, in order: the file's and those added, but those deleted. */
+  const instancesNow = (id: string) => {
+    const gone = deleted(objectOps);
+    const all = [...Array(fileCount(id)).keys(), ...added.filter((a) => a.objectId === id).map((a) => a.instance)];
+    return all.filter((k) => !isDeleted(gone, id, k));
+  };
+  /** An instance's box on the bed's axes now (null: not in the 3D view). */
+  const box2 = (key: string): Box2 | null => {
+    const b = view ? boxOf(view, placed, [key]) : null;
+    return b ? { min: [b.min.x, b.min.y], max: [b.max.x, b.max.y] } : null;
+  };
+  /** The plate a box moved by ``d`` lands on (notify_instance_update; 0: none). */
+  const landsOn = (b: Box2, d: [number, number]): PlateRef =>
+    view
+      ? landing({ min: { x: b.min[0] + d[0], y: b.min[1] + d[1] }, max: { x: b.max[0] + d[0], y: b.max[1] + d[1] } }, 0, source.plates.length, doc.plates, view.bed)
+      : 0;
+  /** The plate an instance is on now. */
+  const instancePlate = (id: string, k: number): PlateRef => onPlate[itemKey(id, k)] ?? filePlate(itemKey(id, k));
+  /** The printable flag a copy's build items take (the first item of the object it is first copied from, as the file
+   * has it): a copied instance otherwise gets its own operation. */
+  const templatePrintable = (id: string) => {
+    const root = added.find((a) => a.objectId === id)?.source ?? id;
+    const item = view?.model.children.find((c) => !c.userData.added && String(c.userData.objectId) === root && Number(c.userData.instance ?? 0) === 0);
+    return (item?.userData.filePrintable as boolean | undefined) ?? true;
+  };
+  /** Copies of objects (Model::add_object), with ``extra`` one undo step: each takes the next new id, the source's own
+   * settings and moved parts along, its instances on ``plates``. The new ids. */
+  const addCopies = (copies: { objectId: string; specs: Spec[]; printable: boolean[]; plates: PlateRef[] }[], extra: ObjectOp[] = []) => {
+    if (!canAdd || !copies.length) return [];
+    let next = nextNewId(objectOps, doc.next_object_id!);
+    const ops: ObjectOp[] = [];
+    const ownNext: OwnEdits = { ...own };
+    const placedNext: Placed = { ...placed };
+    const plates = { ...onPlate };
+    const ids: string[] = [];
+    for (const c of copies) {
+      const id = String(next++);
+      ids.push(id);
+      ops.push({ op: 'copy', object_id: c.objectId, new_id: id, matrices: c.specs });
+      const template = templatePrintable(c.objectId);
+      c.printable.forEach((p, k) => {
+        if (!p || !template) ops.push({ op: 'printable', object_id: id, instance: k, value: p });
+      });
+      for (const [target, values] of Object.entries(own))
+        if (target === c.objectId || target.startsWith(`${c.objectId}/`)) ownNext[id + target.slice(c.objectId.length)] = { ...values };
+      for (const [key, spec] of Object.entries(placed)) if (key.startsWith(`${c.objectId}/`)) placedNext[id + key.slice(c.objectId.length)] = spec;
+      c.plates.forEach((p, k) => {
+        if (p !== 0) plates[itemKey(id, k)] = p;
+      });
+    }
+    setObjectOps([...objectOps, ...ops, ...extra], plates, placedNext, ownNext);
+    return ids;
+  };
+  /** Add instance (+, Plater::increase_instances): ``num`` copies of the last instance, each 5% of the bed further on X
+   * and Y, on the plate it lands on; the last one selected. Offered while every instance is printable. */
+  const canIncrease = (id: string | null) => !!id && canAdd && instancesNow(id).every((k) => printableNow(id, k));
+  const increaseInstances = (id: string, num = 1) => {
+    if (!view || !canIncrease(id)) return;
+    const ks = instancesNow(id);
+    const key = itemKey(id, ks[ks.length - 1]);
+    const spec = currentSpec(view, placed, key);
+    const b = box2(key);
+    if (!spec || !b) return;
+    const next = fileCount(id) + added.filter((a) => a.objectId === id).length; // the new instances' numbers
+    const step = 0.05 * Math.max(view.bed.x, view.bed.y);
+    const ops: ObjectOp[] = [];
+    const plates = { ...onPlate };
+    for (let i = 1; i <= num; i++) {
+      ops.push({ op: 'add_instance', object_id: id, matrix: moved(spec, [step * i, step * i, 0]) });
+      const p = landsOn(b, [step * i, step * i]);
+      if (p !== 0) plates[itemKey(id, next + i - 1)] = p;
+    }
+    setObjectOps([...objectOps, ...ops], plates);
+    select({ kind: 'object', id, plate: null, instance: next + num - 1 });
+  };
+  /** Remove instance (-, decrease_instances): the last ``num`` instances, or the object when no more would be left. */
+  const canDecrease = (id: string | null) => !!id && canEditObjects && instancesNow(id).length > 1;
+  const decreaseInstances = (id: string, num = 1) => {
+    if (!canDecrease(id)) return;
+    const ks = instancesNow(id);
+    if (ks.length > num) {
+      setObjectOps([...objectOps, ...ks.slice(-num).map((k): ObjectOp => ({ op: 'delete', object_id: id, instance: k }))]);
+      select({ kind: 'object', id, plate: null, instance: ks[ks.length - num - 1] });
+    } else {
+      setObjectOps([...objectOps, { op: 'delete', object_id: id }]);
+      deselect();
+    }
+  };
+  if (doc.editable) {
+    // Add / Remove instance on the toolbar: the object selected (get_selected_object_idx), one; every instance
+    // printable for more, two or more for fewer
+    toolReady.more = canIncrease(selectedIds.length > 1 ? null : selectedId) ? true : why;
+    toolReady.fewer = canDecrease(selectedIds.length > 1 ? null : selectedId) ? true : why;
+  }
+  /** Set number of instances (set_number_of_copies): more or fewer to get there. */
+  const setInstanceCount = (id: string, count: number) => {
+    const diff = count - instancesNow(id).length;
+    if (diff > 0) increaseInstances(id, diff);
+    else if (diff < 0) decreaseInstances(id, -diff);
+  };
+  /** Set as An Individual Object / Set as Individual Objects (ObjectList::split_instances): the instances chosen become
+   * one new object; the whole object (``chosen`` null, or all of them): each instance but the first its own object, the
+   * last first. */
+  const splitInstances = (id: string, chosen: number[] | null) => {
+    const ks = instancesNow(id);
+    if (!view || !canAdd || ks.length < 2) return;
+    const full = !chosen || ks.every((k) => chosen.includes(k));
+    const groups = full ? ks.slice(1).reverse().map((k) => [k]) : [ks.filter((k) => chosen.includes(k))];
+    const copies = groups.map((g) => ({
+      objectId: id,
+      specs: g.map((k) => currentSpec(view, placed, itemKey(id, k))),
+      printable: g.map((k) => printableNow(id, k)),
+      plates: g.map((k) => instancePlate(id, k)),
+    }));
+    if (!groups[0]?.length || copies.some((c) => c.specs.some((x) => !x))) return;
+    const ids = addCopies(
+      copies.map((c) => ({ ...c, specs: c.specs as Spec[] })),
+      groups.flat().map((k): ObjectOp => ({ op: 'delete', object_id: id, instance: k })),
+    );
+    if (ids.length) select({ kind: 'object', id: ids[0], plate: null });
+  };
+  // Copy (Ctrl+C, Selection::copy_to_clipboard): the objects selected, each with the instances selected (one picked
+  // alone, else all), as they are now
+  const [clipboard, setClipboard] = useState<(Clip & { objectId: string; printable: boolean[] })[]>([]);
+  const canCopy = canAdd && mode === 'prepare' && selection?.kind === 'object' && !selection.partId && !selection.layers;
+  const copySelection = () => {
+    if (!view || !canCopy || selection?.kind !== 'object') return [];
+    const order = (id: string) => doc.objects.findIndex((o) => o.id === id);
+    const ids = [...targetsOf(selection)].sort((a, b) => order(a) - order(b));
+    const one = ids.length === 1 && selection.instance != null ? selection.instance : null;
+    const clip: (Clip & { objectId: string; printable: boolean[] })[] = [];
+    for (const id of ids) {
+      const ks = one != null ? [one] : instancesNow(id);
+      const specs = ks.map((k) => currentSpec(view, placed, itemKey(id, k)));
+      const first = itemKey(id, ks[0]);
+      const box = ks.length ? box2(first) : null;
+      if (!box || specs.some((x) => !x)) continue;
+      const hull = convexHull(targetPoints(view, placed, modelTargets(view, first, modelPart)));
+      clip.push({ objectId: id, specs: specs as Spec[], hull, box, printable: ks.map((k) => printableNow(id, k)) });
+    }
+    if (clip.length) setClipboard(clip);
+    return clip;
+  };
+  /** The current plate's build volume on the bed's axes (plates.ts ``touches``' layout). */
+  const currentPlateBox = (): Box2 | null => {
+    if (!view) return null;
+    const p = doc.plates.find((x) => x.index === currentPlate);
+    const [n, count] = p?.source != null ? [p.source, source.plates.length] : [currentPlate ?? 1, doc.plates.length];
+    const root = Math.sqrt(count);
+    const cols = root > Math.round(root) ? Math.round(root) + 1 : Math.round(root);
+    const x = ((n - 1) % cols) * view.bed.x * 1.2;
+    const y = -Math.floor((n - 1) / cols) * view.bed.y * 1.2;
+    return { min: [x, y], max: [x + view.bed.x, y + view.bed.y] };
+  };
+  /** Paste (Ctrl+V, paste_objects_from_clipboard), ``times`` over (Clone): where Orca puts each copy (paste.ts), the
+   * copies selected. Shortcut: the empty cells are worked out from the instances in the 3D view (in focus mode, the
+   * plate's), where Orca takes every instance of the project. */
+  const paste = (clip = clipboard, times = 1) => {
+    const box = currentPlateBox();
+    if (!view || !canAdd || !clip.length || !box) return;
+    const hulls = view.model.children
+      .filter((c) => c.userData.objectId != null && c.visible)
+      .map((c) => convexHull(targetPoints(view, placed, modelTargets(view, itemKey(String(c.userData.objectId), Number(c.userData.instance ?? 0)), modelPart))));
+    const offset = 0.05 * Math.max(view.bed.x, view.bed.y);
+    const copies: { objectId: string; specs: Spec[]; printable: boolean[]; plates: PlateRef[] }[] = [];
+    for (let i = 0; i < times; i++) {
+      const at = pastePlacements(clip, box, hulls, offset);
+      clip.forEach((c, j) => {
+        const d: [number, number] = [at[j][0][9] - c.specs[0][9], at[j][0][10] - c.specs[0][10]];
+        copies.push({ objectId: c.objectId, specs: at[j], printable: c.printable, plates: at[j].map(() => landsOn(c.box, d)) });
+      });
+    }
+    const ids = addCopies(copies);
+    if (!ids.length) return;
+    setSelectedIds(ids.length > 1 ? ids : []);
+    select({ kind: 'object', id: ids[0], plate: null });
+  };
+  const cutSelection = () => {
+    if (copySelection().length) deleteSelection();
+  };
+  // Clone (Ctrl+K, Plater::clone_selection): the Clone dialog, then the selection copied and pasted that many times
+  const [copiesDialog, setCopiesDialog] = useState<{ clone: true } | { clone: false; objectId: string } | null>(null);
+  const openClone = () => {
+    if (canCopy) setCopiesDialog({ clone: true });
+  };
   const select = (sel: Selection) => {
     setSelection(sel);
     setInfoClosed(false);
@@ -1156,7 +1381,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   const openMenu = (at: { x: number; y: number }, sel: Exclude<Selection, null>, menuInstances?: string[]) => {
     if (sel.kind === 'object' && sel.instance != null && !sel.part) {
       // an instance node of the list (the 3D view's right click opens the object's menu)
-      setMenu({ at, items: instanceMenu(tr, 1) });
+      const inst = sel.instance;
+      setMenu({ at, items: instanceMenu(tr, 1, canAdd && instancesNow(sel.id).length > 1 ? () => splitInstances(sel.id, [inst]) : undefined) });
       return;
     }
     if (sel.kind === 'object' && selectedIds.length > 1 && selectedIds.includes(sel.id)) {
@@ -1289,6 +1515,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             remove: () => deleteSelection(sel),
             printable: () => togglePrintable(sel),
             autoDrop: { checked: autoDropOf(sel.id), toggle: () => toggleAutoDrop([sel.id]) },
+          }),
+          ...(canAdd && {
+            clone: () => {
+              select(sel);
+              setCopiesDialog({ clone: true });
+            },
+            instances: {
+              add: canIncrease(sel.id) ? () => increaseInstances(sel.id) : undefined,
+              remove: canDecrease(sel.id) ? () => decreaseInstances(sel.id) : undefined,
+              setNumber: canIncrease(sel.id) ? () => setCopiesDialog({ clone: false, objectId: sel.id }) : undefined,
+              split: instancesNow(sel.id).length > 1 ? () => splitInstances(sel.id, sel.instance != null ? [sel.instance] : null) : undefined,
+              full: sel.instance == null,
+            },
           }),
           // layers_editing: the object's first range (0-2 mm) when it has none, then its "Layers" row selected
           heightRange:
@@ -1479,6 +1718,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (key === 'addplate') return plateOp({ op: 'add' }); // Add plate: not a tool, it acts at once
     if (key === 'orient') return orientSelected(); // as Orca's: acts at once, no options shown
     if (key === 'arrange') return void runArrange(0); // Arrange all objects: at once (its options: a right click)
+    if (key === 'more') return void (selectedId != null && increaseInstances(selectedId));
+    if (key === 'fewer') return void (selectedId != null && decreaseInstances(selectedId));
     setTool((cur) => (cur === key ? null : key));
     setMeasure([]);
   };
@@ -1486,7 +1727,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // Ctrl+A select all (Ctrl+Shift+A on all plates), Ctrl+E labels, Ctrl+Shift+K collision volumes,
   // Ctrl+Shift+Enter wireframe, Tab Prepare / Preview, Shift+Tab sidebar, ? the shortcuts list, Esc leaves a tool
   // or the selection
-  const dialogOpen = saveOpen || !!preset || !!menu || printOpen || shortcutsOpen;
+  const dialogOpen = saveOpen || !!preset || !!menu || printOpen || shortcutsOpen || !!copiesDialog;
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e: KeyboardEvent) => {
     const el = e.target as HTMLElement | null;
@@ -1551,7 +1792,25 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     } else if (ctrl && (e.key === 'd' || e.key === 'D')) {
       handled();
       deleteAll();
+    } else if (ctrl && !e.shiftKey && (e.key === 'c' || e.key === 'C') && canCopy) {
+      handled();
+      copySelection();
+    } else if (ctrl && !e.shiftKey && (e.key === 'x' || e.key === 'X') && canCopy) {
+      handled();
+      cutSelection();
+    } else if (ctrl && !e.shiftKey && (e.key === 'v' || e.key === 'V') && clipboard.length) {
+      handled();
+      paste();
+    } else if (ctrl && !e.shiftKey && (e.key === 'k' || e.key === 'K') && canCopy) {
+      handled();
+      openClone();
     } else if (ctrl) return;
+    else if ((e.key === '+' || e.key === '-') && selectedIds.length <= 1 && selectedId != null) {
+      // GLCanvas3D::on_char: one more instance, or one fewer
+      handled();
+      if (e.key === '+') increaseInstances(selectedId);
+      else decreaseInstances(selectedId);
+    }
     else if (e.key === 'Delete' || e.key === 'Backspace') {
       handled();
       deleteSelection();
@@ -1773,6 +2032,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
         : (doc.cannot_place ?? (doc.plates.length < MAX_PLATES ? (true as const) : t('farm.workspace.plateLimit', { count: MAX_PLATES }))),
     canDelete: canEditObjects && mode === 'prepare' && selection?.kind === 'object',
     canDeleteAll: canEditObjects && mode === 'prepare' && doc.objects.length > 0,
+    canCopy,
+    canPaste: canAdd && mode === 'prepare' && clipboard.length > 0,
   };
   const menuActions = {
     open: () => (!count || window.confirm(t('farm.workspace.unsavedConfirm'))) && navigate('/files'),
@@ -1803,6 +2064,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     },
     deleteSelected: () => deleteSelection(),
     deleteAll,
+    cut: cutSelection,
+    copy: () => void copySelection(),
+    paste: () => paste(),
+    clone: openClone,
     view: (preset: Parameters<typeof setView>[1]) => view && setView(view, preset),
     perspective: (on: boolean) => setCanvas((c) => ({ ...c, perspective: on })),
     toggle: (option: 'navigator' | 'grid' | 'labels' | 'collision' | 'overhangs' | 'outline') =>
@@ -2293,6 +2558,19 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           onlyLayers={plateDialog.onlyLayers}
           onApply={(values) => applyPlate(doc.plates.find((p) => p.index === plateDialog.plate)!, values)}
           onClose={() => setPlateDialog(null)}
+        />
+      )}
+      {copiesDialog && (
+        <CopiesDialog
+          layout={layout}
+          clone={copiesDialog.clone}
+          value={copiesDialog.clone ? 1 : instancesNow(copiesDialog.objectId).length}
+          arrangeHint={t('farm.workspace.arrange.saveObjects')}
+          onApply={(n) => {
+            if (!copiesDialog.clone) setInstanceCount(copiesDialog.objectId, n);
+            else paste(copySelection(), n);
+          }}
+          onClose={() => setCopiesDialog(null)}
         />
       )}
       {nameDialog != null && doc.plates.some((p) => p.index === nameDialog) && (

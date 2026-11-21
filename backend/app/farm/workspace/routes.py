@@ -36,6 +36,7 @@ from backend.app.farm.workspace import (
     objects as ws_objects,
     parts,
     placement,
+    plate_objects,
     plate_settings,
     plate_structure,
     project,
@@ -117,13 +118,30 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
     # each object's height ranges (layer_config_ranges.xml, numbered by the model's objects)
     ranges: dict[str, list[dict]] = {}
     ranges_xml = project._read_small(zf, project.LAYER_RANGES_ENTRY)
-    if ranges_xml and editable and cannot_place is None:
+    next_object_id = None
+    counts: dict[str, int] = {}
+    if editable and cannot_place is None:
         try:
-            ranges = layer_ranges.parse(ranges_xml, layer_ranges.object_order(project.read_model(zf)))
-        except (layer_ranges.InvalidLayerRanges, project.ArchiveError):
-            ranges = {}
+            model = project.read_model(zf)
+            if ranges_xml:
+                ranges = layer_ranges.parse(ranges_xml, layer_ranges.object_order(model))
+            # the first id a new object (Clone, Paste, an instance set apart) can take: the workspace numbers them on
+            settings_xml = project._read_small(zf, project.MODEL_SETTINGS_ENTRY) or b""
+            next_object_id = plate_objects.next_object_id(model, settings_xml)
+            # each object's build items: the workspace numbers the instances it adds after them
+            for item in placement._build_items(model):
+                counts[item.get("objectid")] = counts.get(item.get("objectid"), 0) + 1
+        except (
+            layer_ranges.InvalidLayerRanges,
+            project.ArchiveError,
+            plate_objects.InvalidCopy,
+            placement.InvalidPlacement,
+        ):
+            ranges, next_object_id, counts = {}, None, {}
     for obj in structure["objects"]:
         obj["ranges"] = ranges.get(obj["id"], [])
+        if next_object_id is not None:
+            obj["instances"] = counts.get(obj["id"], 0)
     return {
         "kind": kind,
         "slicer": slicer,
@@ -131,6 +149,7 @@ def _document(lib_file: LibraryFile, data: bytes) -> dict:
         "editable": editable,
         # why Move can't be saved in a copy of this file (None: it can), so the 3D view says so before a move
         "cannot_place": cannot_place,
+        "next_object_id": next_object_id,
         "plates": structure["plates"],
         "objects": structure["objects"],
         "warnings": structure["warnings"],
@@ -262,8 +281,22 @@ def _build_copy(
         model = original_model = None
         if transforms or part_transforms or plate_ops or instance_plates or range_edits or part_ops or object_ops:
             model = original_model = project.read_model(zf)
+            additions = [o for o in object_ops if o.op in ws_objects.ADDITIONS]
+            if additions:
+                # first: the new instances and objects are there for the moves, settings and plates made on them
+                if settings_xml is None:
+                    raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
+                if any(op.op == "duplicate" for op in plate_ops):
+                    raise HTTPException(
+                        status_code=422, detail="Save the copy with its new objects and instances first, then duplicate"
+                    )
+                indexed = {name: project._read_small(zf, name) for name in ws_objects.TEXT_INDEXED}
+                model, settings_xml, grown, added = ws_objects.add(model, settings_xml, additions, indexed)
+                replaced.update(grown)
+                placed += added
             if transforms:
-                model, placed = placement.place(model, transforms)
+                model, moved_items = placement.place(model, transforms)
+                placed += moved_items
             if part_transforms:
                 model, settings_xml, moved = placement.place_parts(model, settings_xml, part_transforms)
                 placed += moved
@@ -299,6 +332,11 @@ def _build_copy(
                 if (a["object_id"], a["instance"]) in new:
                     a.update(after=new[(a["object_id"], a["instance"])], new_plate=True)
             placed += assigned
+        # the copied objects' ranges as the file has them, read before a deletion takes their source away (Cut, Paste)
+        source_ranges: dict[str, list[dict]] | None = None
+        if model is not None and any(a.get("key") == "copy" for a in placed):
+            xml = project._read_small(zf, project.LAYER_RANGES_ENTRY)
+            source_ranges = layer_ranges.parse(xml, layer_ranges.object_order(model)) if xml else {}
         if object_ops:
             if settings_xml is None:
                 raise HTTPException(status_code=422, detail="This project has no object settings file to write to")
@@ -307,7 +345,7 @@ def _build_copy(
                 raise HTTPException(
                     status_code=422, detail="Save the copy with its objects deleted first, then duplicate"
                 )
-            indexed = {name: project._read_small(zf, name) for name in ws_objects.INDEXED}
+            indexed = {name: replaced.get(name) or project._read_small(zf, name) for name in ws_objects.INDEXED}
             model, settings_xml, renumbered, changed = ws_objects.apply(model, settings_xml, list(object_ops), indexed)
             replaced.update(renumbered)
             placed += changed
@@ -331,13 +369,28 @@ def _build_copy(
         added: dict[str, bytes] = {}
         # as the deletions numbered it again, else as the file has it
         ranges_xml = replaced.get(project.LAYER_RANGES_ENTRY) or project._read_small(zf, project.LAYER_RANGES_ENTRY)
-        copied = [pair for a in placed if a.get("op") == "duplicate" for pair in a.get("copies", [])]
+        # a duplicated plate's copies and the objects copied (Clone, Paste, an instance set apart)
+        copied = [
+            pair for a in placed if a.get("op") == "duplicate" or a.get("key") == "copy" for pair in a.get("copies", [])
+        ]
         edits = list(range_edits)
-        if model is not None and (edits or (copied and ranges_xml)):
+        if model is not None and (edits or (copied and (ranges_xml or source_ranges))):
             # a duplicated plate's copies take their objects' ranges (Model::add_object), as edited or as the file has
             own = {e.object_id: e.ranges for e in edits}
-            in_file = layer_ranges.parse(ranges_xml, layer_ranges.object_order(model))
+            in_file = (
+                source_ranges
+                if source_ranges is not None
+                else layer_ranges.parse(ranges_xml, layer_ranges.object_order(model))
+                if ranges_xml
+                else {}
+            )
+            parent = {new_id: source for source, new_id in copied}
             for source, new_id in copied:
+                if new_id in own:
+                    continue  # the copy's own ranges, edited since
+                # a copy of a copy: the ranges of the object first copied, unless edited on the way
+                while source not in own and source not in in_file and source in parent:
+                    source = parent[source]
                 # an edit that removed all of the source's ranges counts: the copy has none either
                 ranges = (
                     own[source] if source in own else [layer_ranges.LayerRange(**r) for r in in_file.get(source, [])]
@@ -552,9 +605,11 @@ async def arrange_objects(
         raise HTTPException(
             status_code=422, detail="Save the copy with its plates added, removed or moved first, then arrange it"
         )
-    if any(op.op == "delete" for op in body.object_ops):
-        # the arranged instances come back by the copy's numbering, which a deletion changes
-        raise HTTPException(status_code=422, detail="Save the copy with its objects deleted first, then arrange it")
+    if any(op.op == "delete" or op.op in ws_objects.ADDITIONS for op in body.object_ops):
+        # the arranged instances come back by the copy's numbering, which a deletion or an addition changes
+        raise HTTPException(
+            status_code=422, detail="Save the copy with its objects deleted or added first, then arrange it"
+        )
     if body.part_ops:
         # a deleted part's transform goes into its instances: the arranged ones would get it twice
         raise HTTPException(

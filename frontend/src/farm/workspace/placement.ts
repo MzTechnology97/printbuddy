@@ -77,6 +77,49 @@ export function applyPlacements(view: ViewerScene, placed: Placed) {
   view.model.updateMatrixWorld(true);
 }
 
+/** The instances the draft adds (objectOps.addedItems) in the 3D view: each a clone of its source's first item (its
+ * meshes shared, its materials its own), shown where its transform puts it and taken as if the file had it there
+ * (``transform``), so every tool and placement works on it as on the file's. Those no longer added are taken out. */
+export function syncAdded(view: ViewerScene, added: { key: string; objectId: string; instance: number; source: string; matrix: Spec }[]) {
+  const want = new Map(added.map((a) => [a.key, a]));
+  for (const item of [...view.model.children]) {
+    if (!item.userData.added) continue;
+    const a = want.get(keyOf(item));
+    if (a && item.userData.source === a.source && JSON.stringify(item.userData.transform) === JSON.stringify(a.matrix)) {
+      want.delete(a.key);
+      continue;
+    }
+    view.model.remove(item);
+    item.traverse((o) => {
+      if (o instanceof THREE.Mesh) for (const m of [o.material].flat()) m.dispose();
+    });
+  }
+  for (const a of want.values()) {
+    const src = view.model.children.find((c) => !c.userData.added && String(c.userData.objectId) === a.source);
+    if (!src) continue; // not in the 3D view
+    const item = src.clone(); // the geometry shared; userData copied through JSON
+    const d = SWAP.clone().multiply(fromSpec(a.matrix).multiply(fromSpec(fileSpec(src)).invert())).multiply(SWAP);
+    Object.assign(item.userData, { objectId: a.objectId, instance: a.instance, transform: a.matrix, source: a.source, added: true, printable: true });
+    delete item.userData.filePrintable;
+    item.visible = true;
+    item.matrixAutoUpdate = false;
+    item.matrix.identity();
+    for (const group of item.children) {
+      delete group.userData.points; // worked out again where this one is (transforms.ts filePoints)
+      delete group.userData.indices;
+      for (const c of group.userData.partId !== undefined ? group.children : [group]) {
+        c.matrixAutoUpdate = false;
+        c.matrix.premultiply(d);
+      }
+    }
+    item.traverse((o) => {
+      if (o instanceof THREE.Mesh) o.material = Array.isArray(o.material) ? o.material.map((m) => m.clone()) : o.material.clone();
+    });
+    view.model.add(item);
+  }
+  view.model.updateMatrixWorld(true);
+}
+
 /** A move in the scene (world, from ``a`` to ``b``) as a move on the slicer's axes. */
 export function sceneToSlicer(view: ViewerScene, a: THREE.Vector3, b: THREE.Vector3): [number, number, number] {
   const d = view.model.worldToLocal(b.clone()).sub(view.model.worldToLocal(a.clone())); // the slicer's x, z, y

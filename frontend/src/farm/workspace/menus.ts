@@ -28,6 +28,10 @@ export function objectMenu(
     printable?: () => void;
     /** Auto Drop: its state and the toggle (absent: shown on, greyed) */
     autoDrop?: { checked: boolean; toggle?: () => void };
+    /** Clone (Ctrl+K): the Clone dialog (absent: greyed) */
+    clone?: () => void;
+    /** the Instances submenu (append_menu_items_instance_manipulation): each absent greyed */
+    instances?: InstanceActions;
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -35,8 +39,8 @@ export function objectMenu(
     { label: tr('Select'), onClick: on.select },
     { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
     { label: tr('Info'), onClick: on.info },
-    { label: tr('Clone'), shortcut: 'Ctrl+K', separator: true },
-    { label: tr('Instances'), submenu: true },
+    { label: tr('Clone'), shortcut: 'Ctrl+K', separator: true, onClick: on.clone },
+    on.instances ? { label: tr('Instances'), items: instancesItems(tr, on.instances) } : { label: tr('Instances'), submenu: true },
     { label: tr('Center'), separator: true },
     { label: tr('Drop') },
     { label: tr('Transform'), submenu: true },
@@ -192,9 +196,31 @@ export function multiMenu(
   ];
 }
 
-/** One instance, or several of the same object, in the list (GUI_Factories.cpp instance menu): its only item. */
-export function instanceMenu(tr: Tr, count: number): MenuItem[] {
-  return [{ label: tr(count > 1 ? 'Set as Individual Objects' : 'Set as An Individual Object') }];
+/** One instance, or several of the same object, in the list (GUI_Factories.cpp instance menu): its only item
+ * (``split``: Set as An Individual Object, absent greyed). */
+export function instanceMenu(tr: Tr, count: number, split?: () => void): MenuItem[] {
+  return [{ label: tr(count > 1 ? 'Set as Individual Objects' : 'Set as An Individual Object'), onClick: split }];
+}
+
+/** Add instance (+), Remove instance (-), Set number of instances, Fill bed with instances (left out: greyed), then
+ * Set as An Individual Object; an action absent is greyed. */
+export interface InstanceActions {
+  add?: () => void;
+  remove?: () => void;
+  setNumber?: () => void;
+  split?: () => void;
+  /** the whole object selected (Selection::is_single_full_object): Set as Individual Objects */
+  full: boolean;
+}
+
+function instancesItems(tr: Tr, on: InstanceActions): MenuItem[] {
+  return [
+    { label: tr('Add instance'), shortcut: '+', onClick: on.add },
+    { label: tr('Remove instance'), shortcut: '-', onClick: on.remove },
+    { label: `${tr('Set number of instances')}...`, onClick: on.setNumber },
+    { label: `${tr('Fill bed with instances')}...` },
+    { label: tr(on.full ? 'Set as Individual Objects' : 'Set as An Individual Object'), separator: true, onClick: on.split },
+  ];
 }
 
 /** The empty 3D view or list (GUI_Factories.cpp default menu). */
