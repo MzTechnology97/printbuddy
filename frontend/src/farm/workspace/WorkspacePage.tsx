@@ -1012,8 +1012,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (arranging) return;
     if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
     if (partOps.length) return showToast(t('farm.workspace.arrange.saveParts'), 'error');
-    if (objectOps.some((o) => o.op === 'delete' || o.op === 'add_instance' || o.op === 'copy'))
-      return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
+    // a deletion changes the copy's numbering the arranged instances come back by; an addition doesn't
+    if (objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
     if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
     setArranging(true);
     showToast(tr('Arranging...'), 'info');
@@ -1395,6 +1395,16 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   };
   // Clone (Ctrl+K, Plater::clone_selection): the Clone dialog, then the selection copied and pasted that many times
   const [copiesDialog, setCopiesDialog] = useState<{ clone: true } | { clone: false; objectId: string } | null>(null);
+  const [arrangeAfter, setArrangeAfter] = useState<number | null>(null);
+  useEffect(
+    () => {
+      if (arrangeAfter == null) return;
+      setArrangeAfter(null);
+      void runArrange(arrangeAfter);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the render that has the copies
+    [arrangeAfter],
+  );
   const openClone = () => {
     if (canCopy) setCopiesDialog({ clone: true });
   };
@@ -2661,10 +2671,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           layout={layout}
           clone={copiesDialog.clone}
           value={copiesDialog.clone ? 1 : instancesNow(copiesDialog.objectId).length}
-          arrangeHint={t('farm.workspace.arrange.saveObjects')}
-          onApply={(n) => {
-            if (!copiesDialog.clone) setInstanceCount(copiesDialog.objectId, n);
-            else paste(copySelection(), n);
+          onApply={(n, arrange) => {
+            if (!copiesDialog.clone) return setInstanceCount(copiesDialog.objectId, n);
+            paste(copySelection(), n);
+            // CloneDialog: then the current plate arranged (PREPARE_STATE_MENU), once the copies are in the draft
+            if (arrange && currentPlate != null) setArrangeAfter(currentPlate);
           }}
           onClose={() => setCopiesDialog(null)}
         />

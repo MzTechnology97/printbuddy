@@ -42,7 +42,10 @@ def as_orca_exports(sent: bytes, moves: dict[str, str], plates: dict[str, int]) 
             return b.replace(b'id="2"', b'id="9"').replace(b'objectid="2"', b'objectid="9"')
         if name == project.MODEL_SETTINGS_ENTRY:
             s = b.decode()
-            found = re.findall(r'(<model_instance><metadata key="object_id" value="(\d+)"/>.*?</model_instance>)', s)
+            # one line, or (an entry the copy wrote) one tag a line
+            found = re.findall(
+                r'(<model_instance>\s*<metadata key="object_id" value="(\d+)"/>.*?</model_instance>)', s, flags=re.S
+            )
             entries = {oid: entry for entry, oid in found}
             body = re.sub(r"<plate>.*?</plate>\n?", "", s, flags=re.S)
             for n in range(1, max(plates.values()) + 1):
@@ -173,6 +176,36 @@ class TestArrangeRoute:
             f"{API}/{file_id}/arrange", json={"base_sha256": doc["sha256"], "plate_structure": [{"op": "add"}]}
         )
         assert resp.status_code == 422 and "Save the copy" in resp.json()["detail"]
+
+    async def test_new_instances_and_copies_unsaved_are_arranged_by_their_numbers(
+        self, async_client, db_session, sidecar
+    ):
+        # Clone's "Auto arrange plate after cloning": a copy and an instance not saved yet come back under the ids
+        # and numbers the workspace gave them
+        state, seen = sidecar
+        file_id, doc = await new_file(async_client, db_session)
+        new_id = str(doc["next_object_id"])
+        moves = {new_id: "1 0 0 0 1 0 0 0 1 150 60 5"}
+        state["answer"] = lambda req: httpx.Response(
+            200, content=as_orca_exports(sent_file(req), moves, {"2": 1, "4": 1, new_id: 1})
+        )
+        ops = [
+            {"op": "add_instance", "object_id": "4", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 90, 50, 5]},
+            {"op": "copy", "object_id": "2", "new_id": new_id, "matrices": [[1, 0, 0, 0, 1, 0, 0, 0, 1, 40, 40, 5]]},
+        ]
+        plates = [{"object_id": "4", "instance": 1, "plate": 1}, {"object_id": new_id, "instance": 0, "plate": 1}]
+        body = {"base_sha256": doc["sha256"], "object_ops": ops, "instance_plates": plates, "arrange": {"plate": 1}}
+        resp = await async_client.post(f"{API}/{file_id}/arrange", json=body)
+        assert resp.status_code == 200, resp.text
+        assert {"object_id": new_id, "instance": 0, "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1, 150, 60, 5], "plate": 1} in (
+            resp.json()["placements"]
+        )
+        model = zipfile.ZipFile(io.BytesIO(sent_file(seen[0]))).read(project.MODEL_ENTRY)
+        assert f'<item objectid="{new_id}"'.encode() in model  # the copy went with the project
+        # a deletion still has to be saved first
+        ops = [{"op": "delete", "object_id": "4"}]
+        resp = await async_client.post(f"{API}/{file_id}/arrange", json={"base_sha256": doc["sha256"], "object_ops": ops})
+        assert resp.status_code == 422 and "deleted first" in resp.json()["detail"]
 
     async def test_more_plates_than_the_project_has_are_refused(self, async_client, db_session, sidecar):
         state, _ = sidecar
