@@ -89,7 +89,7 @@ import { ArrangeOptionsDialog } from './ArrangeOptions';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { FILAMENT_KEY, type Selection, filamentEdits, instancesOf, ownSettings, ownToSave } from './objects';
+import { FILAMENT_KEY, type Selection, filamentEdits, hiddenPart, instancesOf, ownSettings, ownTarget, ownToSave, targetOwn } from './objects';
 import { defaultOptions, firstRanges, rangeLabel, rangesOf, rangesToSave, withRanges } from './ranges';
 import {
   type PartOp,
@@ -869,6 +869,75 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     applyPlacements(view, next);
     commit(next);
   };
+  // Copy / Paste Process Settings (ObjectList::copy_settings_to_clipboard / paste_settings_into_list): an object's
+  // own settings (a part's: its object's, its own over them), pasted into objects, or into parts, which clears their
+  // own first. The extruder is neither copied nor cleared (paste keeps the target's; the Fila. column sets it).
+  const [settingsClip, setSettingsClip] = useState<{ part: boolean; values: Record<string, string> } | null>(null);
+  const copySettings = (objectId: string, partId: string | null) => {
+    const obj = doc.objects.find((o) => o.id === objectId);
+    if (!obj) return;
+    const values = { ...ownSettings(obj, null, own), ...(partId ? targetOwn(obj, partId, own) : {}) };
+    delete values[FILAMENT_KEY];
+    setSettingsClip({ part: !!partId, values });
+  };
+  /** Paste into objects (``partId`` null) or parts, one undo step. A part takes only a part's keys, those that would
+   * not slice the same anyway (as its object and the project have them), and its object's own the others pin back to
+   * the project's value (Orca's global_keys). Shortcut: Orca pins object-only keys on the part too; here only a
+   * part's keys, as the copy saves a part's settings. */
+  const pasteSettings = (targets: { objectId: string; partId: string | null }[]) => {
+    const clip = settingsClip;
+    if (!clip || !targets.length) return;
+    const edits: TargetEdits = {};
+    const put = (target: string, key: string, value: string | null) => ((edits[target] ??= {})[key] = value);
+    const partKeys = new Set(layout.region_keys ?? []);
+    const projectOf = (key: string) => {
+      const s = settings.find((x) => x.key === key);
+      return s ? projectValue(s, draft) : undefined;
+    };
+    for (const { objectId, partId } of targets) {
+      const obj = doc.objects.find((o) => o.id === objectId);
+      if (!obj) continue;
+      const id = obj.id ?? '';
+      if (!partId) {
+        const hidden = hiddenPart(obj);
+        for (const k of Object.keys(targetOwn(obj, null, own))) if (k !== FILAMENT_KEY) put(ownTarget(id), k, null);
+        if (hidden) for (const k of Object.keys(targetOwn(obj, hidden, own))) if (k !== FILAMENT_KEY) put(ownTarget(id, hidden), k, null);
+        for (const [k, v] of Object.entries(clip.values)) put(ownTarget(id), k, v);
+        continue;
+      }
+      const target = ownTarget(id, partId);
+      const objectOwn = targetOwn(obj, null, own);
+      const same = new Set(Object.keys(clip.values).filter((k) => clip.values[k] === (objectOwn[k] ?? projectOf(k))));
+      for (const k of Object.keys(targetOwn(obj, partId, own))) if (k !== FILAMENT_KEY) put(target, k, null);
+      for (const k of Object.keys(objectOwn)) {
+        const global = projectOf(k);
+        if (k !== FILAMENT_KEY && !same.has(k) && partKeys.has(k) && global !== undefined) put(target, k, global);
+      }
+      for (const [k, v] of Object.entries(clip.values)) if (!same.has(k) && partKeys.has(k)) put(target, k, v);
+    }
+    setOwnTargets(edits);
+  };
+  /** Instances moved by ``d`` (Selection::translate, World), then do_move's bed rule; one undo step. */
+  const moveKeysBy = (keys: string[], d: [number, number, number]) => {
+    if (!view || !keys.length) return;
+    const next = changed(view, placed, { keys, apply: (spec) => moved(spec, d), sync: 'none', drop: 'move' }, autoDrop);
+    applyPlacements(view, next);
+    commit(next);
+  };
+  /** The object menu's Center (Selection::center: the box's centre to the selected plate's, on X / Y) and Drop
+   * (Selection::drop: every instance down by the lowest one's height above the bed); each move absent when there is
+   * none to make (append_menu_item_center / can_drop). */
+  const centerAndDrop = (keys: string[]) => {
+    const b = view && keys.length && doc.editable && !doc.cannot_place ? boxOf(view, placed, keys) : null;
+    if (!b) return {};
+    const p = doc.plates.find((x) => x.index === currentPlate);
+    const middle = p?.source != null ? plateCenter(p.source - 1, source.plates.length, settings.find((x) => x.key === 'printable_area')?.value) : null;
+    const d: [number, number, number] | null = middle ? [middle[0] - (b.min.x + b.max.x) / 2, middle[1] - (b.min.y + b.max.y) / 2, 0] : null;
+    return {
+      center: d && (Math.abs(d[0]) > 1e-6 || Math.abs(d[1]) > 1e-6) ? () => moveKeysBy(keys, d) : undefined,
+      drop: Math.abs(b.min.z) >= 0.001 ? () => moveKeysBy(keys, [0, 0, -b.min.z]) : undefined,
+    };
+  };
   const runAlign = (sel: AlignSelection, type: AlignType, toParent: boolean) => {
     const moves = alignMoves(sel, type, toParent);
     const keys = Object.keys(moves ?? {});
@@ -1012,8 +1081,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (arranging) return;
     if (plateOps.length) return showToast(t('farm.workspace.arrange.savePlates'), 'error');
     if (partOps.length) return showToast(t('farm.workspace.arrange.saveParts'), 'error');
-    if (objectOps.some((o) => o.op === 'delete' || o.op === 'add_instance' || o.op === 'copy'))
-      return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
+    // a deletion changes the copy's numbering the arranged instances come back by; an addition doesn't
+    if (objectOps.some((o) => o.op === 'delete')) return showToast(t('farm.workspace.arrange.saveObjects'), 'error');
     if (plateNo > 0 && plateLocked(plateNo)) return showToast(tr('This plate is locked.\nCannot auto-arrange on this plate.'), 'info');
     setArranging(true);
     showToast(tr('Arranging...'), 'info');
@@ -1395,6 +1464,16 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   };
   // Clone (Ctrl+K, Plater::clone_selection): the Clone dialog, then the selection copied and pasted that many times
   const [copiesDialog, setCopiesDialog] = useState<{ clone: true } | { clone: false; objectId: string } | null>(null);
+  const [arrangeAfter, setArrangeAfter] = useState<number | null>(null);
+  useEffect(
+    () => {
+      if (arrangeAfter == null) return;
+      setArrangeAfter(null);
+      void runArrange(arrangeAfter);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on the render that has the copies
+    [arrangeAfter],
+  );
   const openClone = () => {
     if (canCopy) setCopiesDialog({ clone: true });
   };
@@ -1440,6 +1519,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
               remove: () => deleteSelection(sel),
               printable: () => togglePrintable(sel),
               autoDrop: { checked: selectedIds.every(autoDropOf), toggle: () => toggleAutoDrop(selectedIds) },
+              pasteSettings:
+                settingsClip && !settingsClip.part
+                  ? () => pasteSettings(selectedIds.map((objectId) => ({ objectId, partId: null })))
+                  : undefined,
               // set_extruder_for_selected_items: each object's filament, its model parts' own dropped
               filaments: colours.map((_, i) => ({
                 label: `${tr('Filament')} ${i + 1}`,
@@ -1492,6 +1575,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           },
           table: () => setObjectTable({ objectId: sel.id, partId: sel.partId ?? null }),
           mirror: editable && target ? (axis) => mirrorKeys([target], axis) : undefined,
+          copySettings: doc.editable && partId ? () => copySettings(sel.id, partId) : undefined,
+          pasteSettings: doc.editable && partId && settingsClip?.part ? () => pasteSettings([{ objectId: sel.id, partId }]) : undefined,
           center: shift && (Math.abs(shift[0]) > 1e-6 || Math.abs(shift[1]) > 1e-6) ? () => movePart(shift) : undefined,
           drop: box && Math.abs(box.min.z) > 0.001 ? () => movePart([0, 0, -box.min.z]) : undefined,
           remove: editable && partId ? () => partOp({ op: 'delete', object_id: sel.id, part_id: partId }) : undefined,
@@ -1553,6 +1638,9 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
+          ...centerAndDrop(menuInstances ?? selectedItems(view, [sel.id], sel.instance ?? null)),
+          copySettings: doc.editable ? () => copySettings(sel.id, null) : undefined,
+          pasteSettings: doc.editable && settingsClip && !settingsClip.part ? () => pasteSettings([{ objectId: sel.id, partId: null }]) : undefined,
           // the instance under the pointer (the 3D view), else the object's every instance (the list)
           mirror:
             doc.editable && !doc.cannot_place
@@ -2661,10 +2749,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           layout={layout}
           clone={copiesDialog.clone}
           value={copiesDialog.clone ? 1 : instancesNow(copiesDialog.objectId).length}
-          arrangeHint={t('farm.workspace.arrange.saveObjects')}
-          onApply={(n) => {
-            if (!copiesDialog.clone) setInstanceCount(copiesDialog.objectId, n);
-            else paste(copySelection(), n);
+          onApply={(n, arrange) => {
+            if (!copiesDialog.clone) return setInstanceCount(copiesDialog.objectId, n);
+            paste(copySelection(), n);
+            // CloneDialog: then the current plate arranged (PREPARE_STATE_MENU), once the copies are in the draft
+            if (arrange && currentPlate != null) setArrangeAfter(currentPlate);
           }}
           onClose={() => setCopiesDialog(null)}
         />

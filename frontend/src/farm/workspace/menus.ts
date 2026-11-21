@@ -50,6 +50,13 @@ export function objectMenu(
     instances?: InstanceActions;
     /** Transform > Mirror along an axis (absent: greyed) */
     mirror?: (axis: 0 | 1 | 2) => void;
+    /** Center on the selected plate, Drop to the bed (absent: greyed, it's there already or can't be saved) */
+    center?: () => void;
+    drop?: () => void;
+    /** Copy / Paste Process Settings (ObjectList::copy_settings_to_clipboard / paste_settings_into_list; absent:
+     * greyed) */
+    copySettings?: () => void;
+    pasteSettings?: () => void;
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -59,8 +66,8 @@ export function objectMenu(
     { label: tr('Info'), onClick: on.info },
     { label: tr('Clone'), shortcut: 'Ctrl+K', separator: true, onClick: on.clone },
     on.instances ? { label: tr('Instances'), items: instancesItems(tr, on.instances) } : { label: tr('Instances'), submenu: true },
-    { label: tr('Center'), separator: true },
-    { label: tr('Drop') },
+    { label: tr('Center'), separator: true, onClick: on.center },
+    { label: tr('Drop'), onClick: on.drop },
     transformItem(tr, on.mirror),
     alignItem(tr, align),
     { label: tr('Edit'), submenu: true },
@@ -75,8 +82,8 @@ export function objectMenu(
     { label: tr('Printable'), shortcut: 'V', checked: printable, separator: true, onClick: on.printable },
     { label: tr('Auto Drop'), checked: on.autoDrop?.checked ?? true, onClick: on.autoDrop?.toggle },
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
-    { label: tr('Copy Process Settings') },
-    { label: tr('Paste Process Settings') },
+    { label: tr('Copy Process Settings'), onClick: on.copySettings },
+    { label: tr('Paste Process Settings'), onClick: on.pasteSettings },
     { label: tr('Edit in Parameter Table'), onClick: on.table },
     { label: tr('More'), submenu: true, separator: true },
   ];
@@ -140,6 +147,10 @@ export function partMenu(
     type?: { current: string; set?: (type: PartType, changeType: boolean) => void; seams: boolean };
     /** Transform > Mirror along an axis (absent: greyed) */
     mirror?: (axis: 0 | 1 | 2) => void;
+    /** Copy / Paste Process Settings (ObjectList::copy_settings_to_clipboard / paste_settings_into_list; absent:
+     * greyed) */
+    copySettings?: () => void;
+    pasteSettings?: () => void;
   },
 ): MenuItem[] {
   const type = on.type;
@@ -171,8 +182,8 @@ export function partMenu(
     ...(seam && set ? [{ label: tr('Precise Seam Type'), items: choices(SEAM_ENTRIES, (t) => type.current === t, false) }] : []),
     { label: tr('Change Filament'), submenu: true },
     { label: tr('Edit Process Settings'), onClick: on.settings, separator: true },
-    { label: tr('Copy Process Settings') },
-    { label: tr('Paste Process Settings') },
+    { label: tr('Copy Process Settings'), onClick: on.copySettings },
+    { label: tr('Paste Process Settings'), onClick: on.pasteSettings },
     { label: tr('Edit in Parameter Table'), onClick: on.table },
     { label: tr('More'), submenu: true, separator: true },
   ];
@@ -191,6 +202,8 @@ export function multiMenu(
     autoDrop?: { checked: boolean; toggle?: () => void };
     /** Set Filament for selected items: its choices (absent: greyed) */
     filaments?: MenuItem[];
+    /** Paste Process Settings into each object (absent: greyed) */
+    pasteSettings?: () => void;
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -211,7 +224,7 @@ export function multiMenu(
     { label: tr('Auto Drop'), checked: on.autoDrop?.checked ?? true, onClick: on.autoDrop?.toggle },
     { label: tr('Edit Process Settings'), separator: true },
     { label: tr('Copy Process Settings') },
-    { label: tr('Paste Process Settings') },
+    { label: tr('Paste Process Settings'), onClick: on.pasteSettings },
     { label: tr('More'), submenu: true, separator: true },
   ];
 }

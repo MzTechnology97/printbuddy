@@ -605,11 +605,10 @@ async def arrange_objects(
         raise HTTPException(
             status_code=422, detail="Save the copy with its plates added, removed or moved first, then arrange it"
         )
-    if any(op.op == "delete" or op.op in ws_objects.ADDITIONS for op in body.object_ops):
-        # the arranged instances come back by the copy's numbering, which a deletion or an addition changes
-        raise HTTPException(
-            status_code=422, detail="Save the copy with its objects deleted or added first, then arrange it"
-        )
+    if any(op.op == "delete" for op in body.object_ops):
+        # the arranged instances come back by the copy's numbering, which a deletion changes; an addition doesn't
+        # (new instances and objects are numbered after the file's, as the workspace numbers them)
+        raise HTTPException(status_code=422, detail="Save the copy with its objects deleted first, then arrange it")
     if body.part_ops:
         # a deleted part's transform goes into its instances: the arranged ones would get it twice
         raise HTTPException(
