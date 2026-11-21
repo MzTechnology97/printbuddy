@@ -11,11 +11,12 @@ import { render } from '../utils';
 import { buildModelGroup, parse3MF, type ViewerScene } from '../../components/ModelViewer';
 import type { OrcaLayout } from '../../farm/workspace/orcaLayout';
 import { orcaText } from '../../farm/workspace/orcaLayout';
-import { type Placed, moved } from '../../farm/workspace/placement';
+import { type Placed, fromSpec, moved } from '../../farm/workspace/placement';
 import {
   type Change,
   about,
   absoluteRotation,
+  rotationOf,
   boundingSphere,
   boxOf,
   changed,
@@ -69,6 +70,20 @@ describe('the rotation pivot and angles (Selection::get_bounding_sphere, get_rot
     // Eigen keeps Z in [0°, 180°]; ±180 on Y as the sign of a 0 in the matrix has it (atan2(-0, -1)), in Orca too
     expect(r(absoluteRotation(spec(rotationAbout(2, -90)))).map(Math.abs)).toEqual([180, 180, 90]);
     expect(r(absoluteRotation(spec(rotationAbout(0, 90).premultiply(rotationAbout(2, 90)))))).toEqual([90, 0, 90]);
+  });
+
+  it("keeps a mirrored transform's rotation a rotation, the mirror with the scale (Orca's Mirror)", () => {
+    const mirrored = [-1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 20, 5]; // along X
+    const r = (v: number[]) => v.map((n) => Math.round(n * 1000) / 1000 + 0);
+    expect(rotationOf(mirrored).determinant()).toBeCloseTo(1);
+    // as Eigen leaves it for a mirror with no turn: 180° about Y, the mirror on Z
+    expect(r(absoluteRotation(mirrored)).map(Math.abs)).toEqual([180, 0, 180]);
+    // Reset rotation keeps the mirror
+    expect(fromSpec(withoutRotation(mirrored)).determinant()).toBeLessThan(0);
+    // turned 45° and mirrored, as the UI's Mirror then Page Up leave it: the turn read back
+    const turned = about(mirrored, rotationAbout(2, 45), new THREE.Vector3());
+    expect(rotationOf(turned).determinant()).toBeCloseTo(1);
+    expect(r(absoluteRotation(turned)).map(Math.abs)).toEqual([0, 180, 45]);
   });
 
   it('a contextual msgid without a translation shows its text alone', () => {

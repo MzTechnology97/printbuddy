@@ -10,6 +10,22 @@ type Tr = (text: string) => string;
 const alignItem = (tr: Tr, align?: MenuItem[] | string): MenuItem =>
   Array.isArray(align) ? { label: tr('Align/Distribute'), items: align } : { label: tr('Align/Distribute'), submenu: true, hint: align };
 
+/** Transform (append_menu_item_transform with its mirror): "Mirror:" and Along X / Y / Z Axis (Plater::mirror), then
+ * Scale to build volume (greyed); absent ``mirror``: the submenu greyed. */
+const transformItem = (tr: Tr, mirror?: (axis: 0 | 1 | 2) => void): MenuItem =>
+  mirror
+    ? {
+        label: tr('Transform'),
+        items: [
+          { label: `${tr('Mirror')}:` },
+          { label: tr('Along X Axis'), onClick: () => mirror(0) },
+          { label: tr('Along Y Axis'), onClick: () => mirror(1) },
+          { label: tr('Along Z Axis'), onClick: () => mirror(2) },
+          { label: tr('Scale to build volume'), separator: true },
+        ],
+      }
+    : { label: tr('Transform'), submenu: true };
+
 export function objectMenu(
   tr: Tr,
   deleteKey: string,
@@ -32,6 +48,8 @@ export function objectMenu(
     clone?: () => void;
     /** the Instances submenu (append_menu_items_instance_manipulation): each absent greyed */
     instances?: InstanceActions;
+    /** Transform > Mirror along an axis (absent: greyed) */
+    mirror?: (axis: 0 | 1 | 2) => void;
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -43,7 +61,7 @@ export function objectMenu(
     on.instances ? { label: tr('Instances'), items: instancesItems(tr, on.instances) } : { label: tr('Instances'), submenu: true },
     { label: tr('Center'), separator: true },
     { label: tr('Drop') },
-    { label: tr('Transform'), submenu: true },
+    transformItem(tr, on.mirror),
     alignItem(tr, align),
     { label: tr('Edit'), submenu: true },
     { label: tr('Delete'), shortcut: deleteKey, separator: true, onClick: on.remove },
@@ -120,6 +138,8 @@ export function partMenu(
     remove?: () => void;
     /** ``changeType``: Change Type's entry (its Precise Seam keeps a seam's subtype), else Precise Seam Type's */
     type?: { current: string; set?: (type: PartType, changeType: boolean) => void; seams: boolean };
+    /** Transform > Mirror along an axis (absent: greyed) */
+    mirror?: (axis: 0 | 1 | 2) => void;
   },
 ): MenuItem[] {
   const type = on.type;
@@ -132,7 +152,7 @@ export function partMenu(
     { label: tr('Zoom'), shortcut: 'Z', onClick: on.zoom },
     { label: tr('Center'), separator: true, onClick: on.center },
     { label: tr('Drop'), onClick: on.drop },
-    { label: tr('Transform'), submenu: true },
+    transformItem(tr, on.mirror),
     { label: tr('Align/Distribute'), submenu: true },
     { label: tr('Edit'), submenu: true },
     { label: tr('Delete'), shortcut: deleteKey, separator: true, onClick: on.remove },

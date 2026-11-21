@@ -43,6 +43,7 @@ import {
   moved,
   placementsToSave,
   positionOf,
+  sceneToSlicer,
   selectedItems,
   syncAdded,
   toSpec,
@@ -221,7 +222,30 @@ const WORKING_SHORTCUTS = new Set([
   'SwitchView',
   'CollapseSidebar',
   'KeyboardShortcuts',
+  'Undo',
+  'Redo',
+  'Cut',
+  'Copy',
+  'Paste',
+  'DeleteSelected',
+  'DeleteAll',
+  'CloneSelected',
+  'AddInstance',
+  'RemoveInstance',
+  'TogglePrintable',
+  'GizmoMove',
+  'GizmoRotate',
+  'GizmoScale',
+  'GizmoFlatten',
+  'MoveSelectionLeft',
+  'MoveSelectionRight',
+  'MoveSelectionUp',
+  'MoveSelectionDown',
+  'RotateSelectionLeft',
+  'RotateSelectionRight',
 ]);
+// GLCanvas3D's MoveSelection* (Shortcuts.cpp): an arrow's direction on the bed (or, with Ctrl, on the screen)
+const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
 const WORKING_MOUSE = new Set([
   'Select a part',
   'Select multiple objects',
@@ -231,6 +255,8 @@ const WORKING_MOUSE = new Set([
   'Pan View',
   'Zoom View',
   'Move section plane',
+  'Movement step set to 1mm',
+  'Movement in camera space',
 ]);
 // OrcaSlicer's dark theme (src/slic3r/GUI/Widgets/StateColor.cpp, v2.5.0), on Printbuddy's colour tokens
 const SLICER_DARK = {
@@ -829,6 +855,20 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     view && (keys.length || parts.length)
       ? { view, placed, instances: keys, parts, modelPart, objectCs: inObject, autoDrop, plateOf: plateAt, plateCount: source.plates.length }
       : null;
+  /** Mirror (Plater::mirror, GLCanvas3D::mirror_selection): a scale by -1 along the axis in World coordinates about
+   * the box centre of what the menu names, instances or a part (Selection::mirror, scale_and_translate), the object's
+   * other instances kept in step, then do_mirror's bed rule. One undo step. */
+  const mirrorKeys = (keys: string[], axis: 0 | 1 | 2) => {
+    const b = view && keys.length ? boxOf(view, placed, keys) : null;
+    if (!view || !b) return;
+    const pivot = b.getCenter(new THREE.Vector3());
+    const a = new THREE.Matrix4().makeScale(axis === 0 ? -1 : 1, axis === 1 ? -1 : 1, axis === 2 ? -1 : 1);
+    const next = keys.some(isPartKey)
+      ? changedParts(view, placed, keys, (w) => about(w, a, pivot), 'transform', autoDrop)
+      : changed(view, placed, { keys, apply: (spec) => about(spec, a, pivot), sync: 'general', drop: 'transform' }, autoDrop);
+    applyPlacements(view, next);
+    commit(next);
+  };
   const runAlign = (sel: AlignSelection, type: AlignType, toParent: boolean) => {
     const moves = alignMoves(sel, type, toParent);
     const keys = Object.keys(moves ?? {});
@@ -1036,6 +1076,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     if (turn.some((v) => v !== 0)) parts.push(`${tr('Rotate')} ${turn.map(n).join(' / ')}°`);
     const scale = [0, 1, 2].map((c) => 100 * Math.hypot(spec[3 * c], spec[3 * c + 1], spec[3 * c + 2]));
     if (scale.some((v) => Math.abs(v - 100) > 0.01)) parts.push(`${tr('NounScale')} ${scale.map(n).join(' / ')}%`);
+    if (fromSpec(spec).determinant() < 0) parts.push(tr('Mirror')); // Orca's Mirror: its rotation shown without it
     return parts.join(' · ');
   };
   const objectRows = useMemo(() => {
@@ -1450,6 +1491,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: sel.partId ?? null }),
+          mirror: editable && target ? (axis) => mirrorKeys([target], axis) : undefined,
           center: shift && (Math.abs(shift[0]) > 1e-6 || Math.abs(shift[1]) > 1e-6) ? () => movePart(shift) : undefined,
           drop: box && Math.abs(box.min.z) > 0.001 ? () => movePart([0, 0, -box.min.z]) : undefined,
           remove: editable && partId ? () => partOp({ op: 'delete', object_id: sel.id, part_id: partId }) : undefined,
@@ -1511,6 +1553,11 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
+          // the instance under the pointer (the 3D view), else the object's every instance (the list)
+          mirror:
+            doc.editable && !doc.cannot_place
+              ? (axis) => mirrorKeys(menuInstances ?? selectedItems(view, [sel.id], sel.instance ?? null), axis)
+              : undefined,
           ...(canEditObjects && {
             remove: () => deleteSelection(sel),
             printable: () => togglePrintable(sel),
@@ -1727,6 +1774,41 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   // Ctrl+A select all (Ctrl+Shift+A on all plates), Ctrl+E labels, Ctrl+Shift+K collision volumes,
   // Ctrl+Shift+Enter wireframe, Tab Prepare / Preview, Shift+Tab sidebar, ? the shortcuts list, Esc leaves a tool
   // or the selection
+  // OrcaSlicer's keyboard moves (GLCanvas3D::apply_selection_move / apply_selection_rotate): an arrow moves the
+  // selection 10 mm along the bed's X / Y (Shift 1 mm, Ctrl in camera space), Page Up / Down turn it 45° about Z
+  // (World, about its box centre); a key held repeats, and the whole hold is one undo step when it is let go
+  // (finish_selection_edit). Shortcut: a turn held over several steps turns about the box centre it started from
+  // (Orca takes the box again each step; the same for one press).
+  const keyEdit = useRef<{ key: string; d: [number, number, number]; angle: number; pivot: THREE.Vector3 } | null>(null);
+  const showKeyEdit = (done: boolean) => {
+    const k = keyEdit.current;
+    if (!k) return;
+    if (done) keyEdit.current = null;
+    if (k.angle) rotateBy(2, k.angle, done, k.pivot);
+    else transform({ keys: moveKeys, apply: (spec) => moved(spec, k.d), sync: 'none', drop: 'move' }, done);
+  };
+  const keyStep = (key: string, d: [number, number, number], angle: number) => {
+    const b = box();
+    if (!view || ready !== true || !b) return;
+    // another key while one is held: that one first (the new one from its next repeat)
+    if (keyEdit.current && keyEdit.current.key !== key) return showKeyEdit(true);
+    const k = (keyEdit.current ??= { key, d: [0, 0, 0], angle: 0, pivot: b.getCenter(new THREE.Vector3()) });
+    k.d = [k.d[0] + d[0], k.d[1] + d[1], 0];
+    k.angle += angle;
+    showKeyEdit(false);
+  };
+  /** An arrow's step on the bed: its direction, or (camera space) the camera's right / up laid on the bed. */
+  const arrowStep = (dx: number, dy: number, slow: boolean, camera: boolean): [number, number, number] => {
+    const m = slow ? 1 : 10;
+    if (!camera || !view) return [m * dx, m * dy, 0];
+    const w = new THREE.Vector3(dx, dy, 0).applyQuaternion(view.camera.quaternion);
+    const s = sceneToSlicer(view, new THREE.Vector3(), w);
+    return [m * s[0], m * s[1], 0];
+  };
+  const keysUp = useRef<(e: KeyboardEvent) => void>(() => {});
+  keysUp.current = (e: KeyboardEvent) => {
+    if (keyEdit.current && (e.key === keyEdit.current.key || e.type === 'blur')) showKeyEdit(true);
+  };
   const dialogOpen = saveOpen || !!preset || !!menu || printOpen || shortcutsOpen || !!copiesDialog;
   const keys = useRef<(e: KeyboardEvent) => void>(() => {});
   keys.current = (e: KeyboardEvent) => {
@@ -1804,6 +1886,13 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     } else if (ctrl && !e.shiftKey && (e.key === 'k' || e.key === 'K') && canCopy) {
       handled();
       openClone();
+    } else if (e.key in ARROWS) {
+      handled();
+      const [dx, dy] = ARROWS[e.key];
+      keyStep(e.key, arrowStep(dx, dy, e.shiftKey, ctrl), 0);
+    } else if ((e.key === 'PageUp' || e.key === 'PageDown') && !ctrl) {
+      handled();
+      keyStep(e.key, [0, 0, 0], e.key === 'PageUp' ? 45 : -45);
     } else if (ctrl) return;
     else if ((e.key === '+' || e.key === '-') && selectedIds.length <= 1 && selectedId != null) {
       // GLCanvas3D::on_char: one more instance, or one fewer
@@ -1840,8 +1929,15 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => keys.current(e);
+    const onUp = (e: Event) => keysUp.current(e as KeyboardEvent);
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onUp);
+    window.addEventListener('blur', onUp);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onUp);
+      window.removeEventListener('blur', onUp);
+    };
   }, []);
   const selectedObject = selectedId != null ? doc.objects.find((o) => o.id === selectedId) : undefined;
   // the info box (Plater.cpp): one instance or one part; a whole object only when it has one instance

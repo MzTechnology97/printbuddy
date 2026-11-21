@@ -52,8 +52,9 @@ class InstanceTransform(BaseModel):
 
 
 def check_matrix(m: list[float]) -> None:
-    """A placement the slicer takes: finite, not mirrored or flattened, each axis scaled 0.001 to 1000 times,
-    within ``MAX_OFFSET``. Mirroring is a tool of its own in Orca, not one of these."""
+    """A placement the slicer takes: finite, not flattened, each axis scaled 0.001 to 1000 times, within
+    ``MAX_OFFSET``. A mirror (a negative determinant) is Orca's Mirror: both slicers' command lines take it, on an
+    instance and on a part, as the mirrored mesh (proved before it was allowed: batch F3)."""
     if not all(math.isfinite(v) for v in m):
         raise InvalidPlacement("the transform has a value that is not a number")
     a = [m[0:3], m[3:6], m[6:9]]  # 3MF: a point (row) times these rows, then the translation
@@ -62,8 +63,8 @@ def check_matrix(m: list[float]) -> None:
         - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
     )
-    if det <= 0:
-        raise InvalidPlacement("the transform mirrors or flattens the object")
+    if abs(det) < 1e-12:
+        raise InvalidPlacement("the transform flattens the object")
     for row in a:
         if not MIN_SCALE <= math.sqrt(sum(v * v for v in row)) <= MAX_SCALE:
             raise InvalidPlacement(f"a scale is outside {MIN_SCALE:g} to {MAX_SCALE:g} times")

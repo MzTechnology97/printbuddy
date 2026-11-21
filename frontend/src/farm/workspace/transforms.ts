@@ -285,6 +285,13 @@ export function rotationOf(spec: Spec): THREE.Matrix4 {
     r = next;
     if (done) break;
   }
+  // a mirrored transform (Orca's Mirror): its rotation stays a rotation, the mirror goes with the scale, as Eigen's
+  // computeRotationScaling leaves it. Shortcut: on the instance's own Z; Eigen picks the axis by its SVD (the same
+  // for a mirror with no turn), to follow if a turned mirror ever shows other angles than Orca's.
+  if (r.determinant() < 0) {
+    const e = r.elements;
+    for (const k of [6, 7, 8]) e[k] = -e[k];
+  }
   return new THREE.Matrix4().setFromMatrix3(r);
 }
 

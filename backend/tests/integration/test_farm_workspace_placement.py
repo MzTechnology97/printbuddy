@@ -66,8 +66,8 @@ class TestPlace:
     @pytest.mark.parametrize(
         ("matrix", "error"),
         [
-            ([1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0], "mirrors or flattens"),
-            ([1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], "mirrors or flattens"),
+            ([1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0], "flattens"),
+            ([1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0], "flattens"),  # two axes the same
             ([1e-4, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], "a scale is outside"),
             ([2000, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], "a scale is outside"),
             ([1, 0, 0, 0, 1, 0, 0, 0, 1, 1e6, 0, 0], "more than"),
@@ -77,6 +77,17 @@ class TestPlace:
     def test_refuses_what_the_slicer_would_not_take(self, matrix, error):
         with pytest.raises(placement.InvalidPlacement, match=error):
             placement.check_matrix(matrix)
+
+    @pytest.mark.parametrize(
+        "matrix",
+        [
+            [-1, 0, 0, 0, 1, 0, 0, 0, 1, 80, 60, 5],  # Mirror along X
+            [1, 0, 0, 0, 1, 0, 0, 0, -1, 80, 60, 5],  # along Z
+            [0, -1, 0, -1, 0, 0, 0, 0, 1, 80, 60, 5],  # turned and mirrored
+        ],
+    )
+    def test_takes_a_mirror(self, matrix):
+        placement.check_matrix(matrix)
 
     def test_refuses_an_instance_the_model_does_not_have_or_one_placed_twice(self):
         model = model_of(make_project())
@@ -165,11 +176,22 @@ class TestSaveCopy:
         assert resp.status_code == 200, resp.text
         assert [c["key"] for c in resp.json()["changes"]] == ["layer_height", "transform"]
 
+    async def test_a_mirrored_instance_is_saved(self, async_client, db_session):
+        original = make_project("bambu")
+        f = await add_file(db_session, original)
+        doc = await open_ws(async_client, f.id)
+        mirrored = {"object_id": "4", "instance": 0, "matrix": [-1, 0, 0, 0, 1, 0, 0, 0, 1, 300, 50, 5]}
+        resp = await save(async_client, doc, {}, transforms=[mirrored])
+        assert resp.status_code == 200, resp.text
+        row = await db_session.get(LibraryFile, resp.json()["library_file_id"])
+        after = entries(library.to_absolute_path(row.file_path).read_bytes())[project.MODEL_ENTRY]
+        assert b'transform="-1 0 0 0 1 0 0 0 1 300 50 5"' in after
+
     @pytest.mark.parametrize(
         "transform",
         [
             {"object_id": "9", "instance": 0, "matrix": MOVED},  # no such object
-            {"object_id": "2", "instance": 0, "matrix": [1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0]},  # mirrored
+            {"object_id": "2", "instance": 0, "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]},  # flattened
             {"object_id": "2", "instance": 0, "matrix": [1, 0, 0]},  # not 12 numbers
             {"object_id": "../2", "instance": 0, "matrix": MOVED},  # not an id
         ],
@@ -222,6 +244,12 @@ class TestPlaceParts:
             }
         ]
 
+    def test_a_mirrored_part_mirrors_its_matrix(self):
+        mirrored = placement.PartTransform(object_id="2", part_id="1", matrix=[-1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 0, 0])
+        model, settings, _ = placement.place_parts(self.MODEL, self.SETTINGS, [mirrored])
+        assert b'transform="-1 0 0 0 1 0 0 0 1 5 0 0"' in model
+        assert b'<metadata key="matrix" value="-1 0 0 5 0 1 0 0 0 0 1 0 0 0 0 1"/>' in settings
+
     def test_a_turned_part_turns_its_matrix(self):
         turned = placement.PartTransform(object_id="2", part_id="3", matrix=[0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0])
         _, settings, _ = placement.place_parts(self.MODEL, self.SETTINGS, [turned])
@@ -240,7 +268,7 @@ class TestPlaceParts:
         [
             ({"object_id": "2", "part_id": "9", "matrix": MOVED}, "no part 9"),
             ({"object_id": "7", "part_id": "1", "matrix": MOVED}, "not one element"),
-            ({"object_id": "2", "part_id": "1", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0]}, "mirrors"),
+            ({"object_id": "2", "part_id": "1", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]}, "flattens"),
         ],
     )
     def test_refuses_what_it_cannot_place(self, part, error):

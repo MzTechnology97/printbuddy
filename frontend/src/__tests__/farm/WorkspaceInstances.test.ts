@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import type { WorkspaceObject } from '../../farm/workspace/api';
 import { draftHistory, type DraftHistory } from '../../farm/workspace/draft';
 import { editMenu, type MenuActions, type MenuState } from '../../farm/workspace/menuBar';
-import { instanceMenu, objectMenu } from '../../farm/workspace/menus';
+import { instanceMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
 import { type ObjectOp, addedItems, nextNewId, withObjectOps } from '../../farm/workspace/objectOps';
 import { type Box2, type Pt, convexHull, emptyCells, hullContains, nearestEmptyCell, pastePlacements } from '../../farm/workspace/paste';
 
@@ -118,6 +118,25 @@ describe('the menus', () => {
     expect(calls).toEqual(['clone', 'add', 'split']);
     // without the actions (a file that can't take new objects): greyed, as before
     expect(objectMenu(tr, 'Del', true, base).find((i) => i.label === 'Clone')?.onClick).toBeUndefined();
+  });
+
+  it("fills Transform with Orca's Mirror along X / Y / Z for an object and a part (batch F3)", () => {
+    const axes: number[] = [];
+    const mirror = (axis: 0 | 1 | 2) => axes.push(axis);
+    const obj = objectMenu(tr, 'Del', true, { ...base, mirror }).find((i) => i.label === 'Transform')!.items!;
+    expect(obj.map((i) => [i.label, !!i.onClick])).toEqual([
+      ['Mirror:', false],
+      ['Along X Axis', true],
+      ['Along Y Axis', true],
+      ['Along Z Axis', true],
+      ['Scale to build volume', false],
+    ]);
+    obj.slice(1, 4).forEach((i) => i.onClick!());
+    const part = partMenu(tr, 'Del', { select: () => {}, zoom: () => {}, settings: () => {}, mirror }).find((i) => i.label === 'Transform')!;
+    part.items![2].onClick!();
+    expect(axes).toEqual([0, 1, 2, 1]);
+    // without the action: greyed, as before
+    expect(objectMenu(tr, 'Del', true, base).find((i) => i.label === 'Transform')).toEqual({ label: 'Transform', submenu: true });
   });
 
   it("gives an instance's Set as An Individual Object its action", () => {
