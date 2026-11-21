@@ -331,6 +331,12 @@ UI_STRINGS = [
     "Auto arrange plate after cloning",
     "Fill bed with copies",
     "Fill bed with instances",
+    # Transform > Mirror (GUI_Factories.cpp append_menu_item_transform)
+    "Mirror",
+    "Along X Axis",
+    "Along Y Axis",
+    "Along Z Axis",
+    "Scale to build volume",
     "This plate is locked.\nCannot auto-arrange on this plate.",
     "Same as Global Plate Type",
     "Same as Global Print Sequence",

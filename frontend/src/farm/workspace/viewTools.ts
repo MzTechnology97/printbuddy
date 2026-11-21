@@ -113,7 +113,8 @@ function statsOf(node: THREE.Object3D): ObjectStats {
   node.updateMatrixWorld(true);
   node.traverse((o) => {
     if (o instanceof THREE.Mesh) {
-      const v = meshVolume(o.geometry) * o.matrixWorld.determinant(); // scaled as the mesh is
+      // scaled as the mesh is; a closed mesh's volume, whichever way a mirror (Orca's Mirror, the scene's own) turns it
+      const v = Math.abs(meshVolume(o.geometry) * o.matrixWorld.determinant());
       volume += v;
       triangles += (o.geometry.getIndex()?.count ?? o.geometry.getAttribute('position').count) / 3;
       open += openEdges(o.geometry);

@@ -207,7 +207,7 @@ class TestAdd:
             ({"op": "copy", "object_id": "4", "new_id": "3", "matrices": [MOVED]}, "from 5 on"),
             ({"op": "copy", "object_id": "4", "new_id": "9"}, "transforms"),
             ({"op": "add_instance", "object_id": "9", "matrix": MOVED}, "no object 9"),
-            ({"op": "add_instance", "object_id": "2", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0, 0]}, "mirrors"),
+            ({"op": "add_instance", "object_id": "2", "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]}, "flattens"),
         ],
     )
     def test_refuses(self, op, error):
