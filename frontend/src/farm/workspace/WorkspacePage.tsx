@@ -89,7 +89,7 @@ import { ArrangeOptionsDialog } from './ArrangeOptions';
 import { useRotateGizmo, useScaleGizmo } from './transformGizmos';
 import { type PrintAction, PRINT_ACTIONS, PRINT_LABELS, PRINT_LATER, fileMenu, mainMenu, stripMnemonic, topBarShortcut } from './menuBar';
 import { emptyMenu, instanceMenu, multiMenu, objectMenu, partMenu, plateMenu } from './menus';
-import { FILAMENT_KEY, type Selection, filamentEdits, instancesOf, ownSettings, ownToSave } from './objects';
+import { FILAMENT_KEY, type Selection, filamentEdits, hiddenPart, instancesOf, ownSettings, ownTarget, ownToSave, targetOwn } from './objects';
 import { defaultOptions, firstRanges, rangeLabel, rangesOf, rangesToSave, withRanges } from './ranges';
 import {
   type PartOp,
@@ -869,6 +869,54 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     applyPlacements(view, next);
     commit(next);
   };
+  // Copy / Paste Process Settings (ObjectList::copy_settings_to_clipboard / paste_settings_into_list): an object's
+  // own settings (a part's: its object's, its own over them), pasted into objects, or into parts, which clears their
+  // own first. The extruder is neither copied nor cleared (paste keeps the target's; the Fila. column sets it).
+  const [settingsClip, setSettingsClip] = useState<{ part: boolean; values: Record<string, string> } | null>(null);
+  const copySettings = (objectId: string, partId: string | null) => {
+    const obj = doc.objects.find((o) => o.id === objectId);
+    if (!obj) return;
+    const values = { ...ownSettings(obj, null, own), ...(partId ? targetOwn(obj, partId, own) : {}) };
+    delete values[FILAMENT_KEY];
+    setSettingsClip({ part: !!partId, values });
+  };
+  /** Paste into objects (``partId`` null) or parts, one undo step. A part takes only a part's keys, those that would
+   * not slice the same anyway (as its object and the project have them), and its object's own the others pin back to
+   * the project's value (Orca's global_keys). Shortcut: Orca pins object-only keys on the part too; here only a
+   * part's keys, as the copy saves a part's settings. */
+  const pasteSettings = (targets: { objectId: string; partId: string | null }[]) => {
+    const clip = settingsClip;
+    if (!clip || !targets.length) return;
+    const edits: TargetEdits = {};
+    const put = (target: string, key: string, value: string | null) => ((edits[target] ??= {})[key] = value);
+    const partKeys = new Set(layout.region_keys ?? []);
+    const projectOf = (key: string) => {
+      const s = settings.find((x) => x.key === key);
+      return s ? projectValue(s, draft) : undefined;
+    };
+    for (const { objectId, partId } of targets) {
+      const obj = doc.objects.find((o) => o.id === objectId);
+      if (!obj) continue;
+      const id = obj.id ?? '';
+      if (!partId) {
+        const hidden = hiddenPart(obj);
+        for (const k of Object.keys(targetOwn(obj, null, own))) if (k !== FILAMENT_KEY) put(ownTarget(id), k, null);
+        if (hidden) for (const k of Object.keys(targetOwn(obj, hidden, own))) if (k !== FILAMENT_KEY) put(ownTarget(id, hidden), k, null);
+        for (const [k, v] of Object.entries(clip.values)) put(ownTarget(id), k, v);
+        continue;
+      }
+      const target = ownTarget(id, partId);
+      const objectOwn = targetOwn(obj, null, own);
+      const same = new Set(Object.keys(clip.values).filter((k) => clip.values[k] === (objectOwn[k] ?? projectOf(k))));
+      for (const k of Object.keys(targetOwn(obj, partId, own))) if (k !== FILAMENT_KEY) put(target, k, null);
+      for (const k of Object.keys(objectOwn)) {
+        const global = projectOf(k);
+        if (k !== FILAMENT_KEY && !same.has(k) && partKeys.has(k) && global !== undefined) put(target, k, global);
+      }
+      for (const [k, v] of Object.entries(clip.values)) if (!same.has(k) && partKeys.has(k)) put(target, k, v);
+    }
+    setOwnTargets(edits);
+  };
   /** Instances moved by ``d`` (Selection::translate, World), then do_move's bed rule; one undo step. */
   const moveKeysBy = (keys: string[], d: [number, number, number]) => {
     if (!view || !keys.length) return;
@@ -1471,6 +1519,10 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
               remove: () => deleteSelection(sel),
               printable: () => togglePrintable(sel),
               autoDrop: { checked: selectedIds.every(autoDropOf), toggle: () => toggleAutoDrop(selectedIds) },
+              pasteSettings:
+                settingsClip && !settingsClip.part
+                  ? () => pasteSettings(selectedIds.map((objectId) => ({ objectId, partId: null })))
+                  : undefined,
               // set_extruder_for_selected_items: each object's filament, its model parts' own dropped
               filaments: colours.map((_, i) => ({
                 label: `${tr('Filament')} ${i + 1}`,
@@ -1523,6 +1575,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           },
           table: () => setObjectTable({ objectId: sel.id, partId: sel.partId ?? null }),
           mirror: editable && target ? (axis) => mirrorKeys([target], axis) : undefined,
+          copySettings: doc.editable && partId ? () => copySettings(sel.id, partId) : undefined,
+          pasteSettings: doc.editable && partId && settingsClip?.part ? () => pasteSettings([{ objectId: sel.id, partId }]) : undefined,
           center: shift && (Math.abs(shift[0]) > 1e-6 || Math.abs(shift[1]) > 1e-6) ? () => movePart(shift) : undefined,
           drop: box && Math.abs(box.min.z) > 0.001 ? () => movePart([0, 0, -box.min.z]) : undefined,
           remove: editable && partId ? () => partOp({ op: 'delete', object_id: sel.id, part_id: partId }) : undefined,
@@ -1585,6 +1639,8 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
           ...centerAndDrop(menuInstances ?? selectedItems(view, [sel.id], sel.instance ?? null)),
+          copySettings: doc.editable ? () => copySettings(sel.id, null) : undefined,
+          pasteSettings: doc.editable && settingsClip && !settingsClip.part ? () => pasteSettings([{ objectId: sel.id, partId: null }]) : undefined,
           // the instance under the pointer (the 3D view), else the object's every instance (the list)
           mirror:
             doc.editable && !doc.cannot_place
