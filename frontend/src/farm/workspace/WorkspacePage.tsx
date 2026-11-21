@@ -869,6 +869,27 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
     applyPlacements(view, next);
     commit(next);
   };
+  /** Instances moved by ``d`` (Selection::translate, World), then do_move's bed rule; one undo step. */
+  const moveKeysBy = (keys: string[], d: [number, number, number]) => {
+    if (!view || !keys.length) return;
+    const next = changed(view, placed, { keys, apply: (spec) => moved(spec, d), sync: 'none', drop: 'move' }, autoDrop);
+    applyPlacements(view, next);
+    commit(next);
+  };
+  /** The object menu's Center (Selection::center: the box's centre to the selected plate's, on X / Y) and Drop
+   * (Selection::drop: every instance down by the lowest one's height above the bed); each move absent when there is
+   * none to make (append_menu_item_center / can_drop). */
+  const centerAndDrop = (keys: string[]) => {
+    const b = view && keys.length && doc.editable && !doc.cannot_place ? boxOf(view, placed, keys) : null;
+    if (!b) return {};
+    const p = doc.plates.find((x) => x.index === currentPlate);
+    const middle = p?.source != null ? plateCenter(p.source - 1, source.plates.length, settings.find((x) => x.key === 'printable_area')?.value) : null;
+    const d: [number, number, number] | null = middle ? [middle[0] - (b.min.x + b.max.x) / 2, middle[1] - (b.min.y + b.max.y) / 2, 0] : null;
+    return {
+      center: d && (Math.abs(d[0]) > 1e-6 || Math.abs(d[1]) > 1e-6) ? () => moveKeysBy(keys, d) : undefined,
+      drop: Math.abs(b.min.z) >= 0.001 ? () => moveKeysBy(keys, [0, 0, -b.min.z]) : undefined,
+    };
+  };
   const runAlign = (sel: AlignSelection, type: AlignType, toParent: boolean) => {
     const moves = alignMoves(sel, type, toParent);
     const keys = Object.keys(moves ?? {});
@@ -1563,6 +1584,7 @@ function Workspace({ doc: source, layout }: { doc: WorkspaceDocument; layout: Or
             select(sel);
           },
           table: () => setObjectTable({ objectId: sel.id, partId: null }),
+          ...centerAndDrop(menuInstances ?? selectedItems(view, [sel.id], sel.instance ?? null)),
           // the instance under the pointer (the 3D view), else the object's every instance (the list)
           mirror:
             doc.editable && !doc.cannot_place

@@ -139,6 +139,16 @@ describe('the menus', () => {
     expect(objectMenu(tr, 'Del', true, base).find((i) => i.label === 'Transform')).toEqual({ label: 'Transform', submenu: true });
   });
 
+  it("gives the object menu's Center and Drop their moves, greyed when there is none to make", () => {
+    const calls: string[] = [];
+    const items = objectMenu(tr, 'Del', true, { ...base, center: () => calls.push('center'), drop: () => calls.push('drop') });
+    items.find((i) => i.label === 'Center')!.onClick!();
+    items.find((i) => i.label === 'Drop')!.onClick!();
+    expect(calls).toEqual(['center', 'drop']);
+    const none = objectMenu(tr, 'Del', true, base);
+    expect([none.find((i) => i.label === 'Center')?.onClick, none.find((i) => i.label === 'Drop')?.onClick]).toEqual([undefined, undefined]);
+  });
+
   it("gives an instance's Set as An Individual Object its action", () => {
     let split = false;
     instanceMenu(tr, 1, () => (split = true))[0].onClick!();

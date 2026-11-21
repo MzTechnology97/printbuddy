@@ -50,6 +50,9 @@ export function objectMenu(
     instances?: InstanceActions;
     /** Transform > Mirror along an axis (absent: greyed) */
     mirror?: (axis: 0 | 1 | 2) => void;
+    /** Center on the selected plate, Drop to the bed (absent: greyed, it's there already or can't be saved) */
+    center?: () => void;
+    drop?: () => void;
   },
   align?: MenuItem[] | string,
 ): MenuItem[] {
@@ -59,8 +62,8 @@ export function objectMenu(
     { label: tr('Info'), onClick: on.info },
     { label: tr('Clone'), shortcut: 'Ctrl+K', separator: true, onClick: on.clone },
     on.instances ? { label: tr('Instances'), items: instancesItems(tr, on.instances) } : { label: tr('Instances'), submenu: true },
-    { label: tr('Center'), separator: true },
-    { label: tr('Drop') },
+    { label: tr('Center'), separator: true, onClick: on.center },
+    { label: tr('Drop'), onClick: on.drop },
     transformItem(tr, on.mirror),
     alignItem(tr, align),
     { label: tr('Edit'), submenu: true },
