@@ -226,35 +226,33 @@ interface ShortcutsProps {
   onClose: () => void;
 }
 
-/** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp): a tab per page, its note, its rows by section
- * with their keys. It only lists them: the keys can't be changed here. */
 /** OrcaSlicer's number of copies: Set number of instances (Plater::set_number_of_copies, 0 to 1000) and, with
- * ``clone``, the Clone dialog (CloneDialog.cpp, 1 to 1000): its Fill (Fill bed with instances) and "Auto arrange plate
- * after cloning" are shown, greyed (``arrangeHint``: why). */
+ * ``clone``, the Clone dialog (CloneDialog.cpp, 1 to 1000): "Auto arrange plate after cloning", on as Orca's
+ * preference starts (auto_arrange), and its Fill (Fill bed with instances), greyed. */
 export function CopiesDialog({
   layout,
   value,
   clone,
-  arrangeHint,
   onApply,
   onClose,
 }: {
   layout: OrcaLayout;
   value: number;
   clone?: boolean;
-  arrangeHint?: string;
-  onApply: (count: number) => void;
+  /** ``arrange``: Clone's "Auto arrange plate after cloning" */
+  onApply: (count: number, arrange: boolean) => void;
   onClose: () => void;
 }) {
   const { i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);
   const [text, setText] = useState(String(value));
+  const [arrange, setArrange] = useState(true);
   const min = clone ? 1 : 0;
   const n = Number(text);
   const valid = /^\d+$/.test(text.trim()) && n >= min && n <= 1000;
   const ok = () => {
     if (!valid) return;
-    onApply(n);
+    onApply(n, !!clone && arrange);
     onClose();
   };
   return (
@@ -275,7 +273,12 @@ export function CopiesDialog({
         {clone && (
           <>
             <span>{tr('Auto arrange plate after cloning')}:</span>
-            <input type="checkbox" checked={false} disabled title={arrangeHint} aria-label={tr('Auto arrange plate after cloning')} />
+            <input
+              type="checkbox"
+              checked={arrange}
+              onChange={(e) => setArrange(e.target.checked)}
+              aria-label={tr('Auto arrange plate after cloning')}
+            />
           </>
         )}
       </div>
@@ -297,6 +300,8 @@ export function CopiesDialog({
   );
 }
 
+/** OrcaSlicer's "Keyboard Shortcuts" dialog (KBShortcutsDialog.cpp): a tab per page, its note, its rows by section
+ * with their keys. It only lists them: the keys can't be changed here. */
 export function ShortcutsDialog({ layout, context, works, onClose }: ShortcutsProps) {
   const { t, i18n } = useTranslation();
   const tr = (text: string) => orcaText(layout, text, i18n.language);

@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import type { WorkspaceObject } from '../../farm/workspace/api';
 import { draftHistory, type DraftHistory } from '../../farm/workspace/draft';
 import { editMenu, type MenuActions, type MenuState } from '../../farm/workspace/menuBar';
-import { instanceMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
+import { instanceMenu, multiMenu, objectMenu, partMenu } from '../../farm/workspace/menus';
 import { type ObjectOp, addedItems, nextNewId, withObjectOps } from '../../farm/workspace/objectOps';
 import { type Box2, type Pt, convexHull, emptyCells, hullContains, nearestEmptyCell, pastePlacements } from '../../farm/workspace/paste';
 
@@ -137,6 +137,32 @@ describe('the menus', () => {
     expect(axes).toEqual([0, 1, 2, 1]);
     // without the action: greyed, as before
     expect(objectMenu(tr, 'Del', true, base).find((i) => i.label === 'Transform')).toEqual({ label: 'Transform', submenu: true });
+  });
+
+  it("gives the object menu's Center and Drop their moves, greyed when there is none to make", () => {
+    const calls: string[] = [];
+    const items = objectMenu(tr, 'Del', true, { ...base, center: () => calls.push('center'), drop: () => calls.push('drop') });
+    items.find((i) => i.label === 'Center')!.onClick!();
+    items.find((i) => i.label === 'Drop')!.onClick!();
+    expect(calls).toEqual(['center', 'drop']);
+    const none = objectMenu(tr, 'Del', true, base);
+    expect([none.find((i) => i.label === 'Center')?.onClick, none.find((i) => i.label === 'Drop')?.onClick]).toEqual([undefined, undefined]);
+  });
+
+  it('gives Copy / Paste Process Settings their actions in the object, part and multi-selection menus', () => {
+    const calls: string[] = [];
+    const settings = { copySettings: () => calls.push('copy'), pasteSettings: () => calls.push('paste') };
+    const pick = (items: { label: string; onClick?: () => void }[], label: string) => items.find((i) => i.label === label)!;
+    const obj = objectMenu(tr, 'Del', true, { ...base, ...settings });
+    pick(obj, 'Copy Process Settings').onClick!();
+    pick(obj, 'Paste Process Settings').onClick!();
+    const part = partMenu(tr, 'Del', { select: () => {}, zoom: () => {}, settings: () => {}, ...settings });
+    pick(part, 'Paste Process Settings').onClick!();
+    const multi = multiMenu(tr, 'Del', true, { zoom: () => {}, deselect: () => {}, pasteSettings: settings.pasteSettings });
+    expect(pick(multi, 'Copy Process Settings').onClick).toBeUndefined(); // Copy takes one object or part
+    pick(multi, 'Paste Process Settings').onClick!();
+    expect(calls).toEqual(['copy', 'paste', 'paste', 'paste']);
+    expect(pick(objectMenu(tr, 'Del', true, base), 'Paste Process Settings').onClick).toBeUndefined();
   });
 
   it("gives an instance's Set as An Individual Object its action", () => {
