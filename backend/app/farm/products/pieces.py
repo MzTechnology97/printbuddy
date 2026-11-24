@@ -670,9 +670,10 @@ async def set_product_piece(project_id: int, data: ProductPieceIn, db: AsyncSess
             raise HTTPException(422, "Name the piece")
         shape = next((s for s in own.shapes if s.name.lower() == name.lower()), None)
         if shape is not None:
-            # Generic CAD names ("Assemblaggio") are shared by unrelated pieces: reuse only the same geometry.
+            # Generic CAD names ("Assemblaggio") are shared by unrelated pieces: reuse only the same geometry,
+            # or a name whose piece is in none of the product's 3MFs any more (an older version, now excluded).
             fp = next((y.fingerprint for y in yields if measured(y.fingerprint)), None)
-            if not fits_shape(fp, shape.fingerprints or None):
+            if not fits_shape(fp, shape.fingerprints or None) and shape.id in await _product_shapes(db, project_id):
                 raise HTTPException(409, f"«{shape.name}» is already another piece: give this one its own name")
         else:
             shape = FarmShape(name=name, project_id=project_id, fingerprints=[])
