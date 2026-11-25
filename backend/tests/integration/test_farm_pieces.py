@@ -664,3 +664,38 @@ async def test_saving_a_piece_reuses_a_shape_by_name_only_with_the_same_geometry
     own = await save(gutters, piece)  # another product: its own "Assemblaggio", even with the same geometry
     assert own.status_code == 200
     assert own.json()["shape_id"] != first.json()["shape_id"]
+
+
+async def test_a_name_left_only_in_an_excluded_3mf_can_be_given_to_the_new_version(async_client, tmp_path):
+    """The old version's 3MF is excluded: its piece's name goes to the new geometry instead of a 409."""
+    nas = tmp_path / "nas"
+    make_mesh_project(nas / "Tray" / "old.3mf", {1: [("Corpo1", box(10, 20, 5), None)]})
+    make_mesh_project(nas / "Tray" / "new.3mf", {1: [("Corpo1 v2", box(5, 5, 40), None)]})
+    folder = await add_external(async_client, nas)
+    await async_client.put(f"{API}/library/folders/{folder['id']}", json={"scan_interval_seconds": 0})
+    await scan(async_client, folder)
+    files = {
+        Path(f["path"]).name: f["library_file_id"] for f in (await async_client.get(f"{API}/library/files")).json()
+    }
+    fid = (await async_client.get(f"/api/v1/library/files/{files['old.3mf']}")).json()["folder_id"]
+    pid = (await async_client.post(f"{API}/products", json={"name": "Tray"})).json()["project_id"]
+    await async_client.put(f"{API}/products/{pid}/folders/{fid}", json={"linked": True})
+    pieces = {p["names"][0]: p for p in (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]}
+
+    async def save(piece):
+        return await async_client.put(
+            f"{API}/products/{pid}/pieces",
+            json={"yield_ids": piece["yield_ids"], "quantity": 1, "shape_name": "Corpo1"},
+        )
+
+    old = await save(pieces["Corpo1"])
+    assert old.status_code == 200, old.text
+    assert (await save(pieces["Corpo1 v2"])).status_code == 409  # the old version is still in the product
+
+    r = await async_client.put(f"{API}/products/{pid}/files/{files['old.3mf']}", json={"excluded": True})
+    assert r.status_code == 200, r.text
+    new = await save(pieces["Corpo1 v2"])
+    assert new.status_code == 200, new.text
+    assert new.json()["shape_id"] == old.json()["shape_id"]
+    [piece] = (await async_client.get(f"{API}/products/{pid}/pieces")).json()["pieces"]
+    assert (piece["shape"], piece["quantity"]) == ("Corpo1", 1)
